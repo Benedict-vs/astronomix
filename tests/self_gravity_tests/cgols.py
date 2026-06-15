@@ -39,12 +39,18 @@ from astronomix.option_classes.simulation_config import (
     FINITE_DIFFERENCE,
     OPEN_BOUNDARY,
     PALLAS,
+    PERIODIC_BOUNDARY,
+    RK4_LSRK,
     SIMPLE_SOURCE_TERM,
     BoundarySettings,
     BoundarySettings1D,
     StaticFloatVector,
     StaticIntVector,
     finalize_config,
+)
+from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CGOLSWindConfig,
+    CGOLSWindParams,
 )
 
 jax.config.update("jax_enable_x64", False)
@@ -113,6 +119,46 @@ gamma = 5 / 3
 # (~7e-70) and m_p_code (~8e-64) both underflow to 0.0 in float32, which turns
 # T = P * mu * m_p_code / (rho * k_B_code) into 0/0 = NaN. Their ratio does not.
 T_factor = (mu * m_p / k_B * code_units.code_velocity**2).to(u.K).value
+
+
+# ---------------------------------------------------------------------------
+# CGOLS central starburst wind (Chevalier & Clegg 1985 feedback)
+# ---------------------------------------------------------------------------
+# Schneider & Robertson 2018, Section 2: mass and thermal energy are injected
+# at uniform volumetric rates into a 300 pc sphere at the galaxy center, with
+#   Mdot = beta * SFR              and   Edot = alpha * 3e41 erg/s * SFR.
+# Low state (SFR = 5 Msun/yr, beta = 0.3, alpha = 1.0):
+#   Mdot = 1.5 Msun/yr, Edot = 1.5e42 erg/s.
+# High state (SFR = 20 Msun/yr, beta = 0.6, alpha = 0.9):
+#   Mdot = 12 Msun/yr,  Edot = 5.4e42 erg/s.
+# Schedule: no feedback for the first 5 Myr (equilibration), then the low
+# state, a 5 Myr linear ramp up, 30 Myr in the high state, a 5 Myr ramp back
+# down, and the low state for the remaining 30 Myr (75 Myr total).
+def build_cgols_wind_params():
+    mdot_to_code = lambda x: (x * u.M_sun / u.yr).to(
+        code_units.code_mass / code_units.code_time
+    ).value
+    edot_to_code = lambda x: (x * u.erg / u.s).to(
+        code_units.code_energy / code_units.code_time
+    ).value
+    myr_to_code = (1 * u.Myr).to(code_units.code_time).value
+
+    mdot_low, mdot_high = mdot_to_code(1.5), mdot_to_code(12.0)
+    edot_low, edot_high = edot_to_code(1.5e42), edot_to_code(5.4e42)
+
+    # The near-duplicate knot at 5 Myr turns feedback on as a step; all other
+    # transitions are the paper's 5 Myr linear ramps via interpolation.
+    knot_times_myr = jnp.array([0.0, 4.999, 5.0, 10.0, 40.0, 45.0])
+    return CGOLSWindParams(
+        injection_radius=(300 * u.pc).to(code_units.code_length).value,
+        schedule_times=knot_times_myr * myr_to_code,
+        schedule_mass_rates=jnp.array(
+            [0.0, 0.0, mdot_low, mdot_high, mdot_high, mdot_low]
+        ),
+        schedule_energy_rates=jnp.array(
+            [0.0, 0.0, edot_low, edot_high, edot_high, edot_low]
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -207,15 +253,12 @@ def _gaussian_smooth_3d(field, sigma):
 # ---------------------------------------------------------------------------
 # Initial-condition build
 # ---------------------------------------------------------------------------
-def build_initial_conditions():
-    """Build the simulation IC and return the four objects time_integration needs.
+def build_config():
+    """Build the SimulationConfig + registered_variables.
 
-    Memory layout: at any moment only a handful of 3D fields are alive on the GPU.
-    Intermediates (cutoff, Sigma, exp_factor, bracket, Phi_disk_sph, Phi_sph, the
-    pressure components, the pressure gradients, ...) are deleted as soon as
-    their last consumer is done. The 3D Phi_disk / Phi_halo arrays are never
-    materialised - the rotation-curve diagnostic is computed on a 1D midplane
-    line instead.
+    Cheap: no 3D IC fields are materialised here. Factored out of
+    `build_initial_conditions` so post-processing scripts (e.g. cgols_analyse.py)
+    can reconstruct the grid/config without re-running the full IC build.
     """
     # ---- Grid / box ----
     bx_size_x = 10 * u.kiloparsec
@@ -233,6 +276,7 @@ def build_initial_conditions():
         memory_analysis=True,
         geometry=CARTESIAN,
         solver_mode=FINITE_DIFFERENCE,
+        time_integrator=RK4_LSRK,
         backend=PALLAS,
         pallas_block_shape=(4, 4, 8),
         pallas_use_triton=True,
@@ -244,13 +288,36 @@ def build_initial_conditions():
         self_gravity_version=SIMPLE_SOURCE_TERM,
         progress_bar=True,
         boundary_settings=BoundarySettings(
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
+            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
+            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
+            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
         ),
         external_potential=True,
         donate_state=True,
+        cgols_wind_config=CGOLSWindConfig(cgols_wind=True),
     )
+    registered_variables = get_registered_variables(config)
+    return config, registered_variables
+
+
+def build_initial_conditions():
+    """Build the simulation IC and return the four objects time_integration needs.
+
+    Memory layout: at any moment only a handful of 3D fields are alive on the GPU.
+    Intermediates (cutoff, Sigma, exp_factor, bracket, Phi_disk_sph, Phi_sph, the
+    pressure components, the pressure gradients, ...) are deleted as soon as
+    their last consumer is done. The 3D Phi_disk / Phi_halo arrays are never
+    materialised - the rotation-curve diagnostic is computed on a 1D midplane
+    line instead.
+    """
+    config, registered_variables = build_config()
+    L_x = config.box_size.x
+    L_y = config.box_size.y
+    L_z = config.box_size.z
+    dim_x = config.num_cells.x
+    dim_y = config.num_cells.y
+    dim_z = config.num_cells.z
+
     helper_data = get_helper_data(config)
     centers = helper_data.geometric_centers  # shape (dim_x, dim_y, dim_z, 3)
 
@@ -508,9 +575,10 @@ def build_initial_conditions():
         # minimum_density=1e-3,
         # minimum_pressure=1e-3,
         gravitational_potential=Phi_total,
+        cgols_wind_params=build_cgols_wind_params(),
     )
-
-    registered_variables = get_registered_variables(config)
+    
+    jnp.save("cgols_initial_potential.npy", Phi_total)
 
     initial_state = construct_primitive_state(
         config=config,
@@ -538,6 +606,21 @@ def build_initial_conditions():
 
     return initial_state, config, params, registered_variables
 
+def load_initial_conditions():
+    """Load the initial state and config from disk, for post-processing without re-running the IC build."""
+    config, registered_variables = build_config()
+    initial_state = jnp.load("cgols_initial_state.npy")
+    config = finalize_config(config, initial_state.shape)
+    Phi_total = jnp.load("cgols_initial_potential.npy")
+    params = SimulationParams(
+        t_end=TOTAL_TIME.to(code_units.code_time).value,
+        C_cfl=0.8,
+        gamma=gamma,
+        gravitational_potential=Phi_total,
+        cgols_wind_params=build_cgols_wind_params(),
+    )
+    return initial_state, config, params, registered_variables
+    
 
 # ---------------------------------------------------------------------------
 # Post-simulation analysis
@@ -586,16 +669,21 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
 
     # ---- Static-equilibrium check: compare the final state to the initial state ----
     def density_temperature_profiles(state):
-        """Return (n_midplane, n_zaxis, T_midplane, T_zaxis) for a primitive state."""
+        """Return (n_midplane, n_zaxis, T_midplane, T_zaxis) for a primitive state.
+
+        Slice the 1-D midplane / z-axis lines out of rho and P *first*, then derive
+        n and T on those lines, so the full-3D T and n arrays are never materialised.
+        """
         rho = state[registered_variables.density_index]
         P = state[registered_variables.pressure_index]
-        T = P / rho * T_factor
-        n = rho * code_density_cgs / (mu * m_p_cgs)
+        rho_mid, rho_z = rho[mid_x:, mid_y, mid_z], rho[mid_x, mid_y, mid_z:]
+        P_mid, P_z = P[mid_x:, mid_y, mid_z], P[mid_x, mid_y, mid_z:]
+        n_factor = code_density_cgs / (mu * m_p_cgs)
         return (
-            n[mid_x:, mid_y, mid_z],
-            n[mid_x, mid_y, mid_z:],
-            T[mid_x:, mid_y, mid_z],
-            T[mid_x, mid_y, mid_z:],
+            rho_mid * n_factor,
+            rho_z * n_factor,
+            P_mid / rho_mid * T_factor,
+            P_z / rho_z * T_factor,
         )
 
     n_mid_f, n_z_f, T_mid_f, T_z_f = density_temperature_profiles(final_state)
@@ -857,13 +945,22 @@ def cooling_lambda_cgs(T):
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
-initial_state, config, params, registered_variables = build_initial_conditions()
+if __name__ == "__main__":
+    
+    # initial_state, config, params, registered_variables = build_initial_conditions()
 
-final_state = time_integration(initial_state, config, params, registered_variables)
+    # Save BEFORE integration: donate_state=True consumes the initial buffer in-place,
+    # so this device->host copy must happen while the buffer is still valid.
+    # jnp.save("cgols_initial_state.npy", initial_state)
+    
+    initial_state, config, params, registered_variables = load_initial_conditions()
 
-# Persist the states so plots can be iterated on without re-running the simulation:
-#   loaded = np.load("cgols_final_state.npy")
-# jnp.save("cgols_initial_state.npy", initial_state)
-#jnp.save("cgols_final_state.npy", final_state)
+    final_state = time_integration(initial_state, config, params, registered_variables)
+    jnp.save("cgols_final_state.npy", final_state)
 
-analyse_results(final_state, config, registered_variables)
+    # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
+    # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.
+    # print(
+    #     "Saved cgols_initial_state.npy / cgols_final_state.npy. "
+    #     "Run `python cgols_analyse.py` to produce the figures."
+    # )

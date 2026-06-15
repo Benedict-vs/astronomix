@@ -120,6 +120,10 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
             needs_geom_centers = True
             needs_r = True
 
+    # CGOLS central starburst wind: needs the distance to the box center.
+    if config.cgols_wind_config.cgols_wind:
+        needs_r = True
+
     # Cosmic-ray diffusive shock acceleration.
     if config.cosmic_ray_config.diffusive_shock_acceleration:
         needs_geom_centers = True

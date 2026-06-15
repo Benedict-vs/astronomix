@@ -6,6 +6,7 @@ from astronomix._modules._cooling.cooling_options import CoolingParams
 from astronomix._modules._cosmic_rays.cosmic_ray_options import CosmicRayParams
 from astronomix._modules._neural_net_force._neural_net_force_options import NeuralNetForceParams
 from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
+from astronomix._modules._cgols_wind.cgols_wind_options import CGOLSWindParams
 from astronomix._modules._turbulent_forcing._turbulent_forcing_options import TurbulentForcingParams
 
 class FixedBoundaryState1D(NamedTuple):
@@ -85,6 +86,9 @@ class SimulationParams(NamedTuple):
 
     #: The parameters of the stellar wind module.
     wind_params: WindParams = WindParams()
+
+    #: The parameters of the CGOLS-style central starburst wind module.
+    cgols_wind_params: CGOLSWindParams = CGOLSWindParams()
 
     #: Cosmic ray parameters
     cosmic_ray_params: CosmicRayParams = CosmicRayParams()

@@ -463,7 +463,7 @@ def _time_integration(
         elif config.solver_mode == FINITE_DIFFERENCE:
             primitive_state = _evolve_state_fd(
                 primitive_state, dt, params.gamma, config, params,
-                helper_data_pad, registered_variables,
+                helper_data_pad, registered_variables, time,
             )
 
         return dt, (key, primitive_state)

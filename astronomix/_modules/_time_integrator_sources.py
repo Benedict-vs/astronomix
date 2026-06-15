@@ -7,6 +7,7 @@ from astronomix._modules._cooling._simple_mixing_cooling import update_pressure_
 from astronomix._modules._cooling.cooling_options import SIMPLE_MIXING_LAYER_COOLING
 from astronomix._modules._gravity._gravity import _compute_total_potential, _fd_gravity_source, _gravitational_source_term_along_axis
 from astronomix._modules._stellar_wind.stellar_wind import _wind_ei3D_source
+from astronomix._modules._cgols_wind._cgols_wind import _cgols_wind_source
 from astronomix._modules._viscosity._viscosity import fd_viscosity_source
 from astronomix.data_classes.simulation_helper_data import HelperData
 from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE, FINITE_VOLUME, STATE_TYPE, SimulationConfig
@@ -35,6 +36,7 @@ def _time_integrator_sources(
     params: SimulationParams,
     helper_data: HelperData,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, Float[Array, ""]] = 0.0,
 ) -> STATE_TYPE:
     """
     Compute the physics source terms for the given **conserved** state.
@@ -46,6 +48,8 @@ def _time_integrator_sources(
         params: The simulation parameters.
         helper_data: The helper data.
         registered_variables: The registered variables.
+        current_time: The current simulation time (start-of-step), used by
+            modules with time-dependent sources (CGOLS wind schedule).
     Returns:
         The physics source terms for the conserved state.
     """
@@ -83,6 +87,17 @@ def _time_integrator_sources(
                 config.wind_config.num_injection_cells,
                 registered_variables,
             )
+        )
+
+    if config.cgols_wind_config.cgols_wind and config.solver_mode == FINITE_DIFFERENCE:
+        S += _cgols_wind_source(
+            params.cgols_wind_params,
+            conserved_state,
+            dt,
+            current_time,
+            config,
+            helper_data,
+            registered_variables,
         )
 
     if config.cooling_config.cooling and config.solver_mode == FINITE_DIFFERENCE:

@@ -55,6 +55,7 @@ def _ssprk4_with_ct(
     helper_data: HelperData,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, jnp.ndarray] = 0.0,
 ):
     """
     Integrates the MHD equations for one time step using a 5-stage, 4th-order
@@ -183,6 +184,7 @@ def _ssprk4_with_ct(
             params,
             helper_data,
             registered_variables,
+            current_time,
         )
 
         return rhs_q, rhs_bx, rhs_by, rhs_bz
@@ -249,6 +251,7 @@ def _hydro_step_rhs(
     grid_spacing,
     helper_data,
     density_fluxes_needed: bool,
+    current_time=0.0,
 ):
     """RHS for one hydro WENO time-step stage (excluding RK coefficient logic).
 
@@ -341,6 +344,7 @@ def _hydro_step_rhs(
         params,
         helper_data,
         registered_variables,
+        current_time,
     )
 
     return rhs_q
@@ -356,6 +360,7 @@ def _ssprk4_hydro(
     helper_data, # Assuming HelperData type
     config, # Assuming SimulationConfig type
     registered_variables: RegisteredVariables,
+    current_time: Union[float, jnp.ndarray] = 0.0,
 ):
     """
     Integrates the Euler (hydrodynamics) equations for one time step using a
@@ -397,6 +402,7 @@ def _ssprk4_hydro(
             grid_spacing=grid_spacing,
             helper_data=helper_data,
             density_fluxes_needed=density_fluxes_needed,
+            current_time=current_time,
         )
 
     def finalize(q):
@@ -421,6 +427,7 @@ def _lsrk4_hydro(
     helper_data,
     config,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, jnp.ndarray] = 0.0,
 ):
     """Carpenter-Kennedy 2N-storage, 5-stage, 4th-order low-storage RK4.
 
@@ -507,6 +514,7 @@ def _lsrk4_hydro(
                 params,
                 helper_data,
                 registered_variables,
+                current_time,
             )
             if sources is not None:
                 dq = dq + sources
@@ -523,6 +531,7 @@ def _lsrk4_hydro(
             grid_spacing=grid_spacing,
             helper_data=helper_data,
             density_fluxes_needed=density_fluxes_needed,
+            current_time=current_time,
         )
         return a_coef * dq + rhs
 
@@ -558,6 +567,7 @@ def _lsrk4_with_ct(
     helper_data: HelperData,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, jnp.ndarray] = 0.0,
 ):
     """Carpenter-Kennedy 2N-storage 5-stage 4th-order LSRK4 for MHD-CT.
 
@@ -694,6 +704,7 @@ def _lsrk4_with_ct(
                 params,
                 helper_data,
                 registered_variables,
+                current_time,
             )
             if sources is not None:
                 dq = dq + sources
@@ -708,6 +719,7 @@ def _lsrk4_with_ct(
                 params,
                 helper_data,
                 registered_variables,
+                current_time,
             )
             dq = a_coef * dq + rhs_q_for_phys
 

@@ -13,6 +13,7 @@ from astronomix._modules._neural_net_force._neural_net_force_options import (
     NeuralNetForceConfig,
 )
 from astronomix._modules._stellar_wind.stellar_wind_options import WindConfig
+from astronomix._modules._cgols_wind.cgols_wind_options import CGOLSWindConfig
 
 from jaxtyping import Array, Float
 
@@ -445,6 +446,9 @@ class SimulationConfig(NamedTuple):
 
     #: The configuration for the stellar wind module.
     wind_config: WindConfig = WindConfig()
+
+    #: The configuration for the CGOLS-style central starburst wind module.
+    cgols_wind_config: CGOLSWindConfig = CGOLSWindConfig()
 
     #: Cosmic rays
     cosmic_ray_config: CosmicRayConfig = CosmicRayConfig()

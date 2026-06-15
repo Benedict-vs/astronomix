@@ -42,8 +42,9 @@ def _evolve_state_fd(
     params: SimulationParams,
     helper_data: HelperData,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, Float[Array, ""]] = 0.0,
 ) -> STATE_TYPE:
-    
+
     if config.mhd:
         # NOTE: here we assume the magnetic field at interfaces
         # is stored in the last three indices of the state array
@@ -81,6 +82,7 @@ def _evolve_state_fd(
             helper_data,
             config,
             registered_variables,
+            current_time,
         )
 
         # back to primitive state
@@ -120,6 +122,7 @@ def _evolve_state_fd(
             helper_data,
             config,
             registered_variables,
+            current_time,
         )
 
         primitive_state = primitive_state_from_conserved(
