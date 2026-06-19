@@ -280,6 +280,11 @@ class SimulationConfig(NamedTuple):
     #: Activate progress bar
     progress_bar: bool = False
 
+    #: Print per-step diagnostic scalars (min density, min pressure, max |v|,
+    #: max temperature, NaN flag) via a host callback. Cheap (scalar reductions
+    #: only); use to localise in time which variable diverges first.
+    monitor_diagnostics: bool = False
+
     #: The number of dimensions of the simulation.
     dimensionality: int = 1
 

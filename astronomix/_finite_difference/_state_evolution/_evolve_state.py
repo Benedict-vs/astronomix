@@ -129,7 +129,9 @@ def _evolve_state_fd(
             conserved_state,
             gamma,
             config,
-            registered_variables
+            registered_variables,
+            params.minimum_density,
+            params.minimum_pressure,
         )
     
     # handle the boundary conditions

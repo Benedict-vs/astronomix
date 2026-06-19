@@ -45,7 +45,7 @@ from astronomix._snapshotting._snapshot_diagnostics import (
 from astronomix.time_stepping._utils import _pad, _unpad
 
 # progress bar
-from astronomix.time_stepping._progress_bar import _show_progress
+from astronomix.time_stepping._progress_bar import _show_diagnostics, _show_progress
 
 # generic time-integration loop driver
 from astronomix.time_stepping._time_loop import (
@@ -559,6 +559,41 @@ def _time_integration(
 
     initial_loop_state = (jax.random.key(config.random_seed), primitive_state)
 
+    def _diagnostic_monitor(t, state):
+        """Per-step diagnostic: reduce on-device to scalars, offload to host.
+
+        Only scalars cross to the host (never the full state). The temperature
+        proxy is the code-unit ``P / rho`` (∝ T); ``has_nan`` flags the first
+        non-finite value anywhere in the state.
+        """
+        _, prim = state
+        rho = prim[registered_variables.density_index]
+        min_density = jnp.min(rho)
+
+        if hasattr(registered_variables, "pressure_index"):
+            pressure = prim[registered_variables.pressure_index]
+            min_pressure = jnp.min(pressure)
+            max_temperature = jnp.max(pressure / rho)
+        else:  # isothermal: no pressure variable
+            min_pressure = jnp.asarray(jnp.nan)
+            max_temperature = jnp.asarray(jnp.nan)
+
+        if config.dimensionality == 1:
+            v2 = prim[registered_variables.velocity_index] ** 2
+        else:
+            v2 = prim[registered_variables.velocity_index.x] ** 2
+            if config.dimensionality >= 2:
+                v2 = v2 + prim[registered_variables.velocity_index.y] ** 2
+            if config.dimensionality == 3:
+                v2 = v2 + prim[registered_variables.velocity_index.z] ** 2
+        max_speed = jnp.sqrt(jnp.max(v2))
+
+        has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
+        jax.debug.callback(
+            _show_diagnostics, t, min_density, min_pressure,
+            max_speed, max_temperature, has_nan,
+        )
+
     _, loop_state, snapshot_store, num_iterations = integrate(
         initial_loop_state,
         _step,
@@ -568,6 +603,7 @@ def _time_integration(
         num_checkpoints=num_checkpoints,
         snapshots=snapshot_spec,
         progress=_show_progress if config.progress_bar else None,
+        monitor=_diagnostic_monitor if config.monitor_diagnostics else None,
     )
 
     _, primitive_state = loop_state

@@ -26,12 +26,24 @@ def primitive_state_from_conserved(
     gamma: Union[float, Float[Array, ""]],
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
+    minimum_density: Union[float, Float[Array, ""], None] = None,
+    minimum_pressure: Union[float, Float[Array, ""], None] = None,
 ) -> STATE_TYPE:
     """Convert the conserved state to the primitive state.
 
     Args:
         conserved_state: The conserved state.
         gamma: The adiabatic index of the fluid.
+        minimum_density: If given (and ``config.enforce_positivity``), floor the
+            recovered density at this value.
+        minimum_pressure: If given (and ``config.enforce_positivity``), floor the
+            recovered pressure at this value. This mirrors the positivity
+            enforcement already done in ``primitive_state_from_conserved_mhd`` /
+            ``..._isothermal``; the ideal-gas hydro path historically skipped it,
+            so a WENO undershoot could leave a negative pressure in the state and
+            NaN the next sound-speed evaluation. The floors are opt-in (defaults
+            ``None``) so call sites that must match a Pallas mirror bit-for-bit
+            are unaffected.
 
     Returns:
         The primitive state.
@@ -90,6 +102,22 @@ def primitive_state_from_conserved(
 
     # for all other variables assume that primitive and conserved state are the same
     # as for the mass density
+
+    # Enforce positivity of the recovered density/pressure when floors are
+    # supplied. The MHD/isothermal recovery variants already do this; the
+    # ideal-gas hydro path historically skipped it, so a WENO undershoot could
+    # leave a negative pressure in the state and NaN the next sound speed. Opt-in
+    # (floors default to None) so the reconstruction call sites that must match
+    # the Pallas mirror bit-for-bit are unaffected.
+    if config.enforce_positivity:
+        if minimum_density is not None:
+            primitive_state = primitive_state.at[registered_variables.density_index].set(
+                jnp.maximum(primitive_state[registered_variables.density_index], minimum_density)
+            )
+        if minimum_pressure is not None:
+            primitive_state = primitive_state.at[registered_variables.pressure_index].set(
+                jnp.maximum(primitive_state[registered_variables.pressure_index], minimum_pressure)
+            )
 
     return primitive_state
 

@@ -82,6 +82,7 @@ def integrate(
     num_checkpoints: Optional[int] = None,
     snapshots: Optional[SnapshotSpec] = None,
     progress: Optional[Callable] = None,
+    monitor: Optional[Callable] = None,
 ):
     """Run a time-integration loop.
 
@@ -95,6 +96,9 @@ def integrate(
         num_checkpoints: Checkpoint count for ``ADAPTIVE_CHECKPOINTED``.
         snapshots: A :class:`SnapshotSpec`, or ``None`` to disable collection.
         progress: ``progress(t, t_end)`` host callback, or ``None``.
+        monitor: ``monitor(t, state)`` traced per-step hook (computes its own
+            on-device reductions and offloads scalars via ``jax.debug.callback``
+            internally), or ``None``.
 
     Returns:
         ``(t, state, store, num_iterations)``.  ``store`` is the (possibly
@@ -139,6 +143,9 @@ def integrate(
 
         if progress is not None:
             jax.debug.callback(progress, t, t_end)
+
+        if monitor is not None:
+            monitor(t, state)
 
         if has_snap:
             return (t, state, idx, n_iter, store)

@@ -16,6 +16,13 @@ autocvd(num_gpus=1)
 # ruff: noqa: E402
 # =======================
 
+# At 512x512x1024 the compiled solver peaks at ~28.5 GB/device, which fits on a
+# 40 GB A100 but exceeds JAX's default 0.75 preallocation (~30 GB) once BFC
+# fragmentation is accounted for. Raise the fraction so a ~20 GB intermediate
+# buffer can be placed. setdefault lets a command-line override still win.
+import os
+os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -146,11 +153,17 @@ def build_cgols_wind_params():
     mdot_low, mdot_high = mdot_to_code(1.5), mdot_to_code(12.0)
     edot_low, edot_high = edot_to_code(1.5e42), edot_to_code(5.4e42)
 
-    # The near-duplicate knot at 5 Myr turns feedback on as a step; all other
-    # transitions are the paper's 5 Myr linear ramps via interpolation.
-    knot_times_myr = jnp.array([0.0, 4.999, 5.0, 10.0, 40.0, 45.0])
+    # Feedback turns on with a smooth 1 Myr ramp (5 -> 6 Myr) rather than a
+    # near-instantaneous step: the abrupt switch-on is a strong transient for
+    # the explicit scheme. All other transitions are the paper's 5 Myr linear
+    # ramps via interpolation.
+    knot_times_myr = jnp.array([0.0, 5.0, 6.0, 10.0, 40.0, 45.0])
     return CGOLSWindParams(
-        injection_radius=(300 * u.pc).to(code_units.code_length).value,
+        # 500 pc rather than the paper's 300 pc: spreading the same Mdot/Edot
+        # over a larger gain region lowers the injected energy density (and thus
+        # the peak temperature / sound speed), which relaxes the stiffness of
+        # the source and the CFL hit once feedback is on.
+        injection_radius=(500 * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
         schedule_mass_rates=jnp.array(
             [0.0, 0.0, mdot_low, mdot_high, mdot_high, mdot_low]
@@ -272,10 +285,16 @@ def build_config():
     dim_x = dim_y = 512
     dim_z = dim_x * 2
 
+    print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
+
     config = SimulationConfig(
         memory_analysis=True,
         geometry=CARTESIAN,
         solver_mode=FINITE_DIFFERENCE,
+        # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven shocks,
+        # but it carries one more full-state register and OOMs at 512x512x1024.
+        # Staying on the memory-lean 2N-storage RK4_LSRK and relying on the
+        # tighter CFL / larger injection radius / smoother onset for stability.
         time_integrator=RK4_LSRK,
         backend=PALLAS,
         pallas_block_shape=(4, 4, 8),
@@ -287,10 +306,11 @@ def build_config():
         self_gravity=False,
         self_gravity_version=SIMPLE_SOURCE_TERM,
         progress_bar=True,
+        monitor_diagnostics=True,
         boundary_settings=BoundarySettings(
-            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
-            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
-            BoundarySettings1D(left_boundary=PERIODIC_BOUNDARY, right_boundary=PERIODIC_BOUNDARY),
+            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
+            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
+            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
         ),
         external_potential=True,
         donate_state=True,
@@ -570,10 +590,16 @@ def build_initial_conditions():
 
     params = SimulationParams(
         t_end=t_end,
-        C_cfl=0.8,
+        # Keep the default 0.4: the non-SSP RK4_LSRK + the strong wind-driven
+        # shocks need the CFL margin once feedback is on. Running at 0.8 (2x the
+        # default) blew up ~47 Myr in - a flux overshoot into a near-vacuum cell
+        # ran |v| away faster than the rho/P floors could contain it.
+        C_cfl=0.4,
         gamma=gamma,
-        # minimum_density=1e-3,
-        # minimum_pressure=1e-3,
+        # See load_initial_conditions() for the rationale: floors ~2 orders below
+        # the ambient minimums, not the dynamically-zero 1e-14 default.
+        minimum_density=1e-4,
+        minimum_pressure=1e-5,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
@@ -614,8 +640,16 @@ def load_initial_conditions():
     Phi_total = jnp.load("cgols_initial_potential.npy")
     params = SimulationParams(
         t_end=TOTAL_TIME.to(code_units.code_time).value,
-        C_cfl=0.8,
+        # Default 0.4; see build_initial_conditions() - 0.8 blew up ~47 Myr in.
+        C_cfl=0.4,
         gamma=gamma,
+        # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
+        # min_P~3e-3). The 1e-14 default is dynamically zero: a wind-cavity cell
+        # floored to 1e-14 next to a 3e-3 neighbour is a ~1e11 pressure ratio,
+        # whose flux evacuates the cell in one step -> NaN. These floors cap that
+        # gradient while leaving the rarefied cavity room to form.
+        minimum_density=1e-4,
+        minimum_pressure=1e-5,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
