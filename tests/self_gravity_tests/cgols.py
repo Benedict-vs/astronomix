@@ -594,7 +594,7 @@ def build_initial_conditions():
         # shocks need the CFL margin once feedback is on. Running at 0.8 (2x the
         # default) blew up ~47 Myr in - a flux overshoot into a near-vacuum cell
         # ran |v| away faster than the rho/P floors could contain it.
-        C_cfl=0.4,
+        C_cfl=0.8,
         gamma=gamma,
         # See load_initial_conditions() for the rationale: floors ~2 orders below
         # the ambient minimums, not the dynamically-zero 1e-14 default.
@@ -641,7 +641,7 @@ def load_initial_conditions():
     params = SimulationParams(
         t_end=TOTAL_TIME.to(code_units.code_time).value,
         # Default 0.4; see build_initial_conditions() - 0.8 blew up ~47 Myr in.
-        C_cfl=0.4,
+        C_cfl=0.8,
         gamma=gamma,
         # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
         # min_P~3e-3). The 1e-14 default is dynamically zero: a wind-cavity cell
