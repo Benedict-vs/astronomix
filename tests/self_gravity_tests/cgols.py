@@ -342,6 +342,17 @@ def build_config():
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
         self_gravity=False,
         self_gravity_version=SIMPLE_SOURCE_TERM,
+        # Positivity backstops (Leonard's upstream work; both default OFF). These
+        # target the ~48 Myr blow-up directly: when a WENO overshoot drives a cell
+        # below the density floor, vacuum_rest zeros its momentum so the recovered
+        # velocity is 0 instead of momentum / rho_floor (the runaway that fed the
+        # crash), and nan_safe resets any non-finite cell to a valid floor state
+        # before it can propagate. Both are honoured by the PALLAS kernel. If this
+        # alone is not enough, try positivity_per_step_mode=POSITIVITY_REDISTRIBUTE
+        # (neighbour-averaging, gentler at strong shocks but not strictly
+        # mass-conserving).
+        positivity_vacuum_rest=True,
+        positivity_nan_safe=True,
         progress_bar=True,
         monitor_diagnostics=True,
         boundary_settings=BoundarySettings(

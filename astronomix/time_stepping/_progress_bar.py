@@ -2,12 +2,22 @@ import math
 import shutil
 
 
-def _show_diagnostics(t, min_density, min_pressure, max_speed, max_temperature, has_nan) -> None:
+def _show_diagnostics(
+    t, min_density, min_pressure, max_speed, max_temperature, has_nan,
+    fraction=None,
+) -> None:
     """Host-side per-step diagnostic line.
 
     Prints reduction scalars so a diverging run can be localised in time and by
     variable: which of density / pressure / speed / temperature degrades first,
     and when ``has_nan`` first trips.
+
+    When ``fraction`` (completion fraction in ``[0, 1]``) is given, a percentage
+    is prepended to the line. This is used when ``progress_bar`` and
+    ``monitor_diagnostics`` are both on: the diagnostics line and the separate
+    progress bar would otherwise fight over the same in-place status line (the
+    diagnostics, printed last each step, win and hide the bar), so instead of an
+    animated bar the completion percentage rides along on the diagnostics line.
 
     The line is rewritten in place (carriage return, padded to the terminal width)
     so successive steps update one status line instead of scrolling. The one
@@ -17,8 +27,18 @@ def _show_diagnostics(t, min_density, min_pressure, max_speed, max_temperature, 
     """
     nan = bool(has_nan)
     flag = "  <-- NaN/inf!" if nan else ""
+
+    # Optional completion percentage, shown in place of the progress bar. A
+    # diverged run produces a non-finite time; clamp so the readout stays sane
+    # and the real failure surfaces via the diagnostics / NaN flag instead.
+    pct = ""
+    if fraction is not None:
+        frac = float(fraction)
+        frac = 1.0 if not math.isfinite(frac) else min(max(frac, 0.0), 1.0)
+        pct = f"[{100 * frac:5.1f}%] "
+
     msg = (
-        f"[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
+        f"{pct}[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
         f"min_P={float(min_pressure):.3e}  max|v|={float(max_speed):.3e}  "
         f"max_T(code)={float(max_temperature):.3e}{flag}"
     )

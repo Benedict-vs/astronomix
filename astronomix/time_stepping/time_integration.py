@@ -639,38 +639,47 @@ def _integrate_core(
     else:
         raise ValueError("Unknown differentiation mode.")
 
-    initial_loop_state = (jax.random.key(config.random_seed), primitive_state)
-
     def _diagnostic_monitor(t, state):
-            """Per-step diagnostic: reduce on-device to scalars, offload to host.
+        """Per-step diagnostic: reduce on-device to scalars, offload to host.
 
-            Only scalars cross to the host (never the full state). The temperature
-            proxy is the code-unit ``P / rho`` (∝ T); ``has_nan`` flags the first
-            non-finite value anywhere in the state.
-            """
-            _, prim = state
-            rho = prim[registered_variables.density_index]
-            min_density = jnp.min(rho)
+        Only scalars cross to the host (never the full state). The temperature
+        proxy is the code-unit ``P / rho`` (∝ T); ``has_nan`` flags the first
+        non-finite value anywhere in the state.
+        """
+        prim = state.primitive_state
+        rho = prim[registered_variables.density_index]
+        min_density = jnp.min(rho)
 
-            if hasattr(registered_variables, "pressure_index"):
-                pressure = prim[registered_variables.pressure_index]
-                min_pressure = jnp.min(pressure)
-                max_temperature = jnp.max(pressure / rho)
-            else:  # isothermal: no pressure variable
-                min_pressure = jnp.asarray(jnp.nan)
-                max_temperature = jnp.asarray(jnp.nan)
+        if hasattr(registered_variables, "pressure_index"):
+            pressure = prim[registered_variables.pressure_index]
+            min_pressure = jnp.min(pressure)
+            max_temperature = jnp.max(pressure / rho)
+        else:  # isothermal: no pressure variable
+            min_pressure = jnp.asarray(jnp.nan)
+            max_temperature = jnp.asarray(jnp.nan)
 
-            if config.dimensionality == 1:
-                v2 = prim[registered_variables.velocity_index] ** 2
-            else:
-                v2 = prim[registered_variables.velocity_index.x] ** 2
-                if config.dimensionality >= 2:
-                    v2 = v2 + prim[registered_variables.velocity_index.y] ** 2
-                if config.dimensionality == 3:
-                    v2 = v2 + prim[registered_variables.velocity_index.z] ** 2
-            max_speed = jnp.sqrt(jnp.max(v2))
+        if config.dimensionality == 1:
+            v2 = prim[registered_variables.velocity_index] ** 2
+        else:
+            v2 = prim[registered_variables.velocity_index.x] ** 2
+            if config.dimensionality >= 2:
+                v2 = v2 + prim[registered_variables.velocity_index.y] ** 2
+            if config.dimensionality == 3:
+                v2 = v2 + prim[registered_variables.velocity_index.z] ** 2
+        max_speed = jnp.sqrt(jnp.max(v2))
 
-            has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
+        has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
+        # When the progress bar is also on, fold the completion fraction into the
+        # diagnostics line (matching the bar's t / t_end measure) so the
+        # percentage replaces the bar rather than fighting it for the in-place
+        # status line. With the bar off, show the diagnostics line on its own.
+        if config.progress_bar:
+            fraction = t / params.t_end
+            jax.debug.callback(
+                _show_diagnostics, t, min_density, min_pressure,
+                max_speed, max_temperature, has_nan, fraction,
+            )
+        else:
             jax.debug.callback(
                 _show_diagnostics, t, min_density, min_pressure,
                 max_speed, max_temperature, has_nan,
@@ -685,7 +694,15 @@ def _integrate_core(
         num_steps=num_steps,
         num_checkpoints=num_checkpoints,
         snapshots=snapshot_spec,
-        progress=_show_progress if config.progress_bar else None,
+        # The animated bar is suppressed when diagnostics are on: the diagnostics
+        # line carries the completion percentage instead (the two would otherwise
+        # overwrite each other on the same in-place status line). Diagnostics
+        # still work on their own when the progress bar is off.
+        progress=(
+            _show_progress
+            if config.progress_bar and not config.monitor_diagnostics
+            else None
+        ),
         monitor=_diagnostic_monitor if config.monitor_diagnostics else None,
     )
 

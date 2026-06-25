@@ -36,8 +36,25 @@ from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
 # run
 from astronomix.time_stepping.time_integration import time_integration
 
-# setup helpers (disk-checkpoint restart)
-from astronomix.setup_helpers import restart_from_latest_checkpoint
+# setup helpers (disk-checkpoint restart). The restart path depends on Orbax,
+# which is optional: if it is missing or incompatible with the installed JAX,
+# keep the base package importable (runs that don't use disk checkpointing,
+# e.g. host-offload snapshots, must not be blocked) and defer the failure to
+# the point of use with a clear message.
+try:
+    from astronomix.setup_helpers import restart_from_latest_checkpoint
+except (ImportError, AttributeError) as _orbax_exc:
+    # ImportError: orbax-checkpoint not installed. AttributeError: installed
+    # orbax references a JAX symbol the current JAX no longer exposes (version
+    # skew, e.g. jax.experimental.layout.DeviceLocalLayout on JAX 0.10+).
+    _orbax_import_error = _orbax_exc
+
+    def restart_from_latest_checkpoint(*_args, **_kwargs):
+        raise ImportError(
+            "restart_from_latest_checkpoint requires a working Orbax install "
+            "(orbax-checkpoint, compatible with the installed JAX). Original "
+            f"import error: {_orbax_import_error}"
+        )
 
 # units
 from astronomix.units import CodeUnits
