@@ -51,6 +51,8 @@ from astronomix.option_classes.simulation_config import (
     FINITE_DIFFERENCE,
     FINITE_VOLUME,
     FORWARDS,
+    NATIVE_JAX,
+    PALLAS,
     PERIODIC_BOUNDARY,
     PERIODIC_ROLL,
     BoundarySettings1D,
@@ -115,7 +117,7 @@ class _Problem(NamedTuple):
         return (self.c_s**2) * self.rho_B / self.gamma
 
 
-def _base_config(problem: _Problem, solver_mode: int):
+def _base_config(problem: _Problem, solver_mode: int, backend: int = NATIVE_JAX):
     config = SimulationConfig(
         solver_mode=solver_mode,
         geometry=CARTESIAN,
@@ -132,6 +134,9 @@ def _base_config(problem: _Problem, solver_mode: int):
             right_boundary=PERIODIC_BOUNDARY,
         ),
         return_snapshots=False,
+        backend=backend,
+        pallas_use_triton=True,
+        pallas_interpret=False,
     )
     params = SimulationParams(
         C_cfl=0.4,
@@ -175,8 +180,9 @@ def _forward_and_cost(rho_P0, v_P0, config, params, problem: _Problem):
 # -----------------------------------------------------------------------------
 # Single forward run to discover N (the actual number of timesteps).
 # -----------------------------------------------------------------------------
-def _measure_num_iterations(solver_mode: int, problem: _Problem) -> int:
-    config, params = _base_config(problem, solver_mode)
+def _measure_num_iterations(solver_mode: int, problem: _Problem,
+                            backend: int = NATIVE_JAX) -> int:
+    config, params = _base_config(problem, solver_mode, backend)
     config = config._replace(
         differentiation_mode=FORWARDS,
         return_snapshots=True,
@@ -204,10 +210,11 @@ def _measure_num_iterations(solver_mode: int, problem: _Problem) -> int:
 # Per-(config, c) gradient measurement.
 # -----------------------------------------------------------------------------
 def _measure_grad(
-    solver_mode: int, problem: _Problem, num_checkpoints: int, repeats: int
+    solver_mode: int, problem: _Problem, num_checkpoints: int, repeats: int,
+    backend: int = NATIVE_JAX,
 ):
     jax.clear_caches()
-    config, params = _base_config(problem, solver_mode)
+    config, params = _base_config(problem, solver_mode, backend)
     config = config._replace(
         differentiation_mode=BACKWARDS,
         num_checkpoints=num_checkpoints,
@@ -253,11 +260,18 @@ def _measure_grad(
 class CheckpointSpec(NamedTuple):
     label: str
     solver_mode: int
+    backend: int = NATIVE_JAX
 
 
+# Compare backends on the backward (reverse-mode AD) pass.  In BACKWARDS mode
+# the FD hydro WENO flux routes its backward through the native Pallas adjoint
+# kernel (see astronomix/_pallas_helpers.pallas_vjp_call), so FD (Pallas) runs
+# the whole reverse pass on the GPU instead of the slow native VJP.  FV (Pallas)
+# is left out of the comparison (the FV evolve backward is not the focus here).
 DEFAULT_CONFIGURATIONS = (
-    CheckpointSpec("FV", FINITE_VOLUME),
-    CheckpointSpec("FD", FINITE_DIFFERENCE),
+    CheckpointSpec("FD (JAX)", FINITE_DIFFERENCE, NATIVE_JAX),
+    CheckpointSpec("FD (Pallas)", FINITE_DIFFERENCE, PALLAS),
+    CheckpointSpec("FV (JAX)", FINITE_VOLUME, NATIVE_JAX),
 )
 
 
@@ -269,12 +283,14 @@ def run_sweep(
 ) -> dict:
     results = {}
     for spec in configurations:
-        print(f"\n=== {spec.label} (solver_mode={spec.solver_mode}) ===")
-        N_iters = _measure_num_iterations(spec.solver_mode, problem)
+        print(f"\n=== {spec.label} (solver_mode={spec.solver_mode}, "
+              f"backend={spec.backend}) ===")
+        N_iters = _measure_num_iterations(spec.solver_mode, problem, spec.backend)
         print(f"[{spec.label}] forward N = {N_iters} timesteps")
         rt_list, mem_list = [], []
         for c in checkpoint_counts:
-            mem, rt = _measure_grad(spec.solver_mode, problem, int(c), repeats=repeats)
+            mem, rt = _measure_grad(spec.solver_mode, problem, int(c),
+                                    repeats=repeats, backend=spec.backend)
             print(f"[{spec.label}] c={int(c):3d}: memory={mem:8.2f} MB, runtime={rt:6.3f}s")
             rt_list.append(rt)
             mem_list.append(mem)
@@ -291,12 +307,27 @@ def plot_results(results, figure_path):
     fig, axs = plt.subplots(1, 3, figsize=(16, 5))
     ax_rt, ax_recomp, ax_mem = axs
 
+    # Consistent backend colours across all figures: FD (JAX) light blue,
+    # FD (Pallas) violet, FV (JAX) orange.  FD (JAX) is a thick solid line / 'o',
+    # FD (Pallas) a thinner dashed line / 'x' drawn on top, so the two FD curves
+    # stay clearly distinguishable where they overlap.
+    def _style(label):
+        if label.startswith("FD"):
+            if "Pallas" in label:
+                return dict(color="darkviolet", linestyle="--", linewidth=1.8,
+                            marker="x", markersize=7, zorder=3)
+            return dict(color="cornflowerblue", linestyle="-", linewidth=3.0,
+                        marker="o", markersize=6, zorder=2)
+        return dict(color="tab:orange", linestyle="-", linewidth=2.2,
+                    marker="o", markersize=6, zorder=2)
+
     c_max_global = 0
     for label, data in results.items():
         c_arr = np.array(data["checkpoints"])
         c_max_global = max(c_max_global, int(c_arr.max()))
-        ax_rt.plot(c_arr, data["runtime_s"], marker="o", linewidth=1.5, label=label)
-        ax_mem.plot(c_arr, data["memory_MB"], marker="o", linewidth=1.5, label=label)
+        st = _style(label)
+        ax_rt.plot(c_arr, data["runtime_s"], label=label, **st)
+        ax_mem.plot(c_arr, data["memory_MB"], label=label, **st)
 
     N_values = {data["N_iters"] for data in results.values()}
     if len(N_values) != 1:

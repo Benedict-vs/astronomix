@@ -57,7 +57,7 @@ from astronomix import CARTESIAN
 from astronomix import get_helper_data, time_integration, get_registered_variables
 from astronomix.initial_condition_generation.construct_primitive_state import construct_primitive_state
 from astronomix.option_classes.simulation_config import (
-    BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME,
+    BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, NATIVE_JAX, PALLAS,
     OPEN_BOUNDARY, SimulationConfig, finalize_config,
     BoundarySettings1D,
 )
@@ -67,14 +67,36 @@ from astronomix.option_classes.simulation_params import SimulationParams
 # ==============================================================================
 # 1. Configuration and parameterized IC
 # ==============================================================================
-def make_config_and_params(N, L, t_end, num_timesteps, solver_mode):
-    """1D open-boundary config with a fixed timestep so J(theta) has no CFL kinks."""
+def make_config_and_params(N, L, t_end, num_timesteps, solver_mode, backend=NATIVE_JAX):
+    """1D open-boundary config with a fixed timestep so J(theta) has no CFL kinks.
+
+    A fixed dt is deliberate: under adaptive CFL the step count n(theta) =
+    ceil(t_end / dt(theta)) is piecewise-constant in theta, so crossing a
+    threshold injects an O(dt) jump into J(theta).  The AD gradient is unaffected
+    (it differentiates the smooth branch), but the finite-difference baseline
+    cannot tell such a jump from a real derivative, so the AD-vs-FD agreement
+    degrades by 1-3 orders of magnitude and the random-direction arbitration no
+    longer reaches round-off.  Fixing dt isolates the limiter / Riemann
+    sub-gradient -- the only non-smoothness this test is meant to probe.
+
+    With ``backend=PALLAS`` the FD forward runs the Pallas WENO kernel and the
+    backward runs the native Pallas adjoint (the kernel transposes the periodic
+    custom_roll stencil, correct for these ghost-cell boundaries too).  Block
+    (4,1,1) divides the 1D shape.  At the shock the WENO gradient is
+    FP-ill-conditioned, so FD (Pallas) AD can differ from FD (JAX) by a
+    sub-gradient amount -- the kink-immune one-sided / random-direction checks
+    below arbitrate.
+    """
     config = SimulationConfig(
         solver_mode=solver_mode,
         geometry=CARTESIAN,
         progress_bar=False,
         self_gravity=False,
         differentiation_mode=BACKWARDS,
+        backend=backend,
+        pallas_block_shape=(4, 1, 1),
+        pallas_use_triton=True,
+        pallas_interpret=False,
         mhd=False,
         dimensionality=1,
         box_size=L,
@@ -229,15 +251,16 @@ def run_shock_tube_sensitivity_test():
     n_random_dirs = 4
 
     backends = [
-        ("Finite Volume",     FINITE_VOLUME),
-        ("Finite Difference", FINITE_DIFFERENCE),
+        ("FD (JAX)",    FINITE_DIFFERENCE, NATIVE_JAX),
+        ("FD (Pallas)", FINITE_DIFFERENCE, PALLAS),
+        ("FV (JAX)",    FINITE_VOLUME,     NATIVE_JAX),
     ]
 
     results = {}
 
-    for label, solver_mode in backends:
+    for label, solver_mode, backend in backends:
         print(f"\n=== {label} ===")
-        config, params = make_config_and_params(N, L, t_end, num_timesteps, solver_mode)
+        config, params = make_config_and_params(N, L, t_end, num_timesteps, solver_mode, backend=backend)
         registered_variables = get_registered_variables(config)
         helper_data = get_helper_data(config)
 
@@ -311,7 +334,7 @@ def run_shock_tube_sensitivity_test():
     h_values_plot = [h for h in (1e-4, 1e-6) if h in h_values]
     cmap = plt.cm.viridis(np.linspace(0.2, 0.8, len(h_values_plot)))
     tiny = 1e-30
-    for col, (label, _) in enumerate(backends):
+    for col, (label, _, _) in enumerate(backends):
         g_ad = results[label]["g_ad"]
 
         # For each h, build the per-parameter min-one-sided gradient: pick
@@ -369,19 +392,30 @@ def run_shock_tube_sensitivity_test():
     # makes that scaling explicit; deviation from it would indicate kink
     # contamination or an AD bug.
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    backend_colors = {label: f"C{i}" for i, (label, _) in enumerate(backends)}
+
+    # Distinct backend colours (matches the other figures): FD (JAX) light blue,
+    # FD (Pallas) violet, FV (JAX) orange; FD (JAX) thick solid, FD (Pallas)
+    # thinner dashed on top, so the two FD curves stay visible on overlap.
+    def _stp(label):
+        if label.startswith('FD'):
+            if 'Pallas' in label:
+                return dict(color='darkviolet', linestyle='--', linewidth=1.8,
+                            marker='x', markersize=8, zorder=3)
+            return dict(color='cornflowerblue', linestyle='-', linewidth=3.0,
+                        marker='^', markersize=7, zorder=2)
+        return dict(color='tab:orange', linestyle='-', linewidth=2.2,
+                    marker='^', markersize=7, zorder=2)
+
     h_arr = np.array(h_values, dtype=float)
-    for label, _ in backends:
-        c = backend_colors[label]
+    for label, _, _ in backends:
         ys_min = np.array([results[label]["rel_errs_minside"][h] for h in h_values])
-        ax.loglog(h_arr, ys_min, marker='^', linewidth=2,
-                  color=c, label=f"{label}: min one-sided FD")
+        ax.loglog(h_arr, ys_min, label=f"{label}: min one-sided FD", **_stp(label))
 
     # Reference O(h) (slope +1) truncation line, anchored at the tightest
     # min-one-sided value across backends to lie just under the data.
     h_anchor = min(h_values)
     y_anchor = min(results[label]["rel_errs_minside"][h_anchor]
-                   for label, _ in backends)
+                   for label, _, _ in backends)
     ax.loglog(h_arr, y_anchor * (h_arr / h_anchor),
               linestyle='--', color='gray', linewidth=1.5,
               label=r'$\propto h$ (one-sided FD truncation)')
@@ -403,7 +437,7 @@ def run_shock_tube_sensitivity_test():
     if len(backends) == 1:
         axs = [axs]
     dir_cmap = plt.cm.plasma(np.linspace(0.15, 0.85, n_random_dirs))
-    for ax, (label, _) in zip(axs, backends):
+    for ax, (label, _, _) in zip(axs, backends):
         for k, row in enumerate(results[label]["dir_rows"]):
             ys = [row["rel"][h] for h in dir_h_values]
             ax.loglog(dir_h_values, ys, marker='o', color=dir_cmap[k],
@@ -429,18 +463,18 @@ def run_shock_tube_sensitivity_test():
     # ----- Summary -------------------------------------------------------------
     print(f"\n{'-'*60}\nSummary\n{'-'*60}")
     print("Per-axis (axis-aligned) test, central FD:")
-    for label, _ in backends:
+    for label, _, _ in backends:
         best_h = min(results[label]["rel_errs"], key=results[label]["rel_errs"].get)
         print(f"  {label:<22s}: best h = {best_h:.0e}, "
               f"||g_AD - g_FD||/||g_AD|| = {results[label]['rel_errs'][best_h]:.3e}")
     print("Per-axis (axis-aligned) test, min-one-sided FD (kink-immune):")
-    for label, _ in backends:
+    for label, _, _ in backends:
         re = results[label]["rel_errs_minside"]
         best_h = min(re, key=re.get)
         print(f"  {label:<22s}: best h = {best_h:.0e}, "
               f"||min-side residual||/||g_AD|| = {re[best_h]:.3e}")
     print("\nRandom-direction directional derivative (smooth-slice arbitration):")
-    for label, _ in backends:
+    for label, _, _ in backends:
         best_per_dir = [min(row["rel"].values())
                         for row in results[label]["dir_rows"]]
         print(f"  {label:<22s}: best-of-h rel. err per direction "

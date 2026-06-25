@@ -17,6 +17,8 @@ from astronomix.option_classes.simulation_config import (
     CARTESIAN,
     CYLINDRICAL,
     SPHERICAL,
+    ON_DEVICE,
+    TO_DISK,
 )
 
 # initialization functions
@@ -33,6 +35,9 @@ from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
 
 # run
 from astronomix.time_stepping.time_integration import time_integration
+
+# setup helpers (disk-checkpoint restart)
+from astronomix.setup_helpers import restart_from_latest_checkpoint
 
 # units
 from astronomix.units import CodeUnits

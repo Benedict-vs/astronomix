@@ -41,9 +41,22 @@ class SimulationParams(NamedTuple):
     #: ghost-cell-extended shape of a state field internally.
     gravitational_potential: jnp.array = jnp.array([])
 
-    #: Dynamic or kinematic viscosity depending 
+    #: Dynamic or kinematic viscosity depending
     #: on the viscosity_type in SimulationConfig.
     viscosity: float = 0.0
+
+    #: Constant thermal conductivity kappa in the conductive energy
+    #: source div(kappa grad T) (config.thermal_conduction). T is taken
+    #: from the ideal-gas relation T = p / rho (code units, R = 1).
+    #: NOTE: CURRENTLY ONLY IMPLEMENTED FOR FINITE DIFFERENCE MODE.
+    thermal_conductivity: float = 0.0
+
+    #: Wall temperatures for isothermal (Dirichlet) plates used by the
+    #: thermal-conduction module along config.conduction_wall_axis.
+    #: ``_low`` is the low-index side of that spatial axis, ``_high`` the
+    #: high-index side. Only used when config.conduction_isothermal_walls.
+    wall_temperature_low: float = 1.0
+    wall_temperature_high: float = 1.0
 
     #: The isothermal sound speed used when
     #: config.equation_of_state is ISOTHERMAL.
@@ -66,8 +79,19 @@ class SimulationParams(NamedTuple):
     #: config.enforce_positivity IS TRUE.
     minimum_pressure: float = 1e-14
 
+    #: Velocity ceiling applied to cells fixed by the REDISTRIBUTE positivity
+    #: mode (mirrors HOW-MHD ``velpmx1``). Only used when a positivity mode is
+    #: ``POSITIVITY_REDISTRIBUTE``.
+    positivity_max_velocity: float = 50.0
+
     #: The maximum time step.
     dt_max: float = jnp.inf
+
+    #: The initial (clock) time of the simulation. The time loop starts
+    #: integrating from here and the snapshot grid spans [t_start, t_end].
+    #: Defaults to 0.0; set to a checkpoint's time to resume a run (see
+    #: astronomix.setup_helpers.restart_from_latest_checkpoint).
+    t_start: float = 0.0
 
     #: The final time of the simulation.
     t_end: float = 0.2

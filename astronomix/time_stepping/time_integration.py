@@ -6,7 +6,7 @@ from jax.sharding import PartitionSpec
 import jax.numpy as jnp
 
 
-from typing import Union
+from typing import Any, NamedTuple, Union
 
 # runtime debugging
 from jax.experimental import checkify
@@ -17,7 +17,7 @@ from astronomix._finite_difference._timestep_estimation._timestep_estimator impo
 from astronomix._geometry.boundaries import _boundary_handler
 from astronomix._pallas_helpers import pallas_mesh_context
 from astronomix.data_classes.simulation_state_struct import StateStruct
-from astronomix.option_classes.simulation_config import BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, FORWARDS, GHOST_CELLS, PERIODIC_ROLL, STATE_TYPE
+from astronomix.option_classes.simulation_config import BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, FORWARDS, GHOST_CELLS, ON_DEVICE, PERIODIC_ROLL, STATE_TYPE, TO_DISK
 
 # astronomix containers
 from astronomix.option_classes.simulation_config import SimulationConfig
@@ -34,6 +34,7 @@ from astronomix.data_classes.simulation_snapshot_data import SnapshotData
 # astronomix functions
 from astronomix._finite_volume._state_evolution.evolve_state import _evolve_state_fv
 from astronomix._modules._iteration_level_updates import _iteration_level_updates
+from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
 from astronomix._finite_volume._timestep_estimation._timestep_estimator import (
     _cfl_time_step,
     _source_term_aware_time_step,
@@ -61,6 +62,25 @@ from astronomix.time_stepping._time_loop import (
 from timeit import default_timer as timer
 
 
+class LoopState(NamedTuple):
+    """The physics evolving-state threaded through the generic time-loop driver.
+
+    The driver (``astronomix.time_stepping._time_loop.integrate``) treats this
+    as an opaque pytree; only the closures here unpack it. Holding the PRNG key
+    and the persistent Ornstein-Uhlenbeck forcing field here (rather than
+    overloading a bare tuple slot) keeps the carry explicit and extensible.
+
+    Attributes:
+        primitive_state: The (padded) primitive fluid state being evolved.
+        key: The PRNG key advanced by stochastic per-step modules (forcing, ...).
+        forcing: The persistent OU forcing field ``f`` (shape (3, nx, ny, nz)),
+            or ``None`` when OU forcing is inactive.
+    """
+    primitive_state: Any
+    key: Any
+    forcing: Any = None
+
+
 # @jaxtyped(typechecker=typechecker)
 def time_integration(
     primitive_state: STATE_TYPE,
@@ -69,6 +89,7 @@ def time_integration(
     registered_variables: RegisteredVariables,
     snapshot_callable = None,
     sharding: Union[NoneType, jax.NamedSharding] = None,
+    restart_state: Union[NoneType, "LoopState"] = None,
 ) -> Union[STATE_TYPE, SnapshotData]:
     """
     Integrate the fluid equations in time. For the options of
@@ -95,6 +116,12 @@ def time_integration(
             e.g. only the slice or summary statistics you need.
         sharding: The sharding to use for the padded helper data. If None,
                   no sharding is applied.
+        restart_state: An optional :class:`LoopState` providing the PRNG key
+            and persistent OU forcing field to resume from (typically obtained
+            from ``astronomix.setup_helpers.restart_from_latest_checkpoint``).
+            Its ``primitive_state`` slot is ignored; pass the restored state as
+            the ``primitive_state`` argument. Mainly used together with
+            ``snapshot_storage_mode == TO_DISK`` and ``params.t_start``.
 
     Returns:
         Depending on the configuration (return_snapshots, num_snapshots)
@@ -140,6 +167,22 @@ def time_integration(
         params = jax.tree.map(
             lambda leaf: jax.device_put(leaf, replicated),
             params,
+        )
+
+    # Disk-checkpointing mode is driven on the host: it runs JIT'd segments
+    # between snapshot times and streams each segment's loop carry to disk via
+    # Orbax (sharding preserved per device). It reuses the helper data and the
+    # promoted params built above.
+    if config.snapshot_storage_mode == TO_DISK:
+        return _time_integration_to_disk(
+            primitive_state,
+            config,
+            params,
+            registered_variables,
+            helper_data_pad,
+            snapshot_callable,
+            sharding,
+            restart_state,
         )
 
     if config.donate_state:
@@ -306,42 +349,15 @@ def time_integration(
     return final_state
 
 
-def _time_integration(
-    state: Union[STATE_TYPE, StateStruct],
-    config: SimulationConfig,
-    params: SimulationParams,
-    registered_variables: RegisteredVariables,
-    helper_data_pad: Union[HelperData, NoneType],
-    snapshot_callable = None,
-) -> Union[STATE_TYPE, StateStruct, SnapshotData]:
+def _prepare_padded_state(primitive_state, config, params, registered_variables):
+    """Pad the primitive state with ghost cells and fill them via the boundary
+    handler, exactly as a cold start does.
+
+    The boundary handler only writes ghost cells (a deterministic function of
+    the interior and ``params``), so re-running it on an unpadded state restored
+    from disk reproduces the ghost cells the loop would have held — keeping a
+    disk restart consistent with an uninterrupted run.
     """
-    Time integration.
-
-    Args:
-        primitive_state: The primitive state array.
-        config: The simulation configuration.
-        params: The simulation parameters.
-        helper_data: The helper data.
-
-    Returns:
-        Depending on the configuration (return_snapshots, num_snapshots)
-        either the final state of the fluid after the time integration
-        of snapshots of the time evolution.
-    """
-
-    # in simulations, where we also follow e.g. star particles,
-    # the state may be a struct containing the primitive state
-    # and the star particle data
-    if config.state_struct:
-        primitive_state = state.primitive_state
-    else:
-        primitive_state = state
-
-    # we must pad the state with ghost cells
-    # pad the primitive state with two ghost cells on each side
-    # to account for the periodic boundary conditions
-    original_shape = primitive_state.shape
-
     if config.boundary_handling != PERIODIC_ROLL:
         primitive_state = _pad(primitive_state, config)
 
@@ -354,6 +370,60 @@ def _time_integration(
             )
         else:
             primitive_state = _boundary_handler(primitive_state, config, registered_variables, params)
+
+    return primitive_state
+
+
+def _seed_key_and_forcing(config, params):
+    """Seed the PRNG key and (when OU forcing is active) the persistent forcing
+    field from ``config.random_seed`` for a fresh run."""
+    key0 = jax.random.key(config.random_seed)
+    if (config.turbulent_forcing_config.turbulent_forcing
+            and config.turbulent_forcing_config.ou_forcing):
+        key0, forcing0 = _init_ou_forcing_state(
+            key0, config, params.turbulent_forcing_params
+        )
+    else:
+        forcing0 = None
+    return key0, forcing0
+
+
+def _build_initial_loop_state(primitive_state, config, params, restart_state=None):
+    """Construct the initial loop carry for an (already padded) state.
+
+    When ``restart_state`` is given, its PRNG key and persistent OU forcing
+    field are reused so a resumed run continues the same stochastic realisation;
+    otherwise they are seeded from ``config.random_seed``. The OU forcing (when
+    active) needs a persistent solenoidal field; otherwise the forcing slot
+    stays ``None`` and costs nothing in the carry.
+    """
+    if restart_state is not None:
+        return LoopState(primitive_state, restart_state.key, restart_state.forcing)
+
+    key0, forcing0 = _seed_key_and_forcing(config, params)
+    return LoopState(primitive_state, key0, forcing0)
+
+
+def _integrate_core(
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+    helper_data_pad: Union[HelperData, NoneType],
+    snapshot_callable,
+    initial_loop_state: "LoopState",
+    original_shape,
+):
+    """Drive the time loop on an already-padded initial carry.
+
+    Shared by the in-memory return path (:func:`_time_integration`) and the
+    disk-checkpointing segment runner (:func:`_run_segment`). Returns
+    ``(t_final, loop_state, snapshot_store, num_iterations)``; ``snapshot_store``
+    is ``None`` when no snapshots are collected.
+
+    Args:
+        original_shape: The unpadded state shape, used to size the on-device
+            snapshot buffers (ignored when snapshots are disabled).
+    """
 
     # -------------------------------------------------------------
     # =============== ↓ Setup of the snapshot array ↓ =============
@@ -368,7 +438,10 @@ def _time_integration(
     # snapshots we want to take.
     if config.return_snapshots:
         params = params._replace(
-            dt_max=jnp.minimum(params.dt_max, params.t_end / config.num_snapshots)
+            dt_max=jnp.minimum(
+                params.dt_max,
+                (params.t_end - params.t_start) / config.num_snapshots,
+            )
         )
 
     if config.return_snapshots:
@@ -398,7 +471,9 @@ def _time_integration(
         end time, runs the per-step modules and evolves the state.  Returns
         ``(dt, new_state)``; the driver advances the time.
         """
-        key, primitive_state = state
+        primitive_state = state.primitive_state
+        key = state.key
+        forcing = state.forcing
 
         # determine the time step size
         if not config.fixed_timestep:
@@ -449,8 +524,8 @@ def _time_integration(
             dt = jnp.minimum(dt, params.t_end - time)
 
         # modules that run every time step
-        key, primitive_state = _iteration_level_updates(
-            primitive_state, key, dt, config, params, helper_data_pad,
+        key, forcing, primitive_state = _iteration_level_updates(
+            primitive_state, key, forcing, dt, config, params, helper_data_pad,
             registered_variables, time + dt,
         )
 
@@ -466,11 +541,11 @@ def _time_integration(
                 helper_data_pad, registered_variables, time,
             )
 
-        return dt, (key, primitive_state)
+        return dt, LoopState(primitive_state, key, forcing)
 
     def _record_snapshot(time, state, store, idx):
         """Record snapshot ``idx`` (the requested diagnostics)."""
-        _, primitive_state = state
+        primitive_state = state.primitive_state
 
         if config.boundary_handling != PERIODIC_ROLL:
             unpad_primitive_state = _unpad(primitive_state, config)
@@ -495,7 +570,9 @@ def _time_integration(
         """Whether snapshot ``idx`` is due at the start of a step at ``time``."""
         if config.use_specific_snapshot_timepoints:
             return times_close(time, params.snapshot_timepoints[idx])
-        return time >= idx * params.t_end / config.num_snapshots
+        return time >= params.t_start + idx * (
+            params.t_end - params.t_start
+        ) / config.num_snapshots
 
     def _record_callback(time, state, store, _idx):
         """Snapshot recorder for ``activate_snapshot_callback``: invoke the
@@ -505,12 +582,14 @@ def _time_integration(
         ``jax.debug.callback`` internally, and should only pass the slice /
         summary statistics actually needed to avoid moving large arrays.
         """
-        _, primitive_state = state
+        primitive_state = state.primitive_state
         snapshot_callable(time, primitive_state, registered_variables)
         return store
 
     def _should_record_callback(time, idx):
-        return time >= idx * params.t_end / config.num_snapshots
+        return time >= params.t_start + idx * (
+            params.t_end - params.t_start
+        ) / config.num_snapshots
 
     # -------------------------------------------------------------
     # ================ ↑ step / record closures ↑ =================
@@ -529,6 +608,9 @@ def _time_integration(
             record=_record_snapshot,
             should_record=_should_record_snapshot,
             record_final=True,
+            # Reserve the last buffer slot for the true final state at t_end, so
+            # it is always written (the evenly spaced grid never lands on t_end).
+            final_index=config.num_snapshots - 1,
         )
     elif config.activate_snapshot_callback:
         snapshot_spec = SnapshotSpec(
@@ -560,45 +642,46 @@ def _time_integration(
     initial_loop_state = (jax.random.key(config.random_seed), primitive_state)
 
     def _diagnostic_monitor(t, state):
-        """Per-step diagnostic: reduce on-device to scalars, offload to host.
+            """Per-step diagnostic: reduce on-device to scalars, offload to host.
 
-        Only scalars cross to the host (never the full state). The temperature
-        proxy is the code-unit ``P / rho`` (∝ T); ``has_nan`` flags the first
-        non-finite value anywhere in the state.
-        """
-        _, prim = state
-        rho = prim[registered_variables.density_index]
-        min_density = jnp.min(rho)
+            Only scalars cross to the host (never the full state). The temperature
+            proxy is the code-unit ``P / rho`` (∝ T); ``has_nan`` flags the first
+            non-finite value anywhere in the state.
+            """
+            _, prim = state
+            rho = prim[registered_variables.density_index]
+            min_density = jnp.min(rho)
 
-        if hasattr(registered_variables, "pressure_index"):
-            pressure = prim[registered_variables.pressure_index]
-            min_pressure = jnp.min(pressure)
-            max_temperature = jnp.max(pressure / rho)
-        else:  # isothermal: no pressure variable
-            min_pressure = jnp.asarray(jnp.nan)
-            max_temperature = jnp.asarray(jnp.nan)
+            if hasattr(registered_variables, "pressure_index"):
+                pressure = prim[registered_variables.pressure_index]
+                min_pressure = jnp.min(pressure)
+                max_temperature = jnp.max(pressure / rho)
+            else:  # isothermal: no pressure variable
+                min_pressure = jnp.asarray(jnp.nan)
+                max_temperature = jnp.asarray(jnp.nan)
 
-        if config.dimensionality == 1:
-            v2 = prim[registered_variables.velocity_index] ** 2
-        else:
-            v2 = prim[registered_variables.velocity_index.x] ** 2
-            if config.dimensionality >= 2:
-                v2 = v2 + prim[registered_variables.velocity_index.y] ** 2
-            if config.dimensionality == 3:
-                v2 = v2 + prim[registered_variables.velocity_index.z] ** 2
-        max_speed = jnp.sqrt(jnp.max(v2))
+            if config.dimensionality == 1:
+                v2 = prim[registered_variables.velocity_index] ** 2
+            else:
+                v2 = prim[registered_variables.velocity_index.x] ** 2
+                if config.dimensionality >= 2:
+                    v2 = v2 + prim[registered_variables.velocity_index.y] ** 2
+                if config.dimensionality == 3:
+                    v2 = v2 + prim[registered_variables.velocity_index.z] ** 2
+            max_speed = jnp.sqrt(jnp.max(v2))
 
-        has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
-        jax.debug.callback(
-            _show_diagnostics, t, min_density, min_pressure,
-            max_speed, max_temperature, has_nan,
-        )
+            has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
+            jax.debug.callback(
+                _show_diagnostics, t, min_density, min_pressure,
+                max_speed, max_temperature, has_nan,
+            )
 
-    _, loop_state, snapshot_store, num_iterations = integrate(
+    t_final, loop_state, snapshot_store, num_iterations = integrate(
         initial_loop_state,
         _step,
         params.t_end,
         backend=backend,
+        t_start=params.t_start,
         num_steps=num_steps,
         num_checkpoints=num_checkpoints,
         snapshots=snapshot_spec,
@@ -606,11 +689,70 @@ def _time_integration(
         monitor=_diagnostic_monitor if config.monitor_diagnostics else None,
     )
 
-    _, primitive_state = loop_state
-
     # -------------------------------------------------------------
     # =================== ↑ loop-level logic ↑ ====================
     # -------------------------------------------------------------
+
+    return t_final, loop_state, snapshot_store, num_iterations
+
+
+def _time_integration(
+    state: Union[STATE_TYPE, StateStruct],
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+    helper_data_pad: Union[HelperData, NoneType],
+    snapshot_callable = None,
+    initial_loop_state: Union["LoopState", NoneType] = None,
+) -> Union[STATE_TYPE, StateStruct, SnapshotData]:
+    """
+    Time integration.
+
+    Args:
+        state: The primitive state array (or state struct).
+        config: The simulation configuration.
+        params: The simulation parameters.
+        helper_data_pad: The padded helper data.
+        initial_loop_state: An optional explicit initial loop carry (used to
+            resume a run); seeded from ``config.random_seed`` when ``None``.
+
+    Returns:
+        Depending on the configuration (return_snapshots, num_snapshots)
+        either the final state of the fluid after the time integration
+        of snapshots of the time evolution.
+    """
+
+    # in simulations, where we also follow e.g. star particles,
+    # the state may be a struct containing the primitive state
+    # and the star particle data
+    if config.state_struct:
+        primitive_state = state.primitive_state
+    else:
+        primitive_state = state
+
+    # we must pad the state with ghost cells to account for the
+    # boundary conditions (unless they are enforced by rolling)
+    original_shape = primitive_state.shape
+    primitive_state = _prepare_padded_state(
+        primitive_state, config, params, registered_variables
+    )
+
+    if initial_loop_state is None:
+        initial_loop_state = _build_initial_loop_state(
+            primitive_state, config, params
+        )
+
+    _, loop_state, snapshot_store, num_iterations = _integrate_core(
+        config,
+        params,
+        registered_variables,
+        helper_data_pad,
+        snapshot_callable,
+        initial_loop_state,
+        original_shape,
+    )
+
+    primitive_state = loop_state.primitive_state
 
     # -------------------------------------------------------------
     # ===================== ↓ return logic ↓ ======================
@@ -641,3 +783,189 @@ def _time_integration(
     # -------------------------------------------------------------
     # ===================== ↑ return logic ↑ ======================
     # -------------------------------------------------------------
+
+
+def _run_segment(
+    primitive_state,
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+    helper_data_pad: Union[HelperData, NoneType],
+    init_key,
+    init_forcing,
+):
+    """Integrate one segment for the disk-checkpointing (TO_DISK) driver.
+
+    Takes and returns the *unpadded* carry: it pads + fills boundaries on entry
+    and unpads on exit, exactly as a cold start does. Because the boundary
+    handler is a deterministic function of the interior, every segment boundary
+    (whether reached in-memory or via a disk restart) regenerates identical
+    ghost cells — so a run resumed from disk is bit-identical to the same run
+    left uninterrupted. ``config`` always has snapshots disabled here (each
+    segment end is itself a checkpoint), so no snapshot buffers are allocated.
+
+    Returns ``(t_final, primitive_state_unpadded, key, forcing, num_iterations)``.
+    """
+    original_shape = primitive_state.shape
+    primitive_state = _prepare_padded_state(
+        primitive_state, config, params, registered_variables
+    )
+    initial_loop_state = LoopState(primitive_state, init_key, init_forcing)
+    t_final, loop_state, _, num_iterations = _integrate_core(
+        config,
+        params,
+        registered_variables,
+        helper_data_pad,
+        None,
+        initial_loop_state,
+        original_shape,
+    )
+    primitive_state = loop_state.primitive_state
+    if config.boundary_handling != PERIODIC_ROLL:
+        primitive_state = _unpad(primitive_state, config)
+    return (
+        t_final,
+        primitive_state,
+        loop_state.key,
+        loop_state.forcing,
+        num_iterations,
+    )
+
+
+def _time_integration_to_disk(
+    state,
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+    helper_data_pad: Union[HelperData, NoneType],
+    snapshot_callable,
+    sharding: Union[NoneType, jax.NamedSharding],
+    restart_state: Union["LoopState", NoneType],
+):
+    """Host-driven disk-checkpointing integration (``snapshot_storage_mode ==
+    TO_DISK``).
+
+    The run is split into ``config.num_snapshots`` segments spanning
+    ``[params.t_start, params.t_end]``. Each segment is integrated by the JIT'd
+    :func:`_run_segment`; afterwards the loop carry (primitive state, PRNG key,
+    OU forcing) plus the time and cumulative iteration count are written to
+    ``config.snapshot_storage_path`` via Orbax. The carry stays on device
+    (sharded) between segments, and Orbax writes each device's shard
+    independently, so this scales to multiple devices / nodes.
+
+    Returns the final (unpadded) primitive state, like the no-snapshot path of
+    :func:`_time_integration`; the per-snapshot data lives on disk.
+    """
+    # local import keeps the (optional) orbax dependency out of the import path
+    # for runs that never touch disk checkpointing.
+    from astronomix._snapshotting._orbax_storage import (
+        latest_step,
+        loop_checkpointer,
+        save_loop_checkpoint,
+    )
+
+    if config.state_struct:
+        primitive_state = state.primitive_state
+    else:
+        primitive_state = state
+
+    # The carry between segments is the unpadded state plus the stochastic
+    # bits (PRNG key, OU forcing). On a restart these come from the checkpoint.
+    if restart_state is not None:
+        key, forcing = restart_state.key, restart_state.forcing
+    else:
+        key, forcing = _seed_key_and_forcing(config, params)
+
+    # Segment config: snapshots stay off (each segment end *is* a checkpoint)
+    # and ON_DEVICE so the segment runner does not recurse into this driver.
+    segment_config = config._replace(
+        return_snapshots=False,
+        activate_snapshot_callback=False,
+        snapshot_storage_mode=ON_DEVICE,
+        progress_bar=False,
+    )
+
+    # snapshot times spanning [t_start, t_end] (host-side floats)
+    t0 = float(params.t_start)
+    t1 = float(params.t_end)
+    n = config.num_snapshots
+    times = [t0 + (t1 - t0) * k / n for k in range(n + 1)]
+
+    run_segment_jit = jax.jit(
+        _run_segment,
+        static_argnames=["config", "registered_variables"],
+    )
+
+    mesh_ctx = sharding.mesh if sharding is not None else nullcontext()
+    pallas_mesh = sharding.mesh if sharding is not None else None
+    replicated = (
+        jax.NamedSharding(sharding.mesh, PartitionSpec())
+        if sharding is not None
+        else None
+    )
+
+    # Continue step numbering after any checkpoints already in the output
+    # directory, so resuming into the same path extends one run history
+    # (fresh directory -> starts at step 1).
+    start_step = latest_step(config.snapshot_storage_path) or 0
+
+    cumulative_iterations = 0
+    with loop_checkpointer(config.snapshot_storage_path) as checkpointer:
+        for i in range(n):
+            # Canonicalise the carry onto the explicit sharding at every segment
+            # boundary. A resumed run feeds in a state restored onto exactly this
+            # sharding; pinning the in-memory carry the same way makes the two
+            # paths use an identical device layout, so a disk restart reproduces
+            # an uninterrupted run bit-for-bit (multi-device reductions are
+            # otherwise sensitive to the layout XLA happens to pick).
+            if sharding is not None:
+                primitive_state = jax.device_put(primitive_state, sharding)
+
+            segment_params = params._replace(t_start=times[i], t_end=times[i + 1])
+            # Keep every params leaf on a concrete (replicated) sharding so pjit
+            # dispatch on a multi-device mesh sees a sharding for the freshly
+            # set t_start / t_end scalars too (see the note in time_integration).
+            if replicated is not None:
+                segment_params = jax.tree.map(
+                    lambda leaf: jax.device_put(leaf, replicated), segment_params
+                )
+
+            with mesh_ctx, pallas_mesh_context(pallas_mesh):
+                t_final, primitive_state, key, forcing, num_iterations = run_segment_jit(
+                    primitive_state,
+                    segment_config,
+                    segment_params,
+                    registered_variables,
+                    helper_data_pad,
+                    key,
+                    forcing,
+                )
+
+            cumulative_iterations = cumulative_iterations + num_iterations
+
+            # Pin the to-be-saved arrays onto the concrete device sharding. The
+            # carry coming out of a jit under an active mesh can carry an
+            # abstract-mesh sharding, which trips Orbax's shard-transfer path;
+            # device_put onto the explicit NamedSharding makes it concrete (and
+            # is a no-op data-movement-wise when already so placed).
+            store_state = primitive_state
+            store_forcing = forcing
+            if sharding is not None:
+                store_state = jax.device_put(primitive_state, sharding)
+                if forcing is not None:
+                    store_forcing = jax.device_put(forcing, sharding)
+
+            save_loop_checkpoint(
+                checkpointer,
+                step=start_step + i + 1,
+                time=t_final,
+                primitive_state=store_state,
+                key=key,
+                forcing=store_forcing,
+                num_iterations=cumulative_iterations,
+            )
+
+    if config.state_struct:
+        return StateStruct(primitive_state=primitive_state)
+
+    return primitive_state

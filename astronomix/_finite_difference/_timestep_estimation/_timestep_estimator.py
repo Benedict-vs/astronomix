@@ -119,6 +119,20 @@ def _cfl_time_step_fd_mhd_fast(
         dt_visc = C_CFL * grid_spacing ** 2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
 
+    # conductive (parabolic) time step constraint
+    if config.thermal_conduction:
+        if config.enforce_positivity:
+            rho_min_c = jnp.maximum(
+                jnp.min(primitive_state[registered_variables.density_index]),
+                params.minimum_density,
+            )
+        else:
+            rho_min_c = jnp.min(primitive_state[registered_variables.density_index])
+        # thermal diffusivity of the internal energy: chi = (gamma - 1) kappa / rho
+        chi_max = (gamma - 1.0) * params.thermal_conductivity / rho_min_c
+        dt_cond = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * chi_max)
+        dt_cfl = jnp.minimum(dt_cfl, dt_cond)
+
     return jnp.minimum(dt_cfl, dt_max)
 
 
@@ -229,6 +243,20 @@ def _cfl_time_step_fd(
         
         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
+
+    # conductive (parabolic) time step constraint
+    if config.thermal_conduction:
+        if config.enforce_positivity:
+            rho_min_c = jnp.maximum(
+                jnp.min(primitive_state[registered_variables.density_index]),
+                params.minimum_density,
+            )
+        else:
+            rho_min_c = jnp.min(primitive_state[registered_variables.density_index])
+        # thermal diffusivity of the internal energy: chi = (gamma - 1) kappa / rho
+        chi_max = (gamma - 1.0) * params.thermal_conductivity / rho_min_c
+        dt_cond = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * chi_max)
+        dt_cfl = jnp.minimum(dt_cfl, dt_cond)
 
     dt_cfl = jnp.minimum(dt_cfl, dt_max)
 
@@ -437,6 +465,20 @@ def _cfl_time_step_fd_hydro_native(
         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
 
+    # conductive (parabolic) time step constraint
+    if config.thermal_conduction:
+        if config.enforce_positivity:
+            rho_min_c = jnp.maximum(
+                jnp.min(primitive_state[registered_variables.density_index]),
+                params.minimum_density,
+            )
+        else:
+            rho_min_c = jnp.min(primitive_state[registered_variables.density_index])
+        # thermal diffusivity of the internal energy: chi = (gamma - 1) kappa / rho
+        chi_max = (gamma - 1.0) * params.thermal_conductivity / rho_min_c
+        dt_cond = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * chi_max)
+        dt_cfl = jnp.minimum(dt_cfl, dt_cond)
+
     return dt_cfl
 
 # -----------------------------------------------------------------------------
@@ -541,6 +583,20 @@ def _cfl_time_step_fd_hydro_fast(
 
         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
+
+    # conductive (parabolic) time step constraint
+    if config.thermal_conduction:
+        if config.enforce_positivity:
+            rho_min_c = jnp.maximum(
+                jnp.min(primitive_state[registered_variables.density_index]),
+                params.minimum_density,
+            )
+        else:
+            rho_min_c = jnp.min(primitive_state[registered_variables.density_index])
+        # thermal diffusivity of the internal energy: chi = (gamma - 1) kappa / rho
+        chi_max = (gamma - 1.0) * params.thermal_conductivity / rho_min_c
+        dt_cond = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * chi_max)
+        dt_cfl = jnp.minimum(dt_cfl, dt_cond)
 
     return dt_cfl
 

@@ -121,7 +121,7 @@ from astronomix._fluid_equations._fluxes_mhd import _euler_flux_isothermal_x, _m
 from astronomix._fluid_equations._equations import primitive_state_from_conserved
 from astronomix._fluid_equations._fluxes import _euler_flux
 from astronomix._stencil_operations._stencil_operations import _shift
-from astronomix.option_classes.simulation_config import IDEAL_GAS, ISOTHERMAL, PALLAS, SimulationConfig
+from astronomix.option_classes.simulation_config import BACKWARDS, IDEAL_GAS, ISOTHERMAL, PALLAS, SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 
@@ -487,12 +487,13 @@ from astronomix._finite_difference._interface_fluxes._weno_pallas import (  # no
     _mhd_pallas_flux_supported,
     _weno_flux_hydro_pallas,
     _weno_flux_hydro_pallas_rhs,
+    _weno_flux_hydro_pallas_vjp_local,
     _weno_flux_mhd_iso_pallas,
     _weno_flux_mhd_pallas,
 )
 
 
-from astronomix._pallas_helpers import diffable_pallas_call  # noqa: E402
+from astronomix._pallas_helpers import diffable_pallas_call, pallas_vjp_call  # noqa: E402
 
 
 def _weno_flux_native_for_axis(axis: int):
@@ -511,10 +512,37 @@ def _weno_flux_axis_dispatch(
     axis: int,
 ):
     """Pick the Pallas flux for the supported equation set, falling back to
-    the native per-axis JAX flux. AD wraps this through ``diffable_pallas_call``
-    so the tangent always goes through the native path."""
+    the native per-axis JAX flux.
+
+    Forward-mode AD wraps the call through ``diffable_pallas_call`` (custom_jvp:
+    Pallas primal, native tangent).  In reverse-mode (``differentiation_mode ==
+    BACKWARDS``) the ideal-gas hydro path instead uses ``pallas_vjp_call`` so the
+    backward stays on the GPU via the hand-derived explicit Pallas adjoint
+    kernel, rather than transposing the native tangent.  The Pallas reverse path
+    differentiates w.r.t. the conserved STATE only (params are physical
+    constants for the flux) and is single-device; correct 3D y/z gradients need
+    jax >= ~0.8 (older jaxlib miscompiles the adjoint kernel on Triton).
+
+    The adjoint kernel is the exact transpose of the forward WENO kernel (whose
+    stencil shifts are periodic ``custom_roll``), so it is correct for both
+    periodic and ghost-cell boundaries — validated bit-exact (~1e-15) vs the
+    native VJP for smooth states under either boundary handling.  At
+    discontinuities (shocks) the WENO gradient is inherently FP-ill-conditioned
+    and may differ from the native VJP by a sub-gradient amount, exactly as the
+    native WENO AD does."""
     if _hydro_pallas_flux_supported(conserved_state, config):
         if axis == 0 or (axis == 1 and int(config.dimensionality) >= 2) or (axis == 2 and int(config.dimensionality) == 3):
+            if config.differentiation_mode == BACKWARDS:
+                return pallas_vjp_call(
+                    conserved_state,
+                    params,
+                    pallas_forward=lambda s, p: _weno_flux_hydro_pallas(
+                        s, p, config, registered_variables, axis=axis
+                    ),
+                    pallas_backward=lambda s, p, ct: _weno_flux_hydro_pallas_vjp_local(
+                        s, ct, p, config, registered_variables, axis=axis
+                    ),
+                )
             pallas = lambda s, p: _weno_flux_hydro_pallas(  # noqa: E731
                 s, p, config, registered_variables, axis=axis
             )

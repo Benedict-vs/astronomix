@@ -63,13 +63,18 @@ class SnapshotSpec(NamedTuple):
         store: Preallocated output pytree the ``record`` callback writes into.
         record: ``record(t, state, store, index) -> store``.
         should_record: ``should_record(t, index) -> bool`` crossing test.
-        record_final: Also record once when a step lands on ``t_end``.
+        record_final: Also record the true final state once after the loop.
+        final_index: Buffer slot the final state is written into. When ``None``
+            the running snapshot counter is used; for fixed-size buffers this
+            should be the last slot (``num_snapshots - 1``) so the final state
+            at ``t_end`` is captured reliably regardless of step alignment.
     """
 
     store: Any
     record: Callable
     should_record: Callable
     record_final: bool = True
+    final_index: Optional[int] = None
 
 
 def integrate(
@@ -78,6 +83,7 @@ def integrate(
     t_end,
     *,
     backend: int,
+    t_start=0.0,
     num_steps: Optional[int] = None,
     num_checkpoints: Optional[int] = None,
     snapshots: Optional[SnapshotSpec] = None,
@@ -92,6 +98,7 @@ def integrate(
         t_end: Integration end time.
         backend: One of ``FIXED_STEP`` / ``ADAPTIVE_WHILE`` /
             ``ADAPTIVE_CHECKPOINTED``.
+        t_start: Initial integration time (the loop clock starts here).
         num_steps: Number of steps for ``FIXED_STEP``.
         num_checkpoints: Checkpoint count for ``ADAPTIVE_CHECKPOINTED``.
         snapshots: A :class:`SnapshotSpec`, or ``None`` to disable collection.
@@ -129,18 +136,6 @@ def integrate(
         t = t + dt
         n_iter = n_iter + 1
 
-        if has_snap and snapshots.record_final:
-            def _record_final(operand):
-                store_, idx_ = operand
-                return snapshots.record(t, state, store_, idx_), idx_ + 1
-
-            store, idx = jax.lax.cond(
-                times_close(t, t_end),
-                _record_final,
-                lambda operand: operand,
-                (store, idx),
-            )
-
         if progress is not None:
             jax.debug.callback(progress, t, t_end)
 
@@ -152,9 +147,9 @@ def integrate(
         return (t, state, idx, n_iter)
 
     if has_snap:
-        carry = (0.0, state, 0, 0, snapshots.store)
+        carry = (t_start, state, 0, 0, snapshots.store)
     else:
-        carry = (0.0, state, 0, 0)
+        carry = (t_start, state, 0, 0)
 
     if backend == FIXED_STEP:
         carry = jax.lax.fori_loop(0, num_steps, lambda _i, c: body(c), carry)
@@ -168,7 +163,15 @@ def integrate(
         raise ValueError(f"Unknown loop backend: {backend}")
 
     if has_snap:
-        t, state, _idx, n_iter, store = carry
+        t, state, idx, n_iter, store = carry
+        # The evenly spaced ``should_record`` grid never lands exactly on
+        # ``t_end`` (the loop exits at the first step past it), so the final
+        # state would otherwise be missing. Record it once here into the
+        # reserved final slot — guaranteed written regardless of step
+        # alignment, and differentiable since it acts on the loop output.
+        if snapshots.record_final:
+            final_idx = idx if snapshots.final_index is None else snapshots.final_index
+            store = snapshots.record(t, state, store, final_idx)
         return t, state, store, n_iter
     t, state, _idx, n_iter = carry
     return t, state, None, n_iter

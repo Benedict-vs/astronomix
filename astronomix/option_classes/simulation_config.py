@@ -25,6 +25,21 @@ from astronomix._modules._turbulent_forcing._turbulent_forcing_options import Tu
 NATIVE_JAX = 0
 PALLAS = 1
 
+# positivity-enforcement modes (used by ``positivity_per_stage_mode`` /
+# ``positivity_per_step_mode``).  HARD_FLOOR clamps density (and, for ideal
+# gas, pressure) pointwise — cheap, non-conservative, matches the *adiabatic*
+# HOW-MHD ``prot.f``.  REDISTRIBUTE neighbour-averages density+momentum (and
+# energy) over the valid 3x3x3 neighbourhood of sub-threshold cells — much
+# gentler at strong shocks than a hard floor (no sharp floored cell), matches
+# the *isothermal* HOW-MHD ``prot.f`` (not strictly mass-conserving: like
+# ``prot.f`` it copies neighbour values without debiting the donors).
+POSITIVITY_NONE = 0
+POSITIVITY_HARD_FLOOR = 1
+POSITIVITY_REDISTRIBUTE = 2
+#: internal sentinel: derive the mode from the legacy ``enforce_positivity``
+#: bool (True -> HARD_FLOOR, False -> NONE).  Resolved in ``finalize_config``.
+POSITIVITY_FOLLOW_LEGACY = -1
+
 # solver modes
 FINITE_VOLUME = 0
 FINITE_DIFFERENCE = 1
@@ -114,6 +129,10 @@ DYNAMIC_VISCOSITY = 1
 # Equation of state
 IDEAL_GAS = 0
 ISOTHERMAL = 1
+
+# Snapshot storage modes
+ON_DEVICE = 0
+TO_DISK = 1
 
 # ============================================================
 
@@ -314,6 +333,33 @@ class SimulationConfig(NamedTuple):
     #: FINITE DIFFERENCE MODE.
     enforce_positivity: bool = True
 
+    #: Positivity enforcement applied inside every SSPRK/LSRK stage (on the
+    #: conserved state — the CFL lever for strong shocks). One of
+    #: ``POSITIVITY_{NONE,HARD_FLOOR,REDISTRIBUTE}``.
+    positivity_per_stage_mode: int = POSITIVITY_FOLLOW_LEGACY
+
+    #: Positivity enforcement applied once per step before the evolve (on the
+    #: primitive state). One of ``POSITIVITY_{NONE,HARD_FLOOR,REDISTRIBUTE}``.
+    #: NOTE: with turbulent forcing + ``vacuum_protection`` the conservative
+    #: ``prot`` redistribution already runs once per step, so a per-step
+    #: REDISTRIBUTE here is redundant and is automatically skipped.
+    positivity_per_step_mode: int = POSITIVITY_FOLLOW_LEGACY
+
+    #: Vacuum-rest velocity recovery. When True, the density-floor enforcement
+    #: zeros the momentum in cells whose density is below ``minimum_density``, so
+    #: the recovered velocity is ``v = 0`` instead of ``momentum / rho_floored``
+    #: (which spikes to huge values in near-vacuum cells and is the usual cause
+    #: of high-Mach blow-up). A floored cell is effectively vacuum and has no
+    #: well-defined velocity, so resting it is physical — and it lets
+    #: ``minimum_density`` be lowered by orders of magnitude without instability.
+    positivity_vacuum_rest: bool = False
+
+    #: NaN/inf backstop for the positivity floor. ``jnp.maximum(NaN, floor)`` is
+    #: NaN, so a non-finite cell would survive the floor and propagate; when True,
+    #: non-finite conserved entries are reset to zero before the density/pressure
+    #: floors so they become a valid floored state. Off by default (adds a pass).
+    positivity_nan_safe: bool = False
+
     #: Self gravity switch, currently only
     #: for periodic boundaries.
     self_gravity: bool = False
@@ -342,6 +388,23 @@ class SimulationConfig(NamedTuple):
 
     #: Viscosity type - either kinematic or dynamic viscosity.
     viscosity_type: int = DYNAMIC_VISCOSITY
+
+    #: Explicit thermal conduction term div(kappa grad T) in the energy
+    #: equation (constant conductivity params.thermal_conductivity,
+    #: explicit integration). Currently only for finite difference mode.
+    thermal_conduction: bool = False
+
+    #: Spatial axis (0-based among the spatial dimensions) along which
+    #: isothermal conductive plates sit (e.g. 1 -> the y / vertical axis
+    #: for a 2D Rayleigh-Benard setup). The perpendicular axes are treated
+    #: as adiabatic (zero conductive flux), which the reflective hydro
+    #: boundary already provides via the mirrored (even) temperature.
+    conduction_wall_axis: int = 1
+
+    #: Whether the two ends of conduction_wall_axis are isothermal
+    #: (Dirichlet T = params.wall_temperature_low / _high). When False all
+    #: conduction boundaries are adiabatic (zero flux).
+    conduction_isothermal_walls: bool = False
 
     #: The size of the simulation box.
     box_size: Union[float, StaticFloatVector] = 1.0
@@ -430,6 +493,20 @@ class SimulationConfig(NamedTuple):
     #: Snapshot settings
     snapshot_settings: SnapshotSettings = SnapshotSettings()
 
+    #: Where the snapshots are stored. ``ON_DEVICE`` (default) keeps the
+    #: snapshot diagnostics in preallocated device buffers and returns them
+    #: at the end (the classic behaviour). ``TO_DISK`` instead streams each
+    #: snapshot to disk via Orbax: the run is split into segments between the
+    #: snapshot times, and the loop carry (primitive state, PRNG key, OU
+    #: forcing field) plus the time is written to ``snapshot_storage_path``
+    #: after each segment. Each device writes its own shard, so this scales
+    #: to multiple devices / nodes. TO_DISK is forward-mode only.
+    snapshot_storage_mode: int = ON_DEVICE
+
+    #: Directory the Orbax checkpoints are written to / read from when
+    #: ``snapshot_storage_mode == TO_DISK``. Required in that mode.
+    snapshot_storage_path: Union[str, NoneType] = None
+
     #: Call a user given function on the snapshot data,
     #: e.g. for saving or plotting. Must have signature
     #: callback(time, state, registered_variables).
@@ -475,6 +552,15 @@ class SimulationConfig(NamedTuple):
 
 def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
     """Finalizes the simulation configuration."""
+
+    # Resolve the positivity-mode sentinels from the legacy ``enforce_positivity``
+    # bool so downstream call sites read concrete modes. Legacy True -> HARD_FLOOR
+    # at both the per-stage and per-step sites (the historical behaviour).
+    _legacy = POSITIVITY_HARD_FLOOR if config.enforce_positivity else POSITIVITY_NONE
+    if config.positivity_per_stage_mode == POSITIVITY_FOLLOW_LEGACY:
+        config = config._replace(positivity_per_stage_mode=_legacy)
+    if config.positivity_per_step_mode == POSITIVITY_FOLLOW_LEGACY:
+        config = config._replace(positivity_per_step_mode=_legacy)
 
     # num_cells = state_shape[-1]
     # config = config._replace(num_cells=num_cells)
@@ -633,7 +719,7 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         if config.boundary_handling == PERIODIC_ROLL:
             config = config._replace(num_ghost_cells=0)
 
-        if config.boundary_handling == GHOST_CELLS and config.diffusion:
+        if config.boundary_handling == GHOST_CELLS and (config.diffusion or config.thermal_conduction):
             config = config._replace(num_ghost_cells=max(config.num_ghost_cells, 6))
 
     # set boundary conditions if not set
@@ -670,6 +756,20 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         and config.riemann_solver != RIEMANN_SPLIT
     ):
         print("Consider using RIEMANN_SPLIT as the self_gravity_version.")
+
+    # disk-snapshot (Orbax) mode requirements
+    if config.snapshot_storage_mode == TO_DISK:
+        if not config.snapshot_storage_path:
+            raise ValueError(
+                "snapshot_storage_mode == TO_DISK requires a non-empty "
+                "snapshot_storage_path (the directory the Orbax checkpoints "
+                "are written to)."
+            )
+        if config.differentiation_mode != FORWARDS:
+            raise ValueError(
+                "snapshot_storage_mode == TO_DISK is forward-mode only; "
+                "set differentiation_mode = FORWARDS."
+            )
 
     return config
 

@@ -2,13 +2,13 @@
 from astronomix._modules._cnn_mhd_corrector._cnn_mhd_corrector import _cnn_mhd_corrector
 from astronomix._modules._cooling._cooling import update_pressure_by_cooling
 from astronomix._modules._cosmic_rays.cr_injection import inject_crs_at_strongest_shock
-from astronomix._modules._frame_tracking import _frame_tracking
+from astronomix._modules._frame_tracking._frame_tracking import _frame_tracking
 from astronomix._modules._neural_net_force._neural_net_force import _neural_net_force
 from astronomix._modules._stellar_wind.stellar_wind import _wind_injection
-from astronomix._modules._turbulent_forcing._turbulent_forcing import _apply_forcing
+from astronomix._modules._turbulent_forcing._turbulent_forcing import _apply_forcing, _apply_ou_forcing, _vacuum_protection
 from astronomix._modules._viscosity._viscosity import fv_viscosity_update
 from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE, FINITE_VOLUME, IDEAL_GAS, STATE_TYPE, SimulationConfig
+from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE, FINITE_VOLUME, IDEAL_GAS, POSITIVITY_HARD_FLOOR, POSITIVITY_REDISTRIBUTE, STATE_TYPE, SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.shock_finder.shock_finder import shock_criteria
 from astronomix.variable_registry.registered_variables import RegisteredVariables
@@ -27,6 +27,7 @@ from functools import partial
 def _iteration_level_updates(
     primitive_state: STATE_TYPE,
     key,
+    forcing,
     dt: Float[Array, ""],
     config: SimulationConfig,
     params: SimulationParams,
@@ -42,6 +43,8 @@ def _iteration_level_updates(
     Args:
         primitive_state: The primitive state array.
         key: The PRNG key.
+        forcing: The persistent Ornstein-Uhlenbeck forcing field (or ``None``
+            when OU forcing is inactive). Carried across steps in ``LoopState``.
         dt: The time step.
         config: The simulation configuration.
         params: The simulation parameters.
@@ -49,8 +52,8 @@ def _iteration_level_updates(
         registered_variables: The registered variables.
         current_time: The current simulation time.
     Returns:
-        The primitive state array with the 
-        iteration-level updates applied.
+        ``(key, forcing, primitive_state)`` with the iteration-level updates
+        applied.
     """
 
     # stellar wind
@@ -119,19 +122,31 @@ def _iteration_level_updates(
     if config.diffusion and config.solver_mode == FINITE_VOLUME:
         primitive_state = fv_viscosity_update(primitive_state, params, config, registered_variables, dt)
 
-    # turbulence forcing, TODO: move to physics modules
-    # NOTE: THE KEY IS CURRENTLY DIRECTLY IN THE CARRY
-    # FOR THE CASE WITHOUT SNAPSHOT DATA AND NOT PRESENT
-    # IN THE CARRY OTHERWISE. TODO: IMPROVE THIS.
+    # turbulence forcing. The PRNG key and (for OU forcing) the persistent
+    # forcing field are threaded through the loop in ``LoopState`` (see
+    # astronomix/time_stepping/time_integration.py).
     if config.turbulent_forcing_config.turbulent_forcing:
-        key, primitive_state = _apply_forcing(
-            key,
-            primitive_state,
-            dt,
-            params.turbulent_forcing_params,
-            config,
-            registered_variables,
-        )
+        if config.turbulent_forcing_config.ou_forcing:
+            # OU forcing carries a persistent solenoidal field ``forcing``;
+            # bundle it with the key into the (key, field) state the OU update
+            # expects and unpack the advanced state back out.
+            (key, forcing), primitive_state = _apply_ou_forcing(
+                (key, forcing),
+                primitive_state,
+                dt,
+                params.turbulent_forcing_params,
+                config,
+                registered_variables,
+            )
+        else:
+            key, primitive_state = _apply_forcing(
+                key,
+                primitive_state,
+                dt,
+                params.turbulent_forcing_params,
+                config,
+                registered_variables,
+            )
 
     # PRELIMINARY
     # Frame tracking, currently very specialized
@@ -145,8 +160,11 @@ def _iteration_level_updates(
             helper_data,
         )
 
-    # better safe than sorry
-    if config.enforce_positivity:
+    # per-step positivity (primitive state). HARD_FLOOR clamps density (and
+    # pressure for ideal gas); REDISTRIBUTE applies the conservative `prot`
+    # neighbour redistribution, but is skipped when turbulent forcing already
+    # runs `prot` each step (vacuum_protection) to avoid a redundant pass.
+    if config.positivity_per_step_mode == POSITIVITY_HARD_FLOOR:
         primitive_state = primitive_state.at[registered_variables.density_index].set(
             jnp.maximum(
                 primitive_state[registered_variables.density_index], params.minimum_density
@@ -158,5 +176,18 @@ def _iteration_level_updates(
                     primitive_state[registered_variables.pressure_index], params.minimum_pressure
                 )
             )
+    elif config.positivity_per_step_mode == POSITIVITY_REDISTRIBUTE:
+        _forcing_runs_prot = (
+            config.turbulent_forcing_config.turbulent_forcing
+            and config.turbulent_forcing_config.vacuum_protection
+        )
+        if not _forcing_runs_prot:
+            primitive_state = _vacuum_protection(
+                primitive_state,
+                params.minimum_density,
+                params.positivity_max_velocity,
+                config,
+                registered_variables,
+            )
 
-    return key, primitive_state
+    return key, forcing, primitive_state

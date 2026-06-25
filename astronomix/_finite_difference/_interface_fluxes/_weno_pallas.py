@@ -182,6 +182,681 @@ def _weno_flux_hydro_pallas(
     return _weno5_shard_wrap(_local, conserved_state, config, axis)
 
 
+def _weno_hydro_flux_from_window(q_stencil, gamma, rhomin, pgmin, ncomp, num_modes):
+    """Pure per-interface hydro-WENO flux from a gathered 6-cell stencil.
+
+    ``q_stencil`` is the tuple ``(q[-2], q[-1], q[0], q[+1], q[+2], q[+3])``
+    where each entry is a length-``ncomp`` tuple of the local conserved
+    components (density, normal momentum, transverse momenta..., energy) in the
+    per-axis characteristic order.  Returns the length-``ncomp`` list of WENO
+    interface fluxes ``flux_acc`` at ``i + 1/2``.
+
+    This is the *single source of truth* for the WENO arithmetic: the forward
+    Pallas kernel gathers ``q_stencil`` from ``q_ref`` and calls this; the
+    adjoint kernel gathers the same stencil and calls ``jax.vjp`` of this, so
+    the Pallas backward is the exact transpose of the Pallas forward by
+    construction (no separately-derived adjoint math).  Every operation here is
+    elementwise on the gathered arrays — no ref reads, slices or rolls — which
+    is what lets ``jax.vjp`` lower inside the Triton kernel.
+    """
+    gm1 = gamma - 1.0
+    epsilon = 1e-7
+    tiny = 1e-14
+
+    def primitive_from_q(q):
+        rho = q[0]
+        mn = q[1]
+        if ncomp == 3:
+            mt1 = 0.0
+            mt2 = 0.0
+            energy = q[2]
+        elif ncomp == 4:
+            mt1 = q[2]
+            mt2 = 0.0
+            energy = q[3]
+        else:
+            mt1 = q[2]
+            mt2 = q[3]
+            energy = q[4]
+
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho
+        vt1 = mt1 * inv_rho
+        vt2 = mt2 * inv_rho
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        pressure = gm1 * (energy - 0.5 * rho * v2)
+        return rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure
+
+    def floored_cell(q):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        troubled = (rho < rhomin) | (pressure < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        pressure_f = jnp.where(troubled, jnp.maximum(pressure, pgmin), pressure)
+        energy_f = jnp.where(troubled, pressure_f / gm1 + 0.5 * rho_f * v2, energy)
+        specific_enthalpy = (energy_f + pressure_f) / rho_f
+        sound_speed = jnp.sqrt(jnp.maximum(gamma * jnp.abs(pressure_f / rho_f), 1e-12))
+        return rho_f, mn, mt1, mt2, energy_f, vn, vt1, vt2, v2, pressure_f, specific_enthalpy, sound_speed
+
+    def flux_from_q(q):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        if ncomp == 3:
+            return (mn, mn * vn + pressure, (energy + pressure) * vn)
+        if ncomp == 4:
+            return (mn, mn * vn + pressure, mt1 * vn, (energy + pressure) * vn)
+        return (mn, mn * vn + pressure, mt1 * vn, mt2 * vn, (energy + pressure) * vn)
+
+    f_stencil = tuple(flux_from_q(q) for q in q_stencil)
+    floored_stencil = tuple(floored_cell(q) for q in q_stencil)
+
+    # Interface eigenvector building blocks at i + 1/2.
+    cell_l = floored_stencil[2]
+    cell_r = floored_stencil[3]
+    rho_i, mn_i, mt1_i, mt2_i, energy_i, vn_i, vt1_i, vt2_i, v2_i, p_i, h_i, c_i = cell_l
+    rho_j, mn_j, mt1_j, mt2_j, energy_j, vn_j, vt1_j, vt2_j, v2_j, p_j, h_j, c_j = cell_r
+    rho_face = jnp.maximum(0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin)), rhomin)
+    vn_face = 0.5 * (mn_i + mn_j) / rho_face
+    vt1_face = 0.5 * (mt1_i + mt1_j) / rho_face
+    vt2_face = 0.5 * (mt2_i + mt2_j) / rho_face
+    h_face = 0.5 * (h_i + h_j)
+    v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
+    c2_face = gm1 * (h_face - 0.5 * v2_face)
+    c_face = jnp.sqrt(jnp.maximum(c2_face, 1e-12))
+    inv_c2 = jnp.where(c2_face > 0.0, 1.0 / c2_face, 0.0)
+
+    def left_project(mode: int, values):
+        if mode == 0:
+            acc = (0.5 * gm1 * v2_face + vn_face * c_face) * values[0]
+            acc = acc - (gm1 * vn_face + c_face) * values[1]
+            if ncomp == 3:
+                acc = acc + gm1 * values[2]
+            elif ncomp == 4:
+                acc = acc - gm1 * vt1_face * values[2] + gm1 * values[3]
+            else:
+                acc = (
+                    acc
+                    - gm1 * vt1_face * values[2]
+                    - gm1 * vt2_face * values[3]
+                    + gm1 * values[4]
+                )
+            return 0.5 * inv_c2 * acc
+
+        if mode == 1:
+            acc = (c2_face - 0.5 * gm1 * v2_face) * values[0]
+            acc = acc + gm1 * vn_face * values[1]
+            if ncomp == 3:
+                acc = acc - gm1 * values[2]
+            elif ncomp == 4:
+                acc = acc + gm1 * vt1_face * values[2] - gm1 * values[3]
+            else:
+                acc = (
+                    acc
+                    + gm1 * vt1_face * values[2]
+                    + gm1 * vt2_face * values[3]
+                    - gm1 * values[4]
+                )
+            return inv_c2 * acc
+
+        if mode == 2 and ncomp >= 4:
+            return -vt1_face * values[0] + values[2]
+
+        if mode == 3 and ncomp == 5:
+            return -vt2_face * values[0] + values[3]
+
+        # Right acoustic wave.
+        acc = (0.5 * gm1 * v2_face - vn_face * c_face) * values[0]
+        acc = acc - (gm1 * vn_face - c_face) * values[1]
+        if ncomp == 3:
+            acc = acc + gm1 * values[2]
+        elif ncomp == 4:
+            acc = acc - gm1 * vt1_face * values[2] + gm1 * values[3]
+        else:
+            acc = (
+                acc
+                - gm1 * vt1_face * values[2]
+                - gm1 * vt2_face * values[3]
+                + gm1 * values[4]
+            )
+        return 0.5 * inv_c2 * acc
+
+    def add_right_correction(flux_acc, mode: int, Fs):
+        if mode == 0:
+            if ncomp == 3:
+                R = (1.0, vn_face - c_face, h_face - vn_face * c_face)
+            elif ncomp == 4:
+                R = (1.0, vn_face - c_face, vt1_face, h_face - vn_face * c_face)
+            else:
+                R = (1.0, vn_face - c_face, vt1_face, vt2_face, h_face - vn_face * c_face)
+        elif mode == 1:
+            if ncomp == 3:
+                R = (1.0, vn_face, 0.5 * v2_face)
+            elif ncomp == 4:
+                R = (1.0, vn_face, vt1_face, 0.5 * v2_face)
+            else:
+                R = (1.0, vn_face, vt1_face, vt2_face, 0.5 * v2_face)
+        elif mode == 2 and ncomp >= 4:
+            if ncomp == 4:
+                R = (0.0, 0.0, 1.0, vt1_face)
+            else:
+                R = (0.0, 0.0, 1.0, 0.0, vt1_face)
+        elif mode == 3 and ncomp == 5:
+            R = (0.0, 0.0, 0.0, 1.0, vt2_face)
+        else:
+            if ncomp == 3:
+                R = (1.0, vn_face + c_face, h_face + vn_face * c_face)
+            elif ncomp == 4:
+                R = (1.0, vn_face + c_face, vt1_face, h_face + vn_face * c_face)
+            else:
+                R = (1.0, vn_face + c_face, vt1_face, vt2_face, h_face + vn_face * c_face)
+        return [flux_acc[slot] + R[slot] * Fs for slot in range(ncomp)]
+
+    def lambda_from_floored_cell(cell, mode: int):
+        vn = cell[5]
+        c = cell[11]
+        if mode == 0:
+            return vn - c
+        if mode == num_modes - 1:
+            return vn + c
+        return vn
+
+    def alpha_for_mode(mode: int):
+        amx = jnp.abs(lambda_from_floored_cell(floored_stencil[0], mode))
+        for k in range(1, 6):
+            amx = jnp.maximum(
+                amx,
+                jnp.abs(lambda_from_floored_cell(floored_stencil[k], mode)),
+            )
+        return amx
+
+    flux_acc = [
+        (-f_stencil[1][slot] + 7.0 * f_stencil[2][slot] + 7.0 * f_stencil[3][slot] - f_stencil[4][slot]) / 12.0
+        for slot in range(ncomp)
+    ]
+
+    for mode in range(num_modes):
+        s = tuple(left_project(mode, f_stencil[k]) for k in range(6))
+        qproj = tuple(left_project(mode, q_stencil[k]) for k in range(6))
+
+        d0 = s[1] - s[0]
+        d1 = s[2] - s[1]
+        d2 = s[3] - s[2]
+        d3 = s[4] - s[3]
+        d4 = s[5] - s[4]
+
+        dq0 = qproj[1] - qproj[0]
+        dq1 = qproj[2] - qproj[1]
+        dq2 = qproj[3] - qproj[2]
+        dq3 = qproj[4] - qproj[3]
+        dq4 = qproj[5] - qproj[4]
+
+        amx = alpha_for_mode(mode)
+
+        aterm_p = 0.5 * (d0 + amx * dq0)
+        bterm_p = 0.5 * (d1 + amx * dq1)
+        cterm_p = 0.5 * (d2 + amx * dq2)
+        dterm_p = 0.5 * (d3 + amx * dq3)
+
+        IS0_p = 13.0 * (aterm_p - bterm_p) ** 2 + 3.0 * (aterm_p - 3.0 * bterm_p) ** 2
+        IS1_p = 13.0 * (bterm_p - cterm_p) ** 2 + 3.0 * (bterm_p + cterm_p) ** 2
+        IS2_p = 13.0 * (cterm_p - dterm_p) ** 2 + 3.0 * (3.0 * cterm_p - dterm_p) ** 2
+        alpha0_p = 1.0 / (epsilon + IS0_p) ** 2
+        alpha1_p = 6.0 / (epsilon + IS1_p) ** 2
+        alpha2_p = 3.0 / (epsilon + IS2_p) ** 2
+        alpha_sum_p = jnp.maximum(alpha0_p + alpha1_p + alpha2_p, tiny)
+        omega0_p = alpha0_p / alpha_sum_p
+        omega2_p = alpha2_p / alpha_sum_p
+        second = (
+            omega0_p * (aterm_p - 2.0 * bterm_p + cterm_p) / 3.0
+            + (omega2_p - 0.5) * (bterm_p - 2.0 * cterm_p + dterm_p) / 6.0
+        )
+
+        aterm_m = 0.5 * (d4 - amx * dq4)
+        bterm_m = 0.5 * (d3 - amx * dq3)
+        cterm_m = 0.5 * (d2 - amx * dq2)
+        dterm_m = 0.5 * (d1 - amx * dq1)
+
+        IS0_m = 13.0 * (aterm_m - bterm_m) ** 2 + 3.0 * (aterm_m - 3.0 * bterm_m) ** 2
+        IS1_m = 13.0 * (bterm_m - cterm_m) ** 2 + 3.0 * (bterm_m + cterm_m) ** 2
+        IS2_m = 13.0 * (cterm_m - dterm_m) ** 2 + 3.0 * (3.0 * cterm_m - dterm_m) ** 2
+        alpha0_m = 1.0 / (epsilon + IS0_m) ** 2
+        alpha1_m = 6.0 / (epsilon + IS1_m) ** 2
+        alpha2_m = 3.0 / (epsilon + IS2_m) ** 2
+        alpha_sum_m = jnp.maximum(alpha0_m + alpha1_m + alpha2_m, tiny)
+        omega0_m = alpha0_m / alpha_sum_m
+        omega2_m = alpha2_m / alpha_sum_m
+        third = (
+            omega0_m * (aterm_m - 2.0 * bterm_m + cterm_m) / 3.0
+            + (omega2_m - 0.5) * (bterm_m - 2.0 * cterm_m + dterm_m) / 6.0
+        )
+
+        Fs = -second + third
+        flux_acc = add_right_correction(flux_acc, mode, Fs)
+
+    return flux_acc
+
+
+def _weno_hydro_flux_from_window_adjoint(
+    q_stencil, flux_bar, gamma, rhomin, pgmin, ncomp, num_modes
+):
+    """Explicit reverse pass (vector-Jacobian product) of
+    :func:`_weno_hydro_flux_from_window`.
+
+    Given the 6-cell window ``q_stencil`` and the output cotangent ``flux_bar``
+    (length ``ncomp``) returns ``qbar_stencil`` — a length-6 list of length-
+    ``ncomp`` lists, the cotangent w.r.t. every stencil input.  This is a
+    HAND-DERIVED transpose written as plain elementwise arithmetic (no
+    ``jax.vjp``): the auto-generated VJP of the full WENO window is miscompiled
+    and slow to compile on the Triton GPU backend, whereas this explicit form
+    is ordinary arithmetic that Pallas/Triton lowers reliably and fast.  It is
+    validated bit-exact (~1e-15) against ``jax.vjp`` of the forward window in
+    ``pytests/pallas/_weno_window_adjoint_check.py``.
+    """
+    gm1 = gamma - 1.0
+    epsilon = 1e-7
+    tiny = 1e-14
+
+    # ---- forward per-cell maps (recomputed; needed for the reverse pass) ----
+    def primitive_from_q(q):
+        rho = q[0]; mn = q[1]
+        if ncomp == 3:
+            mt1 = 0.0; mt2 = 0.0; energy = q[2]
+        elif ncomp == 4:
+            mt1 = q[2]; mt2 = 0.0; energy = q[3]
+        else:
+            mt1 = q[2]; mt2 = q[3]; energy = q[4]
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho; vt1 = mt1 * inv_rho; vt2 = mt2 * inv_rho
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        pressure = gm1 * (energy - 0.5 * rho * v2)
+        return rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure
+
+    def floored_cell(q):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        troubled = (rho < rhomin) | (pressure < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        pressure_f = jnp.where(troubled, jnp.maximum(pressure, pgmin), pressure)
+        energy_f = jnp.where(troubled, pressure_f / gm1 + 0.5 * rho_f * v2, energy)
+        h = (energy_f + pressure_f) / rho_f
+        c = jnp.sqrt(jnp.maximum(gamma * jnp.abs(pressure_f / rho_f), 1e-12))
+        return rho_f, mn, mt1, mt2, energy_f, vn, vt1, vt2, v2, pressure_f, h, c
+
+    def flux_from_q(q):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        if ncomp == 3:
+            return (mn, mn * vn + pressure, (energy + pressure) * vn)
+        if ncomp == 4:
+            return (mn, mn * vn + pressure, mt1 * vn, (energy + pressure) * vn)
+        return (mn, mn * vn + pressure, mt1 * vn, mt2 * vn, (energy + pressure) * vn)
+
+    # ---- per-cell adjoints ----
+    def primitive_from_q_adj(q, bars):
+        rho = q[0]; mn = q[1]
+        if ncomp == 3:
+            mt1 = 0.0; mt2 = 0.0
+        elif ncomp == 4:
+            mt1 = q[2]; mt2 = 0.0
+        else:
+            mt1 = q[2]; mt2 = q[3]
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho; vt1 = mt1 * inv_rho; vt2 = mt2 * inv_rho
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        (b_rho, b_mn, b_mt1, b_mt2, b_energy, b_vn, b_vt1, b_vt2, b_v2, b_pressure) = bars
+        b_energy = b_energy + gm1 * b_pressure
+        b_rho = b_rho + gm1 * (-0.5 * v2) * b_pressure
+        b_v2 = b_v2 + gm1 * (-0.5 * rho) * b_pressure
+        b_vn = b_vn + 2.0 * vn * b_v2
+        b_vt1 = b_vt1 + 2.0 * vt1 * b_v2
+        b_vt2 = b_vt2 + 2.0 * vt2 * b_v2
+        b_inv_rho = mt2 * b_vt2 + mt1 * b_vt1 + mn * b_vn
+        b_mt2 = b_mt2 + inv_rho * b_vt2
+        b_mt1 = b_mt1 + inv_rho * b_vt1
+        b_mn = b_mn + inv_rho * b_vn
+        b_rho = b_rho + (-inv_rho * inv_rho) * b_inv_rho
+        if ncomp == 3:
+            return [b_rho, b_mn, b_energy]
+        if ncomp == 4:
+            return [b_rho, b_mn, b_mt1, b_energy]
+        return [b_rho, b_mn, b_mt1, b_mt2, b_energy]
+
+    def flux_from_q_adj(q, fbar):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        bd = dict(rho=0.0, mn=0.0, mt1=0.0, mt2=0.0, energy=0.0, vn=0.0,
+                  vt1=0.0, vt2=0.0, v2=0.0, pressure=0.0)
+        bd['mn'] += fbar[0]
+        bd['mn'] += fbar[1] * vn; bd['vn'] += fbar[1] * mn; bd['pressure'] += fbar[1]
+        if ncomp == 3:
+            bd['energy'] += fbar[2] * vn; bd['pressure'] += fbar[2] * vn; bd['vn'] += fbar[2] * (energy + pressure)
+        elif ncomp == 4:
+            bd['mt1'] += fbar[2] * vn; bd['vn'] += fbar[2] * mt1
+            bd['energy'] += fbar[3] * vn; bd['pressure'] += fbar[3] * vn; bd['vn'] += fbar[3] * (energy + pressure)
+        else:
+            bd['mt1'] += fbar[2] * vn; bd['vn'] += fbar[2] * mt1
+            bd['mt2'] += fbar[3] * vn; bd['vn'] += fbar[3] * mt2
+            bd['energy'] += fbar[4] * vn; bd['pressure'] += fbar[4] * vn; bd['vn'] += fbar[4] * (energy + pressure)
+        bars = (bd['rho'], bd['mn'], bd['mt1'], bd['mt2'], bd['energy'], bd['vn'],
+                bd['vt1'], bd['vt2'], bd['v2'], bd['pressure'])
+        return primitive_from_q_adj(q, bars)
+
+    def floored_cell_adj(q, bars12):
+        rho, mn, mt1, mt2, energy, vn, vt1, vt2, v2, pressure = primitive_from_q(q)
+        troubled = (rho < rhomin) | (pressure < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        pressure_f = jnp.where(troubled, jnp.maximum(pressure, pgmin), pressure)
+        energy_f = jnp.where(troubled, pressure_f / gm1 + 0.5 * rho_f * v2, energy)
+        ratio = pressure_f / rho_f
+        aval = gamma * jnp.abs(ratio)
+        c = jnp.sqrt(jnp.maximum(aval, 1e-12))
+        (b_rho_f, b_mn, b_mt1, b_mt2, b_energy_f, b_vn, b_vt1, b_vt2, b_v2,
+         b_pressure_f, b_h, b_c) = bars12
+        b_arg = b_c * 0.5 / c
+        b_aval = jnp.where(aval > 1e-12, b_arg, 0.0)
+        b_ratio = b_aval * gamma * jnp.sign(ratio)
+        b_pressure_f = b_pressure_f + b_ratio / rho_f
+        b_rho_f = b_rho_f + b_ratio * (-ratio / rho_f)
+        b_energy_f = b_energy_f + b_h / rho_f
+        b_pressure_f = b_pressure_f + b_h / rho_f
+        b_rho_f = b_rho_f + b_h * (-(energy_f + pressure_f) / (rho_f * rho_f))
+        b_pressure_f = b_pressure_f + jnp.where(troubled, b_energy_f / gm1, 0.0)
+        b_rho_f = b_rho_f + jnp.where(troubled, b_energy_f * 0.5 * v2, 0.0)
+        b_v2 = b_v2 + jnp.where(troubled, b_energy_f * 0.5 * rho_f, 0.0)
+        b_energy = jnp.where(troubled, 0.0, b_energy_f)
+        b_pressure = b_pressure_f * jnp.where(troubled, jnp.where(pressure > pgmin, 1.0, 0.0), 1.0)
+        b_rho = b_rho_f * jnp.where(troubled, jnp.where(rho > rhomin, 1.0, 0.0), 1.0)
+        bars = (b_rho, b_mn, b_mt1, b_mt2, b_energy, b_vn, b_vt1, b_vt2, b_v2, b_pressure)
+        return primitive_from_q_adj(q, bars)
+
+    def left_project_fwd(mode, values, fp):
+        vnf, vt1f, vt2f, cf, v2f, c2f, inv_c2 = (fp['vnf'], fp['vt1f'], fp['vt2f'],
+                                                 fp['cf'], fp['v2f'], fp['c2f'], fp['inv_c2'])
+        if mode == 0:
+            acc = (0.5 * gm1 * v2f + vnf * cf) * values[0] - (gm1 * vnf + cf) * values[1]
+            if ncomp == 3:
+                acc = acc + gm1 * values[2]
+            elif ncomp == 4:
+                acc = acc - gm1 * vt1f * values[2] + gm1 * values[3]
+            else:
+                acc = acc - gm1 * vt1f * values[2] - gm1 * vt2f * values[3] + gm1 * values[4]
+            return 0.5 * inv_c2 * acc
+        if mode == 1:
+            acc = (c2f - 0.5 * gm1 * v2f) * values[0] + gm1 * vnf * values[1]
+            if ncomp == 3:
+                acc = acc - gm1 * values[2]
+            elif ncomp == 4:
+                acc = acc + gm1 * vt1f * values[2] - gm1 * values[3]
+            else:
+                acc = acc + gm1 * vt1f * values[2] + gm1 * vt2f * values[3] - gm1 * values[4]
+            return inv_c2 * acc
+        if mode == 2 and ncomp >= 4:
+            return -vt1f * values[0] + values[2]
+        if mode == 3 and ncomp == 5:
+            return -vt2f * values[0] + values[3]
+        acc = (0.5 * gm1 * v2f - vnf * cf) * values[0] - (gm1 * vnf - cf) * values[1]
+        if ncomp == 3:
+            acc = acc + gm1 * values[2]
+        elif ncomp == 4:
+            acc = acc - gm1 * vt1f * values[2] + gm1 * values[3]
+        else:
+            acc = acc - gm1 * vt1f * values[2] - gm1 * vt2f * values[3] + gm1 * values[4]
+        return 0.5 * inv_c2 * acc
+
+    def left_project_adj(mode, values, fp, s_bar, vbar, fpbar):
+        vnf, vt1f, vt2f, cf, v2f, c2f, inv_c2 = (fp['vnf'], fp['vt1f'], fp['vt2f'],
+                                                 fp['cf'], fp['v2f'], fp['c2f'], fp['inv_c2'])
+        v = values
+        is_last = not ((mode == 0) or (mode == 1) or (mode == 2 and ncomp >= 4)
+                       or (mode == 3 and ncomp == 5))
+        if mode == 0 or is_last:
+            sgn = 1.0 if mode == 0 else -1.0
+            A0 = 0.5 * gm1 * v2f + sgn * vnf * cf
+            A1 = -(gm1 * vnf + sgn * cf)
+            k = 0.5 * inv_c2
+            acc = A0 * v[0] + A1 * v[1]
+            if ncomp == 3:
+                acc = acc + gm1 * v[2]
+            elif ncomp == 4:
+                acc = acc - gm1 * vt1f * v[2] + gm1 * v[3]
+            else:
+                acc = acc - gm1 * vt1f * v[2] - gm1 * vt2f * v[3] + gm1 * v[4]
+            vbar[0] += s_bar * k * A0
+            vbar[1] += s_bar * k * A1
+            if ncomp == 3:
+                vbar[2] += s_bar * k * gm1
+            elif ncomp == 4:
+                vbar[2] += s_bar * k * (-gm1 * vt1f); vbar[3] += s_bar * k * gm1
+            else:
+                vbar[2] += s_bar * k * (-gm1 * vt1f); vbar[3] += s_bar * k * (-gm1 * vt2f); vbar[4] += s_bar * k * gm1
+            fpbar['inv_c2'] += s_bar * 0.5 * acc
+            fpbar['v2f'] += s_bar * k * 0.5 * gm1 * v[0]
+            fpbar['vnf'] += s_bar * k * (sgn * cf * v[0] - gm1 * v[1])
+            fpbar['cf'] += s_bar * k * (sgn * vnf * v[0] - sgn * v[1])
+            if ncomp >= 4:
+                fpbar['vt1f'] += s_bar * k * (-gm1 * v[2])
+            if ncomp == 5:
+                fpbar['vt2f'] += s_bar * k * (-gm1 * v[3])
+        elif mode == 1:
+            B0 = c2f - 0.5 * gm1 * v2f
+            acc = B0 * v[0] + gm1 * vnf * v[1]
+            if ncomp == 3:
+                acc = acc - gm1 * v[2]
+            elif ncomp == 4:
+                acc = acc + gm1 * vt1f * v[2] - gm1 * v[3]
+            else:
+                acc = acc + gm1 * vt1f * v[2] + gm1 * vt2f * v[3] - gm1 * v[4]
+            vbar[0] += s_bar * inv_c2 * B0
+            vbar[1] += s_bar * inv_c2 * gm1 * vnf
+            if ncomp == 3:
+                vbar[2] += s_bar * inv_c2 * (-gm1)
+            elif ncomp == 4:
+                vbar[2] += s_bar * inv_c2 * gm1 * vt1f; vbar[3] += s_bar * inv_c2 * (-gm1)
+            else:
+                vbar[2] += s_bar * inv_c2 * gm1 * vt1f; vbar[3] += s_bar * inv_c2 * gm1 * vt2f; vbar[4] += s_bar * inv_c2 * (-gm1)
+            fpbar['inv_c2'] += s_bar * acc
+            fpbar['c2f'] += s_bar * inv_c2 * v[0]
+            fpbar['v2f'] += s_bar * inv_c2 * (-0.5 * gm1 * v[0])
+            fpbar['vnf'] += s_bar * inv_c2 * gm1 * v[1]
+            if ncomp >= 4:
+                fpbar['vt1f'] += s_bar * inv_c2 * gm1 * v[2]
+            if ncomp == 5:
+                fpbar['vt2f'] += s_bar * inv_c2 * gm1 * v[3]
+        elif mode == 2 and ncomp >= 4:
+            vbar[0] += s_bar * (-vt1f); vbar[2] += s_bar
+            fpbar['vt1f'] += s_bar * (-v[0])
+        elif mode == 3 and ncomp == 5:
+            vbar[0] += s_bar * (-vt2f); vbar[3] += s_bar
+            fpbar['vt2f'] += s_bar * (-v[0])
+
+    def weno_recon_fwd(aterm, bterm, cterm, dterm):
+        IS0 = 13.0 * (aterm - bterm) ** 2 + 3.0 * (aterm - 3.0 * bterm) ** 2
+        IS1 = 13.0 * (bterm - cterm) ** 2 + 3.0 * (bterm + cterm) ** 2
+        IS2 = 13.0 * (cterm - dterm) ** 2 + 3.0 * (3.0 * cterm - dterm) ** 2
+        a0 = 1.0 / (epsilon + IS0) ** 2; a1 = 6.0 / (epsilon + IS1) ** 2; a2 = 3.0 / (epsilon + IS2) ** 2
+        asum = jnp.maximum(a0 + a1 + a2, tiny)
+        om0 = a0 / asum; om2 = a2 / asum
+        return om0 * (aterm - 2.0 * bterm + cterm) / 3.0 + (om2 - 0.5) * (bterm - 2.0 * cterm + dterm) / 6.0
+
+    def weno_recon_adj(aterm, bterm, cterm, dterm, recon_bar):
+        IS0 = 13.0 * (aterm - bterm) ** 2 + 3.0 * (aterm - 3.0 * bterm) ** 2
+        IS1 = 13.0 * (bterm - cterm) ** 2 + 3.0 * (bterm + cterm) ** 2
+        IS2 = 13.0 * (cterm - dterm) ** 2 + 3.0 * (3.0 * cterm - dterm) ** 2
+        e0 = epsilon + IS0; e1 = epsilon + IS1; e2 = epsilon + IS2
+        a0 = 1.0 / e0 ** 2; a1 = 6.0 / e1 ** 2; a2 = 3.0 / e2 ** 2
+        s3 = a0 + a1 + a2; asum = jnp.maximum(s3, tiny)
+        om0 = a0 / asum; om2 = a2 / asum
+        P0 = (aterm - 2.0 * bterm + cterm) / 3.0
+        P2 = (bterm - 2.0 * cterm + dterm) / 6.0
+        ab = bb = cb = db = 0.0
+        om0_bar = recon_bar * P0; P0_bar = recon_bar * om0
+        om2_bar = recon_bar * P2; P2_bar = recon_bar * (om2 - 0.5)
+        ab += P0_bar / 3.0; bb += -2.0 * P0_bar / 3.0; cb += P0_bar / 3.0
+        bb += P2_bar / 6.0; cb += -2.0 * P2_bar / 6.0; db += P2_bar / 6.0
+        a0_bar = om0_bar / asum; asum_bar = om0_bar * (-a0 / asum ** 2)
+        a2_bar = om2_bar / asum; asum_bar += om2_bar * (-a2 / asum ** 2)
+        s3_bar = jnp.where(s3 > tiny, asum_bar, 0.0)
+        a0_bar += s3_bar; a1_bar = s3_bar; a2_bar += s3_bar
+        IS0_bar = a0_bar * (-2.0) * e0 ** (-3)
+        IS1_bar = a1_bar * 6.0 * (-2.0) * e1 ** (-3)
+        IS2_bar = a2_bar * 3.0 * (-2.0) * e2 ** (-3)
+        ab += IS0_bar * (26.0 * (aterm - bterm) + 6.0 * (aterm - 3.0 * bterm))
+        bb += IS0_bar * (-26.0 * (aterm - bterm) - 18.0 * (aterm - 3.0 * bterm))
+        bb += IS1_bar * (26.0 * (bterm - cterm) + 6.0 * (bterm + cterm))
+        cb += IS1_bar * (-26.0 * (bterm - cterm) + 6.0 * (bterm + cterm))
+        cb += IS2_bar * (26.0 * (cterm - dterm) + 18.0 * (3.0 * cterm - dterm))
+        db += IS2_bar * (-26.0 * (cterm - dterm) - 6.0 * (3.0 * cterm - dterm))
+        return ab, bb, cb, db
+
+    def lam_of(cell, mode):
+        vn = cell[5]; c = cell[11]
+        if mode == 0:
+            return vn - c
+        if mode == num_modes - 1:
+            return vn + c
+        return vn
+
+    # ---- forward recompute of shared intermediates ----
+    f_st = [flux_from_q(q) for q in q_stencil]
+    fl_st = [floored_cell(q) for q in q_stencil]
+    cl, cr = fl_st[2], fl_st[3]
+    rho_i, mn_i, mt1_i, mt2_i, e_i, vn_i, vt1_i, vt2_i, v2_i, p_i, h_i, c_i = cl
+    rho_j, mn_j, mt1_j, mt2_j, e_j, vn_j, vt1_j, vt2_j, v2_j, p_j, h_j, c_j = cr
+    rho_face = jnp.maximum(0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin)), rhomin)
+    vnf = 0.5 * (mn_i + mn_j) / rho_face
+    vt1f = 0.5 * (mt1_i + mt1_j) / rho_face
+    vt2f = 0.5 * (mt2_i + mt2_j) / rho_face
+    hf = 0.5 * (h_i + h_j)
+    v2f = vnf * vnf + vt1f * vt1f + vt2f * vt2f
+    c2f = gm1 * (hf - 0.5 * v2f)
+    cf = jnp.sqrt(jnp.maximum(c2f, 1e-12))
+    inv_c2 = jnp.where(c2f > 0.0, 1.0 / c2f, 0.0)
+    fp = dict(vnf=vnf, vt1f=vt1f, vt2f=vt2f, cf=cf, v2f=v2f, c2f=c2f, inv_c2=inv_c2, hf=hf)
+
+    qbar = [[0.0] * ncomp for _ in range(6)]
+    fbar_cell = [[0.0] * ncomp for _ in range(6)]
+    fp_bar = dict(vnf=0.0, vt1f=0.0, vt2f=0.0, cf=0.0, v2f=0.0, c2f=0.0, inv_c2=0.0, hf=0.0)
+    fl_bar = [[0.0] * 12 for _ in range(6)]
+
+    cc = [-1.0 / 12, 7.0 / 12, 7.0 / 12, -1.0 / 12]
+    for j, k in enumerate((1, 2, 3, 4)):
+        for slot in range(ncomp):
+            fbar_cell[k][slot] += flux_bar[slot] * cc[j]
+
+    last = ncomp - 1
+    for mode in range(num_modes):
+        s = [left_project_fwd(mode, f_st[k], fp) for k in range(6)]
+        qp = [left_project_fwd(mode, q_stencil[k], fp) for k in range(6)]
+        d = [s[i + 1] - s[i] for i in range(5)]
+        dq = [qp[i + 1] - qp[i] for i in range(5)]
+        lams = [lam_of(fl_st[k], mode) for k in range(6)]
+        absl = [jnp.abs(x) for x in lams]
+        amxs = [absl[0]]
+        for k in range(1, 6):
+            amxs.append(jnp.maximum(amxs[-1], absl[k]))
+        amx = amxs[-1]
+        ap = 0.5 * (d[0] + amx * dq[0]); bp = 0.5 * (d[1] + amx * dq[1])
+        cp = 0.5 * (d[2] + amx * dq[2]); dp = 0.5 * (d[3] + amx * dq[3])
+        am = 0.5 * (d[4] - amx * dq[4]); bm = 0.5 * (d[3] - amx * dq[3])
+        cm = 0.5 * (d[2] - amx * dq[2]); dm = 0.5 * (d[1] - amx * dq[1])
+        second = weno_recon_fwd(ap, bp, cp, dp)
+        third = weno_recon_fwd(am, bm, cm, dm)
+        Fs = -second + third
+
+        if mode == 0:
+            R = [1.0, vnf - cf] + ([vt1f] if ncomp >= 4 else []) + ([vt2f] if ncomp == 5 else []) + [hf - vnf * cf]
+        elif mode == 1:
+            R = [1.0, vnf] + ([vt1f] if ncomp >= 4 else []) + ([vt2f] if ncomp == 5 else []) + [0.5 * v2f]
+        elif mode == 2 and ncomp >= 4:
+            R = [0.0, 0.0, 1.0] + ([0.0] if ncomp == 5 else []) + [vt1f]
+        elif mode == 3 and ncomp == 5:
+            R = [0.0, 0.0, 0.0, 1.0, vt2f]
+        else:
+            R = [1.0, vnf + cf] + ([vt1f] if ncomp >= 4 else []) + ([vt2f] if ncomp == 5 else []) + [hf + vnf * cf]
+        Fs_bar = sum(flux_bar[slot] * R[slot] for slot in range(ncomp))
+        is_last = not ((mode == 0) or (mode == 1) or (mode == 2 and ncomp >= 4) or (mode == 3 and ncomp == 5))
+        if mode == 0 or is_last:
+            rs = -1.0 if mode == 0 else 1.0
+            fp_bar['vnf'] += Fs * flux_bar[1] * 1.0
+            fp_bar['cf'] += Fs * flux_bar[1] * rs
+            fp_bar['hf'] += Fs * flux_bar[last] * 1.0
+            fp_bar['vnf'] += Fs * flux_bar[last] * (rs * cf)
+            fp_bar['cf'] += Fs * flux_bar[last] * (rs * vnf)
+            if ncomp >= 4:
+                fp_bar['vt1f'] += Fs * flux_bar[2]
+            if ncomp == 5:
+                fp_bar['vt2f'] += Fs * flux_bar[3]
+        elif mode == 1:
+            fp_bar['vnf'] += Fs * flux_bar[1]
+            fp_bar['v2f'] += Fs * flux_bar[last] * 0.5
+            if ncomp >= 4:
+                fp_bar['vt1f'] += Fs * flux_bar[2]
+            if ncomp == 5:
+                fp_bar['vt2f'] += Fs * flux_bar[3]
+        elif mode == 2 and ncomp >= 4:
+            fp_bar['vt1f'] += Fs * flux_bar[last]
+        elif mode == 3 and ncomp == 5:
+            fp_bar['vt2f'] += Fs * flux_bar[last]
+
+        second_bar = -Fs_bar; third_bar = Fs_bar
+        ap_b, bp_b, cp_b, dp_b = weno_recon_adj(ap, bp, cp, dp, second_bar)
+        am_b, bm_b, cm_b, dm_b = weno_recon_adj(am, bm, cm, dm, third_bar)
+        d_b = [0.0] * 5; dq_b = [0.0] * 5; amx_b = 0.0
+        for (tb, di) in ((ap_b, 0), (bp_b, 1), (cp_b, 2), (dp_b, 3)):
+            d_b[di] += 0.5 * tb; dq_b[di] += 0.5 * amx * tb; amx_b += 0.5 * dq[di] * tb
+        for (tb, di) in ((am_b, 4), (bm_b, 3), (cm_b, 2), (dm_b, 1)):
+            d_b[di] += 0.5 * tb; dq_b[di] += -0.5 * amx * tb; amx_b += -0.5 * dq[di] * tb
+        s_b = [0.0] * 6; qp_b = [0.0] * 6
+        for i in range(5):
+            s_b[i + 1] += d_b[i]; s_b[i] += -d_b[i]
+            qp_b[i + 1] += dq_b[i]; qp_b[i] += -dq_b[i]
+        for k in range(6):
+            left_project_adj(mode, f_st[k], fp, s_b[k], fbar_cell[k], fp_bar)
+            left_project_adj(mode, q_stencil[k], fp, qp_b[k], qbar[k], fp_bar)
+        # amx = max_k |lambda_k|, built as a fold of jnp.maximum.  Reverse the
+        # fold exactly as jax does (lax.max sends the cotangent to the SECOND
+        # operand on ties) so the sub-gradient matches the native VJP at
+        # eigenvalue ties -- e.g. the u=0 contact wave of a shock tube, where
+        # all |lambda|=0 and the naive "route to every argmax" is wrong.
+        acc = amx_b
+        absl_bar = [0.0] * 6
+        for k in range(5, 0, -1):
+            prev_gets = amxs[k - 1] > absl[k]
+            absl_bar[k] = absl_bar[k] + jnp.where(prev_gets, 0.0, acc)
+            acc = jnp.where(prev_gets, acc, 0.0)
+        absl_bar[0] = absl_bar[0] + acc
+        for k in range(6):
+            lam_b = absl_bar[k] * jnp.sign(lams[k])
+            fl_bar[k][5] += lam_b
+            if mode == 0:
+                fl_bar[k][11] += lam_b * (-1.0)
+            elif mode == num_modes - 1:
+                fl_bar[k][11] += lam_b * (1.0)
+
+    # ---- face quantities adjoint -> floored cells 2, 3 ----
+    vnf_b = fp_bar['vnf']; vt1f_b = fp_bar['vt1f']; vt2f_b = fp_bar['vt2f']
+    cf_b = fp_bar['cf']; v2f_b = fp_bar['v2f']; c2f_b = fp_bar['c2f']
+    inv_c2_b = fp_bar['inv_c2']; hf_b = fp_bar['hf']
+    c2f_b += jnp.where(c2f > 0.0, -1.0 / c2f ** 2, 0.0) * inv_c2_b
+    c2f_b += jnp.where(c2f > 1e-12, 0.5 / cf, 0.0) * cf_b
+    hf_b += gm1 * c2f_b; v2f_b += gm1 * (-0.5) * c2f_b
+    vnf_b += 2.0 * vnf * v2f_b; vt1f_b += 2.0 * vt1f * v2f_b; vt2f_b += 2.0 * vt2f * v2f_b
+    fl_bar[2][10] += 0.5 * hf_b; fl_bar[3][10] += 0.5 * hf_b
+    rho_face_b = 0.0
+    num2 = 0.5 * (mt2_i + mt2_j); num2_b = vt2f_b / rho_face; rho_face_b += vt2f_b * (-num2 / rho_face ** 2)
+    fl_bar[2][3] += 0.5 * num2_b; fl_bar[3][3] += 0.5 * num2_b
+    num1 = 0.5 * (mt1_i + mt1_j); num1_b = vt1f_b / rho_face; rho_face_b += vt1f_b * (-num1 / rho_face ** 2)
+    fl_bar[2][2] += 0.5 * num1_b; fl_bar[3][2] += 0.5 * num1_b
+    numn = 0.5 * (mn_i + mn_j); numn_b = vnf_b / rho_face; rho_face_b += vnf_b * (-numn / rho_face ** 2)
+    fl_bar[2][1] += 0.5 * numn_b; fl_bar[3][1] += 0.5 * numn_b
+    inner = 0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin))
+    inner_b = jnp.where(inner > rhomin, rho_face_b, 0.0)
+    fl_bar[2][0] += 0.5 * jnp.where(rho_i > rhomin, 1.0, 0.0) * inner_b
+    fl_bar[3][0] += 0.5 * jnp.where(rho_j > rhomin, 1.0, 0.0) * inner_b
+
+    for k in range(6):
+        gq_fl = floored_cell_adj(q_stencil[k], fl_bar[k])
+        gq_fx = flux_from_q_adj(q_stencil[k], fbar_cell[k])
+        for c in range(ncomp):
+            qbar[k][c] = qbar[k][c] + gq_fl[c] + gq_fx[c]
+    return qbar
+
+
 def _weno_flux_hydro_pallas_local(
     conserved_state,
     params: SimulationParams,
@@ -545,6 +1220,179 @@ def _weno_flux_hydro_pallas_local(
         jnp.asarray(params.minimum_density, dtype=conserved_state.dtype),
         jnp.asarray(params.minimum_pressure, dtype=conserved_state.dtype),
     )
+
+
+def _weno_flux_hydro_pallas_vjp_local(
+    conserved_state,
+    flux_bar,
+    params: SimulationParams,
+    config: SimulationConfig,
+    registered_variables: RegisteredVariables,
+    *,
+    axis: int,
+):
+    """Native Pallas adjoint (VJP) of :func:`_weno_flux_hydro_pallas_local`.
+
+    Given the primal input ``conserved_state`` and the output cotangent
+    ``flux_bar`` (same shape as the WENO flux), returns the input cotangent
+    ``conserved_state_bar`` w.r.t. ``conserved_state``.
+
+    Strategy (see ``pytests/pallas/_vjp_in_kernel_spike.py`` and
+    ``pytests/pallas/_weno_vjp_check.py``): each grid block gathers its 6-cell
+    WENO stencil from ``q_ref`` exactly as the forward kernel does, runs
+    ``jax.vjp`` of the *shared* per-window flux function
+    :func:`_weno_hydro_flux_from_window` against the tile's flux cotangent.
+    Because forward and adjoint call the same window function, the Pallas
+    backward is the exact transpose of the Pallas forward by construction — no
+    separately-derived adjoint math.  Assembling the input cotangent is a
+    stencil scatter; rather than cross-block atomics (which Triton
+    mis-accumulates across blocks) the kernel emits the six per-offset
+    contributions into six non-overlapping BlockSpec-tiled buffers and the
+    scatter is a plain-JAX ``roll``-and-sum afterwards.
+
+    The kernel always gathers/scatters along the *leading* spatial axis: the
+    in-kernel ``jax.vjp`` is bit-exact in Pallas interpret mode for every axis,
+    but the Triton GPU lowering miscompiles it when the stencil offset is on a
+    non-leading spatial axis (validated).  For ``axis != 0`` we therefore
+    transpose the flux axis to the front — exactly what the native y/z flux
+    does — run the (GPU-correct) axis-0 path, and transpose the result back.
+    The momentum-component permutation lives in the variable axis
+    (``local_indices``) and is unaffected by the spatial transpose.
+
+    Single-device build (no ``shard_map``): the differentiable / inverse-problem
+    regime runs on one GPU.
+    """
+    ndim = int(config.dimensionality)
+    local_indices = _hydro_indices_for_axis(config, registered_variables, axis)
+    li = jnp.asarray(local_indices)
+    ncomp = len(local_indices)
+
+    # Run the kernel on a fully identity-indexed, axis-0 gather: bring the flux
+    # spatial axis to the front AND permute the conserved components into
+    # characteristic order, both in plain JAX.  Triton only lowers the in-kernel
+    # VJP correctly for this configuration — a non-leading gather axis OR a
+    # non-identity component permutation inside the kernel is miscompiled on the
+    # GPU backend (each is bit-exact in Pallas interpret mode, confirming the
+    # kernel logic; the discrepancy is purely the Triton lowering).  Both
+    # permutations are undone afterwards, also in plain JAX.
+    if axis == 0:
+        cs_s, fb_s, inv_perm = conserved_state, flux_bar, None
+    else:
+        perm = [0, axis + 1] + [a for a in range(1, ndim + 1) if a != axis + 1]
+        inv_perm = [perm.index(i) for i in range(ndim + 1)]
+        cs_s = jnp.transpose(conserved_state, perm)
+        fb_s = jnp.transpose(flux_bar, perm)
+    cs = cs_s[li]  # characteristic component order -> identity inside the kernel
+    fb = fb_s[li]
+
+    nvars = int(cs.shape[0])
+    spatial_shape = tuple(int(x) for x in cs.shape[1:])
+    nx = spatial_shape[0]
+    ny = spatial_shape[1] if ndim >= 2 else 1
+    nz = spatial_shape[2] if ndim == 3 else 1
+    bx, by, bz = _as_3tuple_block_shape(config.pallas_block_shape, ndim)
+    grid = (nx // bx, ny // by, nz // bz)
+
+    num_modes = ndim + 2
+    offsets = tuple(range(-2, 4))  # WENO5 stencil window
+
+    scalar_spec = pl.BlockSpec((), lambda bi, bj, bk: ())
+    full_spec = pl.BlockSpec(cs.shape, lambda bi, bj, bk: tuple([0] * (ndim + 1)))
+    if ndim == 1:
+        block_shape = (nvars, bx)
+        out_spec = pl.BlockSpec(block_shape, lambda bi, bj, bk: (0, bi))
+    elif ndim == 2:
+        block_shape = (nvars, bx, by)
+        out_spec = pl.BlockSpec(block_shape, lambda bi, bj, bk: (0, bi, bj))
+    else:
+        block_shape = (nvars, bx, by, bz)
+        out_spec = pl.BlockSpec(block_shape, lambda bi, bj, bk: (0, bi, bj, bk))
+
+    def kernel(q_ref, fbar_ref, gamma_ref, rhomin_ref, pgmin_ref, *out_refs):
+        bi = pl.program_id(0)
+        bj = pl.program_id(1)
+        bk = pl.program_id(2)
+
+        if ndim == 1:
+            ii = (bi * bx + jnp.arange(bx)) % nx
+        elif ndim == 2:
+            ii = (bi * bx + jnp.arange(bx)[:, None]) % nx
+            jj = (bj * by + jnp.arange(by)[None, :]) % ny
+        else:
+            ii = (bi * bx + jnp.arange(bx)[:, None, None]) % nx
+            jj = (bj * by + jnp.arange(by)[None, :, None]) % ny
+            kk = (bk * bz + jnp.arange(bz)[None, None, :]) % nz
+
+        gamma = gamma_ref[()]
+        rhomin = rhomin_ref[()]
+        pgmin = pgmin_ref[()]
+
+        def shifted_index(offset: int):
+            # Always offset the leading spatial axis (the flux axis, brought to
+            # the front by the transpose above).
+            if ndim == 1:
+                return ((ii + offset) % nx,)
+            if ndim == 2:
+                return ((ii + offset) % nx, jj)
+            return ((ii + offset) % nx, jj, kk)
+
+        def q_local(offset: int):
+            idx = shifted_index(offset)
+            return tuple(q_ref[(var,) + idx] for var in range(ncomp))
+
+        q_stencil = tuple(q_local(o) for o in offsets)
+
+        own = shifted_index(0)
+        flux_bar_slot = tuple(fbar_ref[(var,) + own] for var in range(ncomp))
+
+        # Hand-derived explicit adjoint (pure elementwise arithmetic, no
+        # jax.vjp): Triton miscompiles / is very slow to compile the
+        # auto-generated VJP of the full WENO window, so the backward uses the
+        # validated explicit transpose instead.
+        qbar_stencil = _weno_hydro_flux_from_window_adjoint(
+            q_stencil, flux_bar_slot, gamma, rhomin, pgmin, ncomp, num_modes
+        )
+
+        for o_idx in range(len(offsets)):
+            out_ref = out_refs[o_idx]
+            for comp in range(ncomp):
+                out_ref[comp, ...] = qbar_stencil[o_idx][comp]
+
+    kwargs = {}
+    compiler_params = _pallas_compiler_params(config)
+    if compiler_params is not None:
+        kwargs["compiler_params"] = compiler_params
+
+    out_shapes = tuple(jax.ShapeDtypeStruct(cs.shape, cs.dtype) for _ in offsets)
+    contributions = pl.pallas_call(
+        kernel,
+        out_shape=out_shapes,
+        grid=grid,
+        in_specs=[full_spec, full_spec, scalar_spec, scalar_spec, scalar_spec],
+        out_specs=tuple(out_spec for _ in offsets),
+        interpret=config.pallas_interpret,
+        name=f"hydro_weno_flux_vjp_axis_{axis}",
+        **kwargs,
+    )(
+        cs,
+        fb,
+        jnp.asarray(params.gamma, dtype=cs.dtype),
+        jnp.asarray(params.minimum_density, dtype=cs.dtype),
+        jnp.asarray(params.minimum_pressure, dtype=cs.dtype),
+    )
+
+    # contributions[o] holds, at interface cell i, the cotangent destined for
+    # source cell i + offset (along the leading spatial axis = array axis 1).
+    # U_bar[j] = sum_o contributions[o][j - offset] = sum_o roll(., offset).
+    ubar_char = sum(
+        jnp.roll(contributions[o_idx], offset, axis=1)
+        for o_idx, offset in enumerate(offsets)
+    )
+    # Undo the component permutation, then the spatial transpose (plain JAX).
+    conserved_state_bar = jnp.zeros_like(cs_s).at[li].set(ubar_char)
+    if inv_perm is not None:
+        conserved_state_bar = jnp.transpose(conserved_state_bar, inv_perm)
+    return conserved_state_bar
 
 
 # -----------------------------------------------------------------------------
