@@ -15,17 +15,37 @@ import jax.numpy as jnp
 
 # Importing cgols runs autocvd + the module-level constants/functions (cheap), but
 # not the simulation itself (guarded behind `if __name__ == "__main__"`).
-from cgols import build_config, analyse_results
+from cgols import (
+    _here,
+    analyse_results,
+    animate_wind_snapshots,
+    build_config,
+    plot_paper_slices,
+    plot_wind_timeseries,
+)
 
 config, registered_variables = build_config()
 
-final_state = jnp.asarray(np.load("cgols_final_state.npy"))
+# Read the states from the script directory (where cgols.py wrote them), not the
+# current working directory, so analysis works regardless of where it is launched.
+final_state = jnp.asarray(np.load(_here("cgols_final_state.npy")))
 
 try:
-    initial_state = jnp.asarray(np.load("cgols_initial_state.npy"))
+    initial_state = jnp.asarray(np.load(_here("cgols_initial_state.npy")))
 except FileNotFoundError:
     print("cgols_initial_state.npy not found - showing final-state diagnostics only.")
     initial_state = None
 
 analyse_results(final_state, config, registered_variables, initial_state=initial_state)
 print("Wrote cgols_static_check.png, cgols_vz_diagnostic.png, cgols_extras.png")
+
+# Intermediate-snapshot products (the wind animation + the outflow time-series).
+# These read the per-frame .npz files streamed to SNAPSHOTS_DIR/ during the run,
+# so they work even if the final state itself is unusable, and even if the run
+# blew up partway (the frames already on disk survive). Both functions print a
+# message and return if no frames are present.
+animate_wind_snapshots(config)
+plot_wind_timeseries(config)
+# Paper comparison: x-z density & temperature slices at 10/25/50/60 Myr (the last
+# two fall back to the capped run's final frame).
+plot_paper_slices(config, target_times_myr=(10.0, 25.0, 50.0, 60.0))

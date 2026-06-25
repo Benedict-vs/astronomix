@@ -7,16 +7,29 @@ def _show_diagnostics(t, min_density, min_pressure, max_speed, max_temperature, 
 
     Prints reduction scalars so a diverging run can be localised in time and by
     variable: which of density / pressure / speed / temperature degrades first,
-    and when ``has_nan`` first trips. Printed on its own line (newline, not a
-    carriage return) so it does not fight the progress bar for the terminal.
+    and when ``has_nan`` first trips.
+
+    The line is rewritten in place (carriage return, padded to the terminal width)
+    so successive steps update one status line instead of scrolling. The one
+    exception is divergence: when ``has_nan`` trips the line is committed with a
+    trailing newline so the crash point is preserved in the scrollback rather than
+    overwritten by the next step.
     """
-    flag = "  <-- NaN/inf!" if bool(has_nan) else ""
-    print(
-        f"\n[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
+    nan = bool(has_nan)
+    flag = "  <-- NaN/inf!" if nan else ""
+    msg = (
+        f"[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
         f"min_P={float(min_pressure):.3e}  max|v|={float(max_speed):.3e}  "
-        f"max_T(code)={float(max_temperature):.3e}{flag}",
-        flush=True,
+        f"max_T(code)={float(max_temperature):.3e}{flag}"
     )
+    width = shutil.get_terminal_size((80, 20)).columns
+    if nan:
+        # Commit the divergence line permanently (may wrap; that is fine).
+        print(f"\r{msg}", flush=True)
+    else:
+        # Rewrite one status line in place, clipped/padded to the terminal width so
+        # a previous, longer line is fully cleared and the line does not wrap.
+        print(f"\r{msg[:width].ljust(width)}", end="", flush=True)
 
 
 def _show_progress(

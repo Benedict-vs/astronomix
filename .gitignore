@@ -20,6 +20,8 @@ tests/trml/data
 tests/kelvin_helmholtz/figures/collection
 tests/kelvin_helmholtz/figures/sweep
 
+tests/self_gravity_tests/cgols_snapshots
+
 tests/cooling_corrector/data
 tests/mhd_tests/data
 tests/lancaster/data

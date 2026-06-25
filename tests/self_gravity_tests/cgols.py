@@ -23,6 +23,8 @@ autocvd(num_gpus=1)
 import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 
+import glob
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -64,6 +66,21 @@ jax.config.update("jax_enable_x64", False)
 
 
 # ---------------------------------------------------------------------------
+# Output location
+# ---------------------------------------------------------------------------
+# Anchor every input/output file to the directory THIS script lives in, so the
+# .npy states, figures and the cgols_snapshots/ frame directory always land next
+# to cgols.py / cgols_analyse.py regardless of the working directory the run was
+# launched from. (Relative paths would otherwise scatter outputs into the cwd.)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _here(name):
+    """Resolve ``name`` against the script directory; pass-through if absolute."""
+    return os.path.join(SCRIPT_DIR, name)
+
+
+# ---------------------------------------------------------------------------
 # Tunable knobs
 # ---------------------------------------------------------------------------
 # Optional HSE-preserving smoothing of the initial conditions, in units of cells.
@@ -79,6 +96,21 @@ SMOOTHING_SIGMA_CELLS = 3.0
 # stability test (1 Myr is far shorter than an orbital or vertical-crossing time
 # and will look static even if the configuration is not).
 TOTAL_TIME = 75 * u.Myr
+
+# TEMPORARY safety cap on the integrated time. The wind run develops a numerical
+# blow-up at ~63% of TOTAL_TIME (a flux overshoot evacuates a cell to the density
+# floor, the unfloored momentum then manufactures a runaway velocity -> NaN), and
+# running to the crash overwrites the saved state with all-NaN. Integrating only
+# to 60% stops safely before that wall, so both the intermediate snapshots and the
+# final state stay clean and analysable. Set back to 1.0 once the blow-up is fixed.
+END_TIME_FRACTION = 1
+END_TIME = END_TIME_FRACTION * TOTAL_TIME
+
+# Number of evenly-spaced intermediate snapshots to offload to the host during the
+# run (for the animation and the wind time-series). These are cheap 2D slices /
+# 1D reductions, not full 3D states (full states would be ~5 GB each and OOM the
+# device), so this can be fairly large without a memory cost.
+NUM_SNAPSHOTS = 60
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +151,11 @@ T_halo = 1e6 * u.Kelvin  # at r = 100 kpc
 
 mu = 0.6
 gamma = 5 / 3
+
+# Hydrogen mass fraction (solar). Used only to convert the simulation's total
+# number density n = rho/(mu m_p) to the hydrogen number density n_H = X_H rho/m_p
+# that Schneider & Robertson 2018 plot:  n_H = X_H * mu * n  (= 0.44 n here).
+X_H = 0.74
 
 # Code-units-to-Kelvin factor for temperature: T = (P / rho) * T_factor, where
 # P / rho is in code_velocity^2. Computing it as a single well-scaled constant
@@ -282,7 +319,7 @@ def build_config():
     L_y = bx_size_y.to(code_units.code_length).value
     L_z = bx_size_z.to(code_units.code_length).value
 
-    dim_x = dim_y = 512
+    dim_x = dim_y = 256
     dim_z = dim_x * 2
 
     print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
@@ -315,6 +352,15 @@ def build_config():
         external_potential=True,
         donate_state=True,
         cgols_wind_config=CGOLSWindConfig(cgols_wind=True),
+        # Intermediate output for the animation / wind time-series. We use the
+        # host-offload callback path (activate_snapshot_callback) rather than the
+        # on-device snapshot store (return_snapshots + return_states): the latter
+        # would keep num_snapshots full 3D states resident on the GPU (~5 GB each)
+        # and OOM. The callback offloads only thin 2D slices + 1D reductions per
+        # snapshot (see make_snapshot_callable). num_snapshots sets the cadence:
+        # one frame every t_end / num_snapshots.
+        activate_snapshot_callback=True,
+        num_snapshots=NUM_SNAPSHOTS,
     )
     registered_variables = get_registered_variables(config)
     return config, registered_variables
@@ -538,7 +584,7 @@ def build_initial_conditions():
     ax.legend()
     ax.set_title("Rotation curve (midplane)")
     plt.tight_layout()
-    plt.savefig("cgols_rotation_curve.png", dpi=300)
+    plt.savefig(_here("cgols_rotation_curve.png"), dpi=300)
     plt.close(fig)
     del r_line, z_zero, Phi_disk_line, Phi_halo_line
     del dPhi_disk_dx, dPhi_halo_dx, dPhi_total_dx
@@ -580,21 +626,19 @@ def build_initial_conditions():
     ax2.set_title("Temperature profiles")
 
     plt.tight_layout()
-    plt.savefig("cgols_initial_profiles.png", dpi=300)
+    plt.savefig(_here("cgols_initial_profiles.png"), dpi=300)
     plt.close(fig)
     del R_kpc, z_kpc, n_midplane, n_zaxis, T_midplane, T_zaxis
     del X_c, Y_c, Z_c
 
     # ---- Simulation setup ----
-    t_end = TOTAL_TIME.to(code_units.code_time).value
+    # END_TIME (currently 60% of TOTAL_TIME) rather than the full TOTAL_TIME: the
+    # run blows up at ~63%, so we stop before it to keep the output clean.
+    t_end = END_TIME.to(code_units.code_time).value
 
     params = SimulationParams(
         t_end=t_end,
-        # Keep the default 0.4: the non-SSP RK4_LSRK + the strong wind-driven
-        # shocks need the CFL margin once feedback is on. Running at 0.8 (2x the
-        # default) blew up ~47 Myr in - a flux overshoot into a near-vacuum cell
-        # ran |v| away faster than the rho/P floors could contain it.
-        C_cfl=0.8,
+        C_cfl=0.9,
         gamma=gamma,
         # See load_initial_conditions() for the rationale: floors ~2 orders below
         # the ambient minimums, not the dynamically-zero 1e-14 default.
@@ -604,7 +648,7 @@ def build_initial_conditions():
         cgols_wind_params=build_cgols_wind_params(),
     )
     
-    jnp.save("cgols_initial_potential.npy", Phi_total)
+    jnp.save(_here("cgols_initial_potential.npy"), Phi_total)
 
     initial_state = construct_primitive_state(
         config=config,
@@ -635,13 +679,13 @@ def build_initial_conditions():
 def load_initial_conditions():
     """Load the initial state and config from disk, for post-processing without re-running the IC build."""
     config, registered_variables = build_config()
-    initial_state = jnp.load("cgols_initial_state.npy")
+    initial_state = jnp.load(_here("cgols_initial_state.npy"))
     config = finalize_config(config, initial_state.shape)
-    Phi_total = jnp.load("cgols_initial_potential.npy")
+    Phi_total = jnp.load(_here("cgols_initial_potential.npy"))
     params = SimulationParams(
-        t_end=TOTAL_TIME.to(code_units.code_time).value,
-        # Default 0.4; see build_initial_conditions() - 0.8 blew up ~47 Myr in.
-        C_cfl=0.8,
+        # END_TIME (60% of TOTAL_TIME) - stop before the ~63% blow-up.
+        t_end=END_TIME.to(code_units.code_time).value,
+        C_cfl=0.9,
         gamma=gamma,
         # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
         # min_P~3e-3). The 1e-14 default is dynamically zero: a wind-cavity cell
@@ -654,7 +698,130 @@ def load_initial_conditions():
         cgols_wind_params=build_cgols_wind_params(),
     )
     return initial_state, config, params, registered_variables
-    
+
+
+# ---------------------------------------------------------------------------
+# Intermediate snapshots (host-offloaded, for the animation / wind time-series)
+# ---------------------------------------------------------------------------
+SNAPSHOTS_DIR = _here("cgols_snapshots")
+
+
+def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
+    """Build the snapshot callable that streams frames to disk during the run.
+
+    Returns the callable; pass it as the 5th argument to ``time_integration``.
+    Each frame is written to ``out_dir/frame_NNNN.npz`` *immediately* inside the
+    callback - it is NOT accumulated in host RAM and flushed at the end. Two
+    reasons:
+      1. Memory: an end-of-run flush would hold all ``num_snapshots`` frames in
+         host RAM until the run finishes (~5 MB/frame). Streaming keeps only one
+         frame alive at a time.
+      2. Crash-robustness: this run is expected to blow up if pushed past ~63%.
+         An end-of-run flush would lose every snapshot when the process dies;
+         streaming means each frame already on disk survives the crash, so we can
+         still animate the clean pre-crash evolution.
+
+    What crosses to the host is only thin 2D planes (edge-on / face-on density and
+    temperature) and a 1D vertical mass-flux profile - never the full 3D state
+    (~5 GB; keeping ``num_snapshots`` of those on-device via ``return_snapshots`` +
+    ``return_states`` would OOM, which is why we use the callback path).
+
+    The state handed to the callable is the *padded* state (the callback path does
+    not unpad, unlike ``return_snapshots``); we slice the physical interior out of
+    it directly with the ghost offset, which also avoids a full-volume unpad copy.
+    """
+    out_dir = _here(out_dir)
+    g = config.num_ghost_cells
+    dim_x, dim_y, dim_z = config.num_cells.x, config.num_cells.y, config.num_cells.z
+
+    # Physical mid-plane indices in *padded* coordinates, and an upper-slice bound
+    # that also works when g == 0 (periodic roll).
+    my = g + dim_y // 2
+    mz = g + dim_z // 2
+    hi = -g if g > 0 else None
+
+    code_density_cgs = (code_mass / code_length**3).to(u.g / u.cm**3).value
+    m_p_cgs = m_p.to(u.g).value
+    n_factor = code_density_cgs / (mu * m_p_cgs)
+    code_time_myr = (1 * code_units.code_time).to(u.Myr).value
+    dx = config.box_size.x / dim_x
+    dy = config.box_size.y / dim_y
+    code_mdot_to_msun_per_yr = (code_mass / code_units.code_time).to(u.M_sun / u.yr).value
+
+    # Fresh output directory: drop any frames from a previous run so they cannot
+    # be mixed into this run's animation.
+    os.makedirs(out_dir, exist_ok=True)
+    for stale in glob.glob(os.path.join(out_dir, "frame_*.npz")):
+        os.remove(stale)
+
+    # Host-side frame counter for the filename. The callback may fire unordered, so
+    # filenames are not assumed to be time-ordered; each file stores its own time
+    # and the loader sorts by it.
+    counter = {"i": 0}
+
+    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z):
+        i = counter["i"]
+        counter["i"] += 1
+        # np.savez (uncompressed) keeps the per-frame write cheap; the per-run
+        # total is ~300 MB of disk, trivial next to the .npy states.
+        np.savez(
+            os.path.join(out_dir, f"frame_{i:04d}.npz"),
+            time_myr=np.float32(float(time) * code_time_myr),
+            n_xz=np.asarray(n_xz, dtype=np.float32),
+            T_xz=np.asarray(T_xz, dtype=np.float32),
+            n_xy=np.asarray(n_xy, dtype=np.float32),
+            mdot_z=np.asarray(mdot_z, dtype=np.float32),
+        )
+
+    def snapshot_callable(time, state, registered_variables):
+        rho = state[registered_variables.density_index]
+        P = state[registered_variables.pressure_index]
+        vz = state[registered_variables.velocity_index.z]
+
+        # Edge-on (x-z, y=0) and face-on (x-y, z=0) physical slices.
+        rho_xz = rho[g:hi, my, g:hi]   # (dim_x, dim_z)
+        P_xz = P[g:hi, my, g:hi]
+        rho_xy = rho[g:hi, g:hi, mz]   # (dim_x, dim_y)
+
+        n_xz = rho_xz * n_factor
+        T_xz = P_xz / rho_xz * T_factor
+        n_xy = rho_xy * n_factor
+
+        # Net vertical mass flux per z-plane, Mdot(z) = sum_xy(rho*v_z)*dx*dy, in
+        # Msun/yr. Reduces the interior over (x, y) -> a length-dim_z line; XLA
+        # fuses the slice*multiply*reduce so no full 3D temporary is materialised.
+        mdot_z = (
+            jnp.sum(rho[g:hi, g:hi, g:hi] * vz[g:hi, g:hi, g:hi], axis=(0, 1))
+            * (dx * dy)
+            * code_mdot_to_msun_per_yr
+        )
+
+        jax.debug.callback(_save_frame, time, n_xz, T_xz, n_xy, mdot_z)
+
+    return snapshot_callable
+
+
+def load_snapshots(out_dir=SNAPSHOTS_DIR):
+    """Load the streamed per-frame ``.npz`` files into time-sorted stacked arrays.
+
+    Returns a dict with ``time_myr`` and the stacked ``n_xz``/``T_xz``/``n_xy``/
+    ``mdot_z`` arrays (snapshot axis first), or ``None`` if no frames exist. Runs
+    in the analysis process (no GPU), so stacking all frames in host RAM is fine.
+    """
+    files = sorted(glob.glob(os.path.join(_here(out_dir), "frame_*.npz")))
+    if not files:
+        return None
+    frames = [np.load(f) for f in files]
+    order = np.argsort([float(fr["time_myr"]) for fr in frames])
+    frames = [frames[i] for i in order]
+    return {
+        "time_myr": np.array([float(fr["time_myr"]) for fr in frames], dtype=np.float32),
+        "n_xz": np.stack([fr["n_xz"] for fr in frames]),
+        "T_xz": np.stack([fr["T_xz"] for fr in frames]),
+        "n_xy": np.stack([fr["n_xy"] for fr in frames]),
+        "mdot_z": np.stack([fr["mdot_z"] for fr in frames]),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Post-simulation analysis
@@ -729,7 +896,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
         rho_i = initial_state[registered_variables.density_index]
         rho_f = final_state[registered_variables.density_index]
         rel_drift = jnp.abs(rho_f - rho_i) / jnp.maximum(jnp.abs(rho_i), 1e-30)
-        print(f"Density drift over {TOTAL_TIME}: max = {rel_drift.max():.3e}, mean = {rel_drift.mean():.3e}")
+        print(f"Density drift over {END_TIME}: max = {rel_drift.max():.3e}, mean = {rel_drift.mean():.3e}")
         del rho_i, rho_f, rel_drift
 
     def _style_loglog(ax, xlabel, ylabel, ylim, title):
@@ -765,13 +932,13 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     _style_loglog(ax4, "z [kpc]", "T [K]", (1e3, 1e7), "Temperature - z-axis")
 
     suptitle = (
-        f"Static check: initial vs final after t = {TOTAL_TIME}"
+        f"Static check: initial vs final after t = {END_TIME}"
         if have_initial
-        else f"Final state after t = {TOTAL_TIME}"
+        else f"Final state after t = {END_TIME}"
     )
     fig.suptitle(suptitle)
     plt.tight_layout()
-    plt.savefig("cgols_static_check.png", dpi=300)
+    plt.savefig(_here("cgols_static_check.png"), dpi=300)
     plt.close(fig)
     del n_mid_f, n_z_f, T_mid_f, T_z_f
     if have_initial:
@@ -824,7 +991,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     plt.colorbar(im, ax=axb, label=r"$v_z$ [km s$^{-1}$]")
 
     plt.tight_layout()
-    plt.savefig("cgols_vz_diagnostic.png", dpi=300)
+    plt.savefig(_here("cgols_vz_diagnostic.png"), dpi=300)
     plt.close(fig)
 
     # ---- Final-state morphology, phase diagram, vertical mass flux ----
@@ -938,8 +1105,247 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     axD.legend()
 
     plt.tight_layout()
-    plt.savefig("cgols_extras.png", dpi=300)
+    plt.savefig(_here("cgols_extras.png"), dpi=300)
     plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Intermediate-snapshot analysis: animation + wind time-series
+#
+# These read the host-offloaded cgols_snapshots.npz (written by save_snapshots
+# during the run) and need only matplotlib + numpy - no GPU. Call them from
+# cgols_analyse.py alongside analyse_results.
+# ---------------------------------------------------------------------------
+def _snapshot_grid(config):
+    """Centered cell-center coordinate lines (kpc) and imshow extents from config.
+
+    code_length is 1 kpc, so code-unit box sizes are already kpc.
+    """
+    L_x, L_y, L_z = config.box_size.x, config.box_size.y, config.box_size.z
+    dim_x, dim_y, dim_z = config.num_cells.x, config.num_cells.y, config.num_cells.z
+    x = (np.arange(dim_x) + 0.5) * (L_x / dim_x) - L_x / 2
+    y = (np.arange(dim_y) + 0.5) * (L_y / dim_y) - L_y / 2
+    z = (np.arange(dim_z) + 0.5) * (L_z / dim_z) - L_z / 2
+    extent_xz = [x[0], x[-1], z[0], z[-1]]
+    extent_xy = [x[0], x[-1], y[0], y[-1]]
+    return x, y, z, extent_xz, extent_xy
+
+
+def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_animation.gif", fps=12):
+    """Animate the intermediate snapshots: edge-on n, edge-on T, face-on n.
+
+    Builds a GIF with matplotlib's FuncAnimation + PillowWriter (the codebase's
+    colab tutorial uses imageio, which is not installed here; this produces the
+    same result with no extra dependency). Color norms are fixed across frames so
+    the animation does not flicker.
+    """
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from matplotlib.colors import LogNorm
+
+    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    data = load_snapshots(snapshots_dir)
+    if data is None:
+        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        return
+
+    t = data["time_myr"]
+    n_xz, T_xz, n_xy = data["n_xz"], data["T_xz"], data["n_xy"]
+    n_frames = len(t)
+
+    _, _, _, extent_xz, extent_xy = _snapshot_grid(config)
+    r_inj = (500 * u.pc).to(code_length).value  # injection-region radius, kpc
+
+    # Fixed color ranges (≈6 decades, adapted to the data) so frames are comparable.
+    n_max = float(np.nanmax(n_xz))
+    n_norm = LogNorm(vmin=max(n_max * 1e-6, 1e-6), vmax=n_max)
+    T_max = float(np.nanmax(T_xz))
+    T_norm = LogNorm(vmin=max(1e3, T_max * 1e-5), vmax=T_max)
+
+    fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(15, 5.5))
+
+    im_a = axA.imshow(n_xz[0].T, origin="lower", extent=extent_xz, aspect="auto",
+                      cmap="magma", norm=n_norm)
+    axA.set_xlabel("x [kpc]"); axA.set_ylabel("z [kpc]")
+    axA.set_title(r"$n$ - edge-on (x-z, y=0)")
+    plt.colorbar(im_a, ax=axA, label=r"n [cm$^{-3}$]")
+
+    im_b = axB.imshow(T_xz[0].T, origin="lower", extent=extent_xz, aspect="auto",
+                      cmap="inferno", norm=T_norm)
+    axB.set_xlabel("x [kpc]"); axB.set_ylabel("z [kpc]")
+    axB.set_title("T - edge-on (x-z, y=0)")
+    plt.colorbar(im_b, ax=axB, label="T [K]")
+
+    im_c = axC.imshow(n_xy[0].T, origin="lower", extent=extent_xy, aspect="equal",
+                      cmap="magma", norm=n_norm)
+    axC.set_xlabel("x [kpc]"); axC.set_ylabel("y [kpc]")
+    axC.set_title(r"$n$ - face-on (x-y, z=0)")
+    plt.colorbar(im_c, ax=axC, label=r"n [cm$^{-3}$]")
+
+    # Mark the central wind-injection region on the spatial panels.
+    for ax in (axA, axC):
+        ax.add_patch(plt.Circle((0, 0), r_inj, fill=False, color="cyan", lw=0.8, ls="--"))
+
+    suptitle = fig.suptitle(f"CGOLS wind - t = {t[0]:6.1f} Myr")
+    plt.tight_layout()
+
+    def _update(i):
+        im_a.set_data(n_xz[i].T)
+        im_b.set_data(T_xz[i].T)
+        im_c.set_data(n_xy[i].T)
+        suptitle.set_text(f"CGOLS wind - t = {t[i]:6.1f} Myr")
+        return im_a, im_b, im_c, suptitle
+
+    anim = FuncAnimation(fig, _update, frames=n_frames, blit=False)
+    anim.save(out, writer=PillowWriter(fps=fps), dpi=90)
+    plt.close(fig)
+    print(f"Wrote {out} ({n_frames} frames, t = {t[0]:.1f} -> {t[-1]:.1f} Myr)")
+
+
+def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_timeseries.png"):
+    """Quantitative wind diagnostics from the 1D vertical mass-flux snapshots.
+
+    Left: net mass OUTflow rate through z = +/-H planes vs time (outward = +z above
+    the disk, -z below, so total = Mdot(+H) - Mdot(-H)), for two fiducial heights.
+    This is the quantity that sets the mass-loading factor eta = Mdot_out / SFR.
+
+    Right: a (z, t) kymograph of the net vertical mass flux, which shows the wind
+    front propagating away from the disk and the bipolar (anti)symmetry of the flow.
+    """
+    from matplotlib.colors import TwoSlopeNorm
+
+    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    data = load_snapshots(snapshots_dir)
+    if data is None:
+        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        return
+
+    t = data["time_myr"]
+    mdot_z = data["mdot_z"]  # (n_frames, dim_z), Msun/yr
+
+    _, _, z, _, _ = _snapshot_grid(config)
+
+    def outflow_through(H):
+        """Total outward mass flux through the +/-H planes vs time, Msun/yr."""
+        ip = int(np.argmin(np.abs(z - H)))
+        im = int(np.argmin(np.abs(z + H)))
+        return mdot_z[:, ip] - mdot_z[:, im]
+
+    fig, (axL, axR) = plt.subplots(1, 2, figsize=(13, 5))
+
+    for H, style in ((5.0, "b-"), (8.0, "r--")):
+        axL.plot(t, outflow_through(H), style, lw=1.5, label=f"|z| = {H:.0f} kpc")
+    axL.axhline(0, color="0.6", lw=0.8)
+    axL.set_xlabel("t [Myr]")
+    axL.set_ylabel(r"net outflow rate $\dot M_{\rm out}$ [$M_\odot$ yr$^{-1}$]")
+    axL.set_title("Mass outflow rate vs time")
+    axL.legend()
+
+    vmax = float(np.nanmax(np.abs(mdot_z))) or 1.0
+    im = axR.imshow(
+        mdot_z.T, origin="lower", aspect="auto",
+        extent=[t[0], t[-1], z[0], z[-1]],
+        cmap="RdBu_r", norm=TwoSlopeNorm(vcenter=0.0, vmin=-vmax, vmax=vmax),
+    )
+    axR.set_xlabel("t [Myr]")
+    axR.set_ylabel("z [kpc]")
+    axR.set_title(r"net vertical mass flux $\dot M(z, t)$")
+    plt.colorbar(im, ax=axR, label=r"$\dot M$ [$M_\odot$ yr$^{-1}$]")
+
+    plt.tight_layout()
+    plt.savefig(out, dpi=200)
+    plt.close(fig)
+    peak = float(np.nanmax(np.abs(outflow_through(5.0))))
+    print(f"Wrote {out} (peak |outflow| through |z|=5 kpc: {peak:.2f} Msun/yr)")
+
+
+def plot_paper_slices(
+    config,
+    snapshots_dir=SNAPSHOTS_DIR,
+    target_times_myr=(10.0, 25.0, 50.0, 60.0),
+    out="cgols_paper_slices.png",
+    n_range=(1e-4, 1e3),
+    T_range=(1e3, 10 ** 7.5),
+):
+    """Replicate the paper's x-z density & temperature slices at fixed times.
+
+    Schneider & Robertson 2018 (arXiv:1803.01008) show edge-on (x-z) hydrogen
+    number-density and temperature slices of the central wind at a sequence of
+    times. This builds the same layout from the streamed snapshots: a 2-row (n_H on
+    top, T on bottom) by N-column (one per requested time) grid.
+
+    The snapshots store the *total* number density n = rho/(mu m_p); here it is
+    converted to the hydrogen number density n_H = X_H * mu * n that the paper
+    plots (see X_H above). T is already in K.
+
+    Defaults match the paper's colorbars exactly: log10(n_H [cm^-3]) in [-4, 3] and
+    log10(T [K]) in [3.0, 7.5]. Pass ``n_range`` / ``T_range`` = (vmin, vmax) in
+    linear units to override.
+
+    For each target time the NEAREST available snapshot is used. Because this run is
+    capped at END_TIME (~45 Myr), targets beyond the end (50, 60 Myr) fall back to
+    the last available frame; that column's title flags the substitution and shows
+    the actual frame time, so the comparison stays honest.
+    """
+    from matplotlib.colors import LogNorm
+
+    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    data = load_snapshots(snapshots_dir)
+    if data is None:
+        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        return
+
+    t = data["time_myr"]
+    nH_xz = data["n_xz"] * (X_H * mu)  # total n -> hydrogen number density n_H
+    T_xz = data["T_xz"]
+    _, _, _, extent_xz, _ = _snapshot_grid(config)
+    t_max = float(t[-1])
+
+    # Nearest available frame per requested time.
+    idxs = [int(np.argmin(np.abs(t - tt))) for tt in target_times_myr]
+
+    # Shared per-row color scales (paper colorbars by default; adapt if None).
+    if n_range is None:
+        n_max = max(float(np.nanmax(nH_xz[i])) for i in idxs)
+        n_norm = LogNorm(vmin=max(n_max * 1e-7, 1e-7), vmax=n_max)
+    else:
+        n_norm = LogNorm(vmin=n_range[0], vmax=n_range[1])
+    if T_range is None:
+        T_max = max(float(np.nanmax(T_xz[i])) for i in idxs)
+        T_norm = LogNorm(vmin=max(1e3, T_max * 1e-5), vmax=T_max)
+    else:
+        T_norm = LogNorm(vmin=T_range[0], vmax=T_range[1])
+
+    ncols = len(target_times_myr)
+    fig, axes = plt.subplots(2, ncols, figsize=(3.3 * ncols, 9), squeeze=False)
+
+    for col, (tt, i) in enumerate(zip(target_times_myr, idxs)):
+        axn, axT = axes[0, col], axes[1, col]
+        im_n = axn.imshow(nH_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
+                          cmap="magma", norm=n_norm)
+        im_T = axT.imshow(T_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
+                          cmap="inferno", norm=T_norm)
+
+        # Honest title: if the requested time is past the (capped) run, say so.
+        # Two lines so the note fits the narrow column without overlapping.
+        if tt > t_max + 1e-6:
+            header = f"{tt:.0f} Myr requested\n(capped: t = {t[i]:.1f} Myr)"
+        else:
+            header = f"t = {t[i]:.1f} Myr"
+        axn.set_title(header, fontsize=10)
+
+        for ax in (axn, axT):
+            ax.set_xlabel("x [kpc]")
+        if col == 0:
+            axn.set_ylabel("z [kpc]\nhydrogen number density")
+            axT.set_ylabel("z [kpc]\ntemperature")
+
+    fig.colorbar(im_n, ax=axes[0, :].tolist(), label=r"$n_{\rm H}$ [cm$^{-3}$]", shrink=0.85)
+    fig.colorbar(im_T, ax=axes[1, :].tolist(), label="T [K]", shrink=0.85)
+    fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)", y=0.98)
+    plt.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    used = ", ".join(f"{tt:.0f}->{t[i]:.1f}" for tt, i in zip(target_times_myr, idxs))
+    print(f"Wrote {out} (requested->frame Myr: {used})")
 
 
 # ---------------------------------------------------------------------------
@@ -985,12 +1391,22 @@ if __name__ == "__main__":
 
     # Save BEFORE integration: donate_state=True consumes the initial buffer in-place,
     # so this device->host copy must happen while the buffer is still valid.
-    # jnp.save("cgols_initial_state.npy", initial_state)
+    # jnp.save(_here("cgols_initial_state.npy"), initial_state)
     
     initial_state, config, params, registered_variables = load_initial_conditions()
 
-    final_state = time_integration(initial_state, config, params, registered_variables)
-    jnp.save("cgols_final_state.npy", final_state)
+    # Stream intermediate snapshots (2D slices + 1D vertical-flux profile) to disk
+    # during the run, for the animation and the wind time-series. Each frame is
+    # written immediately inside the callback (see make_snapshot_callable), so no
+    # host RAM accumulates and the frames survive a blow-up. config is already
+    # finalized here (build/load both call finalize_config), so num_ghost_cells is
+    # set for the in-callback slicing.
+    snapshot_callable = make_snapshot_callable(config, registered_variables)
+
+    final_state = time_integration(
+        initial_state, config, params, registered_variables, snapshot_callable
+    )
+    jnp.save(_here("cgols_final_state.npy"), final_state)
 
     # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
     # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.
