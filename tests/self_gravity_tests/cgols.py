@@ -48,7 +48,6 @@ from astronomix.option_classes.simulation_config import (
     FINITE_DIFFERENCE,
     OPEN_BOUNDARY,
     PALLAS,
-    PERIODIC_BOUNDARY,
     RK4_LSRK,
     SIMPLE_SOURCE_TERM,
     BoundarySettings,
@@ -93,8 +92,7 @@ def _here(name):
 SMOOTHING_SIGMA_CELLS = 3.0
 
 # Total integration time. The paper runs 75 Myr total; bump this up for a real
-# stability test (1 Myr is far shorter than an orbital or vertical-crossing time
-# and will look static even if the configuration is not).
+# stability test.
 TOTAL_TIME = 75 * u.Myr
 
 # TEMPORARY safety cap on the integrated time. The wind run develops a numerical
@@ -319,7 +317,7 @@ def build_config():
     L_y = bx_size_y.to(code_units.code_length).value
     L_z = bx_size_z.to(code_units.code_length).value
 
-    dim_x = dim_y = 256
+    dim_x = dim_y = 512
     dim_z = dim_x * 2
 
     print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
@@ -342,17 +340,23 @@ def build_config():
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
         self_gravity=False,
         self_gravity_version=SIMPLE_SOURCE_TERM,
-        # Positivity backstops (Leonard's upstream work; both default OFF). These
-        # target the ~48 Myr blow-up directly: when a WENO overshoot drives a cell
-        # below the density floor, vacuum_rest zeros its momentum so the recovered
-        # velocity is 0 instead of momentum / rho_floor (the runaway that fed the
-        # crash), and nan_safe resets any non-finite cell to a valid floor state
-        # before it can propagate. Both are honoured by the PALLAS kernel. If this
-        # alone is not enough, try positivity_per_step_mode=POSITIVITY_REDISTRIBUTE
-        # (neighbour-averaging, gentler at strong shocks but not strictly
-        # mass-conserving).
+        # Positivity backstops (all default OFF). vacuum_rest zeros a floored
+        # cell's momentum (recovered v=0 instead of momentum/rho_floor) and
+        # nan_safe resets non-finite cells to a valid floor state; both honoured by
+        # the PALLAS kernels. At 256x256x512 these sufficed, but at 512x512x1024 the
+        # crash only MOVED (vacuum_rest 73%; +stage REDISTRIBUTE 66%, earlier):
+        # both safeguards key off minimum_density, but the v=m/rho runaway forms in
+        # the near-floor BAND (rho just ABOVE the floor — observed min_rho=1.559e-4)
+        # in the outer-halo polar funnel, where no density-threshold safeguard
+        # reaches. positivity_velocity_clip is the global fix: it caps |v| at
+        # params.positivity_max_velocity for EVERY cell (not just sub-floor ones),
+        # inside the per-stage HARD_FLOOR enforcement, density-independent. Applied
+        # after the pressure inversion so thermal energy is preserved and only the
+        # unphysical kinetic excess is dropped. (Native + PALLAS, validated bit-
+        # identical; see cgols_512_precrash.png for the precursor.)
         positivity_vacuum_rest=True,
         positivity_nan_safe=True,
+        positivity_velocity_clip=True,
         progress_bar=True,
         monitor_diagnostics=True,
         boundary_settings=BoundarySettings(
@@ -643,7 +647,7 @@ def build_initial_conditions():
     del X_c, Y_c, Z_c
 
     # ---- Simulation setup ----
-    # END_TIME (currently 60% of TOTAL_TIME) rather than the full TOTAL_TIME: the
+    # END_TIME rather than the full TOTAL_TIME: the
     # run blows up at ~63%, so we stop before it to keep the output clean.
     t_end = END_TIME.to(code_units.code_time).value
 
@@ -655,10 +659,15 @@ def build_initial_conditions():
         # the ambient minimums, not the dynamically-zero 1e-14 default.
         minimum_density=1e-4,
         minimum_pressure=1e-5,
+        # Global velocity ceiling for positivity_velocity_clip (50 code = 5000
+        # km/s: well above any physical galactic wind, far below the ~1e5-code-unit
+        # runaway that NaN'd the 512^3 run). Caps |v| in EVERY cell, not just
+        # sub-floor ones.
+        positivity_max_velocity=50.0,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
-    
+
     jnp.save(_here("cgols_initial_potential.npy"), Phi_total)
 
     initial_state = construct_primitive_state(
@@ -705,6 +714,9 @@ def load_initial_conditions():
         # gradient while leaving the rarefied cavity room to form.
         minimum_density=1e-4,
         minimum_pressure=1e-5,
+        # See build_initial_conditions(): global velocity ceiling for
+        # positivity_velocity_clip (50 code = 5000 km/s).
+        positivity_max_velocity=50.0,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
@@ -1332,7 +1344,7 @@ def plot_paper_slices(
     for col, (tt, i) in enumerate(zip(target_times_myr, idxs)):
         axn, axT = axes[0, col], axes[1, col]
         im_n = axn.imshow(nH_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
-                          cmap="magma", norm=n_norm)
+                          cmap="viridis", norm=n_norm)
         im_T = axT.imshow(T_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
                           cmap="inferno", norm=T_norm)
 

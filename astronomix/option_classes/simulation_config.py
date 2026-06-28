@@ -360,6 +360,16 @@ class SimulationConfig(NamedTuple):
     #: floors so they become a valid floored state. Off by default (adds a pass).
     positivity_nan_safe: bool = False
 
+    #: Global velocity ceiling in the density-floor enforcement (ideal gas). When
+    #: True, ``|v|`` is capped at ``params.positivity_max_velocity`` for EVERY cell
+    #: (not just sub-floor ones, unlike ``vacuum_rest``/``REDISTRIBUTE`` which key
+    #: off ``minimum_density``). This catches the ``v = momentum / rho`` runaway
+    #: that forms in the *near-floor band* — cells whose density sits just ABOVE
+    #: the floor, where no density-threshold safeguard reaches. The cap is applied
+    #: after inverting the (floored) pressure, so the thermal energy is preserved
+    #: and only the unphysical kinetic excess is discarded. Off by default.
+    positivity_velocity_clip: bool = False
+
     #: Self gravity switch, currently only
     #: for periodic boundaries.
     self_gravity: bool = False

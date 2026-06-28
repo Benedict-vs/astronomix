@@ -53,6 +53,7 @@ def _enforce_positivity_pallas(
     gamma,
     minimum_density,
     minimum_pressure,
+    max_velocity,
     registered_variables: RegisteredVariables,
 ):
     """In-place Pallas positivity floor.  Same arithmetic as the native
@@ -76,6 +77,7 @@ def _enforce_positivity_pallas(
             gamma,
             minimum_density,
             minimum_pressure,
+            max_velocity,
             registered_variables,
         )
 
@@ -93,6 +95,7 @@ def _enforce_positivity_pallas_local(
     gamma,
     minimum_density,
     minimum_pressure,
+    max_velocity,
     registered_variables: RegisteredVariables,
 ):
     """Single-shard kernel build.  Called either directly (single device)
@@ -128,6 +131,7 @@ def _enforce_positivity_pallas_local(
         BZ = int(registered_variables.magnetic_index.z)
 
     vacuum_rest = bool(config.positivity_vacuum_rest)
+    velocity_clip = bool(config.positivity_velocity_clip)
     if ndim == 1:
         MOM_VARS = (MX,)
     elif ndim == 2:
@@ -149,7 +153,7 @@ def _enforce_positivity_pallas_local(
         in_spec = pl.BlockSpec(conserved_state.shape, lambda bi, bj, bk: (0, 0, 0, 0))
     scalar_spec = pl.BlockSpec((), lambda bi, bj, bk: ())
 
-    def kernel(q_in_ref, gamma_ref, rhomin_ref, pmin_ref, q_out_ref):
+    def kernel(q_in_ref, gamma_ref, rhomin_ref, pmin_ref, vmax_ref, q_out_ref):
         bi = pl.program_id(0)
         bj = pl.program_id(1)
         bk = pl.program_id(2)
@@ -167,6 +171,7 @@ def _enforce_positivity_pallas_local(
         gm1 = gamma - 1.0
         rhomin = rhomin_ref[()]
         pmin = pmin_ref[()]
+        vmax = vmax_ref[()]
 
         nan_safe = bool(config.positivity_nan_safe)
 
@@ -216,6 +221,26 @@ def _enforce_positivity_pallas_local(
             else:
                 pressure = gm1 * (energy - 0.5 * rho_floored * v2)
             pressure_floored = jnp.maximum(pressure, pmin)
+
+            # Global velocity ceiling (config.positivity_velocity_clip): mirror the
+            # native clip — cap |v| per component, write the capped momentum, and
+            # recompute v2 from the clipped velocities so the energy below carries
+            # only the bounded kinetic part.  Applied AFTER the pressure inversion
+            # so the floored thermal energy is unchanged.  Bit-identical no-op when
+            # the flag is off (this branch is skipped entirely).
+            if velocity_clip:
+                vx = jnp.clip(mx / rho_floored, -vmax, vmax)
+                mom_clipped = {MX: rho_floored * vx}
+                v2 = vx * vx
+                if ndim >= 2:
+                    vy = jnp.clip(my / rho_floored, -vmax, vmax)
+                    mom_clipped[MY] = rho_floored * vy
+                    v2 = v2 + vy * vy
+                if ndim == 3:
+                    vz = jnp.clip(mz / rho_floored, -vmax, vmax)
+                    mom_clipped[MZ] = rho_floored * vz
+                    v2 = v2 + vz * vz
+
             if is_mhd:
                 energy_floored = pressure_floored / gm1 + 0.5 * rho_floored * v2 + 0.5 * b2
             else:
@@ -227,6 +252,8 @@ def _enforce_positivity_pallas_local(
                 q_out_ref[var, ...] = rho_floored
             elif is_ideal and var == E:
                 q_out_ref[var, ...] = energy_floored
+            elif is_ideal and velocity_clip and var in MOM_VARS:
+                q_out_ref[var, ...] = mom_clipped[var]
             elif vacuum_rest and var in MOM_VARS:
                 q_out_ref[var, ...] = mom_read(var)
             else:
@@ -241,7 +268,7 @@ def _enforce_positivity_pallas_local(
         kernel,
         out_shape=jax.ShapeDtypeStruct(conserved_state.shape, conserved_state.dtype),
         grid=grid,
-        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec],
+        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec],
         out_specs=out_spec,
         interpret=config.pallas_interpret,
         name="enforce_positivity",
@@ -251,6 +278,7 @@ def _enforce_positivity_pallas_local(
         jnp.asarray(gamma, dtype=conserved_state.dtype),
         jnp.asarray(minimum_density, dtype=conserved_state.dtype),
         jnp.asarray(minimum_pressure, dtype=conserved_state.dtype),
+        jnp.asarray(max_velocity, dtype=conserved_state.dtype),
     )
 
 

@@ -31,12 +31,13 @@ def _enforce_positivity_native(
     gamma: Union[float, Float[Array, ""]],
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
+    max_velocity: Union[float, Float[Array, ""]],
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     return _enforce_positivity_native_impl(
         conserved_state, config, gamma,
-        minimum_density, minimum_pressure, registered_variables,
+        minimum_density, minimum_pressure, max_velocity, registered_variables,
     )
 
 
@@ -49,21 +50,22 @@ def _enforce_positivity(
     gamma: Union[float, Float[Array, ""]],
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
+    max_velocity: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     if _enforce_positivity_pallas_supported(conserved_state, config):
-        pallas = lambda s, g, mr, mp: _enforce_positivity_pallas(  # noqa: E731
-            s, config, g, mr, mp, registered_variables,
+        pallas = lambda s, g, mr, mp, mv: _enforce_positivity_pallas(  # noqa: E731
+            s, config, g, mr, mp, mv, registered_variables,
         )
-        native = lambda s, g, mr, mp: _enforce_positivity_native(  # noqa: E731
-            s, g, mr, mp, config, registered_variables,
+        native = lambda s, g, mr, mp, mv: _enforce_positivity_native(  # noqa: E731
+            s, g, mr, mp, mv, config, registered_variables,
         )
         return diffable_pallas_call_n(
-            (conserved_state, gamma, minimum_density, minimum_pressure),
+            (conserved_state, gamma, minimum_density, minimum_pressure, max_velocity),
             pallas_branch=pallas, native_branch=native,
         )
     return _enforce_positivity_native(
-        conserved_state, gamma, minimum_density, minimum_pressure,
+        conserved_state, gamma, minimum_density, minimum_pressure, max_velocity,
         config, registered_variables,
     )
 
@@ -74,6 +76,7 @@ def _enforce_positivity_native_impl(
     gamma: Union[float, Float[Array, ""]],
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
+    max_velocity: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     # Optional NaN/inf backstop: jnp.maximum(NaN, floor) = NaN, so a non-finite
@@ -146,6 +149,38 @@ def _enforce_positivity_native_impl(
             pressure = (gamma - 1.0) * (energy - 0.5 * rho * v2)
         
         pressure = jnp.maximum(pressure, minimum_pressure)
+
+        # Global velocity ceiling (config.positivity_velocity_clip): cap |v| at
+        # max_velocity for EVERY cell, not just sub-floor ones. The v = momentum /
+        # rho runaway forms in the near-floor band (rho just ABOVE the floor) where
+        # vacuum_rest / REDISTRIBUTE — both keyed to minimum_density — never reach.
+        # We clip AFTER the pressure inversion above (so the floored thermal energy
+        # stays correct), write the capped momentum back, and recompute v2 so the
+        # energy below carries only the bounded kinetic part (the unphysical excess
+        # is discarded). max_velocity sits well above any physical speed -> a true
+        # no-op except on pathological cells.
+        if config.positivity_velocity_clip:
+            v_x = jnp.clip(v_x, -max_velocity, max_velocity)
+            if config.dimensionality == 1:
+                conserved_state = conserved_state.at[
+                    registered_variables.momentum_index].set(rho * v_x)
+                v2 = v_x**2
+            else:
+                conserved_state = conserved_state.at[
+                    registered_variables.momentum_index.x].set(rho * v_x)
+                if config.dimensionality == 2:
+                    v_y = jnp.clip(v_y, -max_velocity, max_velocity)
+                    conserved_state = conserved_state.at[
+                        registered_variables.momentum_index.y].set(rho * v_y)
+                    v2 = v_x**2 + v_y**2
+                elif config.dimensionality == 3:
+                    v_y = jnp.clip(v_y, -max_velocity, max_velocity)
+                    v_z = jnp.clip(v_z, -max_velocity, max_velocity)
+                    conserved_state = conserved_state.at[
+                        registered_variables.momentum_index.y].set(rho * v_y)
+                    conserved_state = conserved_state.at[
+                        registered_variables.momentum_index.z].set(rho * v_z)
+                    v2 = v_x**2 + v_y**2 + v_z**2
 
         # redefine energy with new pressure
         if config.mhd:
@@ -275,7 +310,8 @@ def _redistribute_positivity_native(
         E_patched = jnp.where(has, sum_neighbors(E * valid_f) / count_safe, E)
         out = out.at[ei].set(jnp.where(is_invalid, E_patched, E))
         out = _enforce_positivity_native_impl(
-            out, config, gamma, threshold, minimum_pressure, registered_variables,
+            out, config, gamma, threshold, minimum_pressure, max_velocity,
+            registered_variables,
         )
 
     return out
@@ -295,7 +331,8 @@ def _apply_stage_positivity(
     if mode == POSITIVITY_HARD_FLOOR:
         return _enforce_positivity(
             conserved_state, config, gamma,
-            minimum_density, minimum_pressure, registered_variables,
+            minimum_density, minimum_pressure, positivity_max_velocity,
+            registered_variables,
         )
     if mode == POSITIVITY_REDISTRIBUTE:
         return _redistribute_positivity(
