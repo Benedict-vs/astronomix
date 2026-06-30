@@ -10,16 +10,44 @@ uses NO radiative cooling. See the cooling section at the end of the file for
 the paper's cooling curve and notes on the radiative B/C series.
 """
 
-# ==== GPU selection ====
+# TODO: move all cgols related code and artifacts into tests/self_gravity_tests/cgols/
+# with seperate folder for benchmarks etc. everything neatly organised.
+# TODO: cleanup code including removing previous testing and comments related to this
+
+# ==== GPU selection / multi-GPU domain decomposition ====
 from autocvd import autocvd
-autocvd(num_gpus=1)
+
+# Domain decomposition across GPUs. SHARD_SPLIT is the number of shards along each
+# of the four state axes (variables, x, y, z); its product is the number of GPUs
+# used. 
+# (1, 1, 1, 1) is the original single-GPU path (no sharding)
+# (1, 2, 1, 1) splits the x-axis across 2 GPUs, roughly halving the ~28 GB/device peak;
+# (1, 1, 1, 2) splits z instead
+# Only split spatial axes (leave VARAXIS = 1). The split axis's cell count must
+# divide evenly by its shard count AND the per-device slice must stay divisible
+# by pallas_block_shape (4, 4, 8): e.g. x = 512 / 2 = 256 and 256 / 4 is exact,
+# so (1, 2, 1, 1) on the 512x512x1024 grid is valid.
+
+# All of the knobs below default to their literal values, so a plain
+# `python cgols.py` is unchanged; the scaling driver (cgols_scaling.py) sets the
+# CGOLS_* environment variables to sweep resolution / sharding / a short
+# fixed-step benchmark without editing this file.
+import ast
+import os
+
+SHARD_SPLIT = ast.literal_eval(os.environ.get("CGOLS_SHARD_SPLIT", "(1, 2, 2, 1)"))
+NUM_GPUS = SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3]
+
+autocvd(num_gpus=NUM_GPUS)
 # ruff: noqa: E402
-# =======================
+# =========================================================
 
 # At 512x512x1024 the compiled solver peaks at ~28.5 GB/device, which fits on a
 # 40 GB A100 but exceeds JAX's default 0.75 preallocation (~30 GB) once BFC
 # fragmentation is accounted for. Raise the fraction so a ~20 GB intermediate
-# buffer can be placed. setdefault lets a command-line override still win.
+# buffer can be placed. This fraction is applied PER DEVICE, so in a multi-GPU
+# (SHARD_SPLIT) run every visible GPU independently preallocates 0.95 of its own
+# memory - it is not a shared budget. setdefault lets a command-line override win.
 import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 
@@ -27,7 +55,16 @@ import glob
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import AxisType, PartitionSpec as P
 import numpy as np
+
+# astronomix names its mesh axes with integers (VARAXIS=0, XAXIS=1, ...). jax
+# 0.10.1 defaults to the Shardy partitioner, whose sdy.MeshAxisAttr.get(name,
+# size) requires name to be a *str* and raises a TypeError on the integer axis
+# names. The older GSPMD partitioner accepts them, so disable Shardy for the
+# sharded run. (Harmless on the single-GPU path, which never builds a mesh.)
+if NUM_GPUS > 1:
+    jax.config.update("jax_use_shardy_partitioner", False)
 
 import astropy.constants as const
 from astropy import units as u
@@ -50,6 +87,10 @@ from astronomix.option_classes.simulation_config import (
     PALLAS,
     RK4_LSRK,
     SIMPLE_SOURCE_TERM,
+    VARAXIS,
+    XAXIS,
+    YAXIS,
+    ZAXIS,
     BoundarySettings,
     BoundarySettings1D,
     StaticFloatVector,
@@ -101,6 +142,7 @@ TOTAL_TIME = 75 * u.Myr
 # running to the crash overwrites the saved state with all-NaN. Integrating only
 # to 60% stops safely before that wall, so both the intermediate snapshots and the
 # final state stay clean and analysable. Set back to 1.0 once the blow-up is fixed.
+# TODO:This has been fixed and needs removing at some point later in time.
 END_TIME_FRACTION = 1
 END_TIME = END_TIME_FRACTION * TOTAL_TIME
 
@@ -109,6 +151,33 @@ END_TIME = END_TIME_FRACTION * TOTAL_TIME
 # 1D reductions, not full 3D states (full states would be ~5 GB each and OOM the
 # device), so this can be fairly large without a memory cost.
 NUM_SNAPSHOTS = 60
+
+CREATE_IC = os.environ.get("CGOLS_CREATE_IC", "0") == "1"  # build the initial conditions and save them to .npy files
+# if set to False, the run will load the .npy files and run simulation from them
+
+# Resolution
+RESOLUTION = int(os.environ.get("CGOLS_DIM", "512"))  # cells along the x/y axes; z is always 2x this
+
+# Optional suffix for the IC .npy filenames so runs at different resolutions
+# (or the scaling benchmark) don't overwrite the production initial state.
+IC_TAG = os.environ.get("CGOLS_IC_TAG", "")
+
+# Benchmark mode: when CGOLS_BENCH_STEPS > 0 the run does exactly that many
+# fixed-size timesteps (no CFL — physically meaningless, but the per-step compute
+# work is identical), prints the per-device memory + elapsed time, and skips all
+# snapshot I/O. Used by cgols_scaling.py to measure sec/step and peak memory
+# without a multi-hour run. 0 = normal production run.
+BENCH_STEPS = int(os.environ.get("CGOLS_BENCH_STEPS", "0"))
+
+
+def _ic_state_path():
+    """Path to the saved initial primitive state (IC_TAG-suffixed)."""
+    return _here(f"cgols_initial_state{IC_TAG}.npy")
+
+
+def _ic_potential_path():
+    """Path to the saved external gravitational potential (IC_TAG-suffixed)."""
+    return _here(f"cgols_initial_potential{IC_TAG}.npy")
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +263,12 @@ def build_cgols_wind_params():
     # ramps via interpolation.
     knot_times_myr = jnp.array([0.0, 5.0, 6.0, 10.0, 40.0, 45.0])
     return CGOLSWindParams(
-        # 500 pc rather than the paper's 300 pc: spreading the same Mdot/Edot
-        # over a larger gain region lowers the injected energy density (and thus
-        # the peak temperature / sound speed), which relaxes the stiffness of
-        # the source and the CFL hit once feedback is on.
-        injection_radius=(500 * u.pc).to(code_units.code_length).value,
+        # The paper's 300 pc gain region. The higher injected energy density it
+        # implies (same Mdot/Edot over ~4.6x less volume than the old 500 pc
+        # workaround) drives a near-floor-density cell into an unbounded-T / sound
+        # speed CFL collapse; that is now handled by the positivity_temperature_clip
+        # ceiling (see build_config), so the physical radius can be used directly.
+        injection_radius=(300 * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
         schedule_mass_rates=jnp.array(
             [0.0, 0.0, mdot_low, mdot_high, mdot_high, mdot_low]
@@ -317,7 +387,7 @@ def build_config():
     L_y = bx_size_y.to(code_units.code_length).value
     L_z = bx_size_z.to(code_units.code_length).value
 
-    dim_x = dim_y = 512
+    dim_x = dim_y = RESOLUTION
     dim_z = dim_x * 2
 
     print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
@@ -357,8 +427,23 @@ def build_config():
         positivity_vacuum_rest=True,
         positivity_nan_safe=True,
         positivity_velocity_clip=True,
-        progress_bar=True,
-        monitor_diagnostics=True,
+        # Thermal twin of positivity_velocity_clip. With the paper's 300 pc
+        # injection radius the same Edot over ~4.6x less volume drives sharper,
+        # hotter contacts; a WENO energy overshoot into a near-floor-density cell
+        # otherwise gives T = (P/rho)*T_factor ~ 1e21-1e25 K, an unbounded sound
+        # speed, and a collapsed CFL timestep. This caps P/rho (see
+        # positivity_max_pressure_over_density below) so c_s stays finite. It
+        # replaces the larger-injection-radius CFL cushion the 500 pc workaround
+        # relied on.
+        positivity_temperature_clip=True,
+        # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
+        # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
+        # progress_bar / monitor add per-step host syncs, so drop them when timing.
+        fixed_timestep=bool(BENCH_STEPS),
+        num_timesteps=(BENCH_STEPS if BENCH_STEPS else 1000),
+        print_elapsed_time=bool(BENCH_STEPS),
+        progress_bar=(not BENCH_STEPS),
+        monitor_diagnostics=(not BENCH_STEPS),
         boundary_settings=BoundarySettings(
             BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
             BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
@@ -374,7 +459,7 @@ def build_config():
         # and OOM. The callback offloads only thin 2D slices + 1D reductions per
         # snapshot (see make_snapshot_callable). num_snapshots sets the cadence:
         # one frame every t_end / num_snapshots.
-        activate_snapshot_callback=True,
+        activate_snapshot_callback=(not BENCH_STEPS),
         num_snapshots=NUM_SNAPSHOTS,
     )
     registered_variables = get_registered_variables(config)
@@ -664,11 +749,17 @@ def build_initial_conditions():
         # runaway that NaN'd the 512^3 run). Caps |v| in EVERY cell, not just
         # sub-floor ones.
         positivity_max_velocity=50.0,
+        # Temperature ceiling for positivity_temperature_clip. The solver caps
+        # P/rho in code units, so convert the physical T_max via T_factor
+        # (T = (P/rho)*T_factor). 5e8 K is ~25x the ~2e7 K CC85 hot wind: high
+        # enough to leave real wind/shock-heated gas untouched, far below the
+        # 1e21-1e25 K near-vacuum runaway that collapses the timestep at 300 pc.
+        positivity_max_pressure_over_density=5e8 / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
 
-    jnp.save(_here("cgols_initial_potential.npy"), Phi_total)
+    jnp.save(_ic_potential_path(), Phi_total)
 
     initial_state = construct_primitive_state(
         config=config,
@@ -699,9 +790,9 @@ def build_initial_conditions():
 def load_initial_conditions():
     """Load the initial state and config from disk, for post-processing without re-running the IC build."""
     config, registered_variables = build_config()
-    initial_state = jnp.load(_here("cgols_initial_state.npy"))
+    initial_state = jnp.load(_ic_state_path())
     config = finalize_config(config, initial_state.shape)
-    Phi_total = jnp.load(_here("cgols_initial_potential.npy"))
+    Phi_total = jnp.load(_ic_potential_path())
     params = SimulationParams(
         # END_TIME (60% of TOTAL_TIME) - stop before the ~63% blow-up.
         t_end=END_TIME.to(code_units.code_time).value,
@@ -717,6 +808,12 @@ def load_initial_conditions():
         # See build_initial_conditions(): global velocity ceiling for
         # positivity_velocity_clip (50 code = 5000 km/s).
         positivity_max_velocity=50.0,
+        # Temperature ceiling for positivity_temperature_clip. The solver caps
+        # P/rho in code units, so convert the physical T_max via T_factor
+        # (T = (P/rho)*T_factor). 5e8 K is ~25x the ~2e7 K CC85 hot wind: high
+        # enough to leave real wind/shock-heated gas untouched, far below the
+        # 1e21-1e25 K near-vacuum runaway that collapses the timestep at 300 pc.
+        positivity_max_pressure_over_density=5e8 / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
@@ -1410,30 +1507,67 @@ def cooling_lambda_cgs(T):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     
-    # initial_state, config, params, registered_variables = build_initial_conditions()
+    if CREATE_IC:
+        initial_state, config, params, registered_variables = build_initial_conditions()
 
-    # Save BEFORE integration: donate_state=True consumes the initial buffer in-place,
-    # so this device->host copy must happen while the buffer is still valid.
-    # jnp.save(_here("cgols_initial_state.npy"), initial_state)
-    
-    initial_state, config, params, registered_variables = load_initial_conditions()
+        # Save BEFORE integration: donate_state=True consumes the initial buffer in-place,
+        # so this device->host copy must happen while the buffer is still valid.
+        jnp.save(_ic_state_path(), initial_state)
+    else:
+        initial_state, config, params, registered_variables = load_initial_conditions()
 
-    # Stream intermediate snapshots (2D slices + 1D vertical-flux profile) to disk
-    # during the run, for the animation and the wind time-series. Each frame is
-    # written immediately inside the callback (see make_snapshot_callable), so no
-    # host RAM accumulates and the frames survive a blow-up. config is already
-    # finalized here (build/load both call finalize_config), so num_ghost_cells is
-    # set for the in-callback slicing.
-    snapshot_callable = make_snapshot_callable(config, registered_variables)
+        # ---- Multi-GPU domain decomposition ----
+        # When SHARD_SPLIT asks for more than one GPU, distribute the state over a
+        # (var, x, y, z) device mesh and hand the sharding to time_integration, which
+        # shards its helper data the same way and runs the inter-device halo exchange
+        # itself. Only the initial state has to be device_put onto the sharding here.
+        # SHARD_SPLIT == (1, 1, 1, 1) keeps the original single-GPU path (sharding=None).
+        if NUM_GPUS > 1:
+            # axis_types=Auto is required: jax.make_mesh defaults to Explicit sharding
+            # mode on jax >= 0.10, under which the ghost-cell padding inside the solver
+            # (jnp.pad(mode="edge"), see time_stepping/_utils._pad) cannot resolve an
+            # output sharding on a sharded axis and raises a ShardingTypeError. Auto mode
+            # restores implicit GSPMD (collectives auto-inserted for pad/slice), which is
+            # what the solver's with_sharding_constraint / shard_map halo paths assume.
+            mesh = jax.make_mesh(
+                SHARD_SPLIT, (VARAXIS, XAXIS, YAXIS, ZAXIS),
+                axis_types=(AxisType.Auto,) * 4,
+            )
+            sharding = jax.NamedSharding(mesh, P(VARAXIS, XAXIS, YAXIS, ZAXIS))
+            initial_state = jax.device_put(initial_state, sharding)
+            # Report the layout without indexing into the array: integer-indexing a
+            # sharded axis (e.g. state[0, :, :, 0] when z is split) is a gather that
+            # JAX cannot assign an output sharding to, so it raises. Printing the
+            # sharding spec + per-device shard shape is safe for any SHARD_SPLIT.
+            print(f"Sharding {initial_state.shape} state over {NUM_GPUS} GPUs, split {SHARD_SPLIT}")
+            print(f"  sharding:    {initial_state.sharding}")
+            print(f"  shard shape: {initial_state.addressable_shards[0].data.shape}")
+        else:
+            sharding = None
 
-    final_state = time_integration(
-        initial_state, config, params, registered_variables, snapshot_callable
-    )
-    jnp.save(_here("cgols_final_state.npy"), final_state)
+        # Stream intermediate snapshots (2D slices + 1D vertical-flux profile) to disk
+        # during the run, for the animation and the wind time-series. Each frame is
+        # written immediately inside the callback (see make_snapshot_callable), so no
+        # host RAM accumulates and the frames survive a blow-up. config is already
+        # finalized here (build/load both call finalize_config), so num_ghost_cells is
+        # set for the in-callback slicing.
+        # In benchmark mode the snapshot callback is off (config.activate_snapshot_callback
+        # is False), so skip building the callable and skip saving the garbage
+        # fixed-dt final state; we only care about the timing/memory printout.
+        snapshot_callable = (
+            None if BENCH_STEPS else make_snapshot_callable(config, registered_variables)
+        )
 
-    # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
-    # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.
-    # print(
-    #     "Saved cgols_initial_state.npy / cgols_final_state.npy. "
-    #     "Run `python cgols_analyse.py` to produce the figures."
-    # )
+        final_state = time_integration(
+            initial_state, config, params, registered_variables, snapshot_callable,
+            sharding=sharding,
+        )
+        if not BENCH_STEPS:
+            jnp.save(_here("cgols_final_state.npy"), final_state)
+
+        # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
+        # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.
+        # print(
+        #     "Saved cgols_initial_state.npy / cgols_final_state.npy. "
+        #     "Run `python cgols_analyse.py` to produce the figures."
+        # )
