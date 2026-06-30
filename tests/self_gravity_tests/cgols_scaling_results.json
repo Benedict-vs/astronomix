@@ -1,0 +1,192 @@
+{
+  "meta": {
+    "generated": "2026-06-28T21:04:15",
+    "steps": 90,
+    "anchor_dim": 512,
+    "anchor_hours": 11.0,
+    "gpu_mem_gb": 40.0,
+    "gpu_mem_usable_gb": 38.0
+  },
+  "runs": [
+    {
+      "dim": 128,
+      "split": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "ngpus": 1,
+      "ncells": 4194304,
+      "cells_per_gpu": 4194304.0,
+      "steps": 90,
+      "elapsed_s": 2.71,
+      "mem_total_mb": 506.35,
+      "shard_shape": null,
+      "wall_s": 26.3,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.03011111111111111
+    },
+    {
+      "dim": 128,
+      "split": [
+        1,
+        2,
+        1,
+        1
+      ],
+      "ngpus": 2,
+      "ncells": 4194304,
+      "cells_per_gpu": 2097152.0,
+      "steps": 90,
+      "elapsed_s": 4.66,
+      "mem_total_mb": 350.69,
+      "shard_shape": "(5, 64, 128, 256)",
+      "wall_s": 28.7,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.05177777777777778
+    },
+    {
+      "dim": 128,
+      "split": [
+        1,
+        2,
+        2,
+        1
+      ],
+      "ngpus": 4,
+      "ncells": 4194304,
+      "cells_per_gpu": 1048576.0,
+      "steps": 90,
+      "elapsed_s": 7.42,
+      "mem_total_mb": 197.65,
+      "shard_shape": "(5, 64, 64, 256)",
+      "wall_s": 34.5,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.08244444444444445
+    },
+    {
+      "dim": 256,
+      "split": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "ngpus": 1,
+      "ncells": 33554432,
+      "cells_per_gpu": 33554432.0,
+      "steps": 90,
+      "elapsed_s": 22.44,
+      "mem_total_mb": 3673.92,
+      "shard_shape": null,
+      "wall_s": 45.5,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.24933333333333335
+    },
+    {
+      "dim": 256,
+      "split": [
+        1,
+        2,
+        1,
+        1
+      ],
+      "ngpus": 2,
+      "ncells": 33554432,
+      "cells_per_gpu": 16777216.0,
+      "steps": 90,
+      "elapsed_s": 26.65,
+      "mem_total_mb": 2509.87,
+      "shard_shape": "(5, 128, 256, 512)",
+      "wall_s": 50.3,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.2961111111111111
+    },
+    {
+      "dim": 256,
+      "split": [
+        1,
+        2,
+        2,
+        1
+      ],
+      "ngpus": 4,
+      "ncells": 33554432,
+      "cells_per_gpu": 8388608.0,
+      "steps": 90,
+      "elapsed_s": 32.38,
+      "mem_total_mb": 1461.93,
+      "shard_shape": "(5, 128, 128, 512)",
+      "wall_s": 60.2,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 0.3597777777777778
+    },
+    {
+      "dim": 512,
+      "split": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "ngpus": 1,
+      "ncells": 268435456,
+      "cells_per_gpu": 268435456.0,
+      "steps": 90,
+      "elapsed_s": 178.43,
+      "mem_total_mb": 28508.8,
+      "shard_shape": null,
+      "wall_s": 203.6,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 1.9825555555555556
+    },
+    {
+      "dim": 512,
+      "split": [
+        1,
+        2,
+        1,
+        1
+      ],
+      "ngpus": 2,
+      "ncells": 268435456,
+      "cells_per_gpu": 134217728.0,
+      "steps": 90,
+      "elapsed_s": 197.91,
+      "mem_total_mb": 18708.36,
+      "shard_shape": "(5, 256, 512, 1024)",
+      "wall_s": 224.9,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 2.199
+    },
+    {
+      "dim": 512,
+      "split": [
+        1,
+        2,
+        2,
+        1
+      ],
+      "ngpus": 4,
+      "ncells": 268435456,
+      "cells_per_gpu": 67108864.0,
+      "steps": 90,
+      "elapsed_s": 198.96,
+      "mem_total_mb": 11748.03,
+      "shard_shape": "(5, 256, 256, 1024)",
+      "wall_s": 228.5,
+      "rc": 0,
+      "status": "ok",
+      "sec_per_step": 2.2106666666666666
+    }
+  ]
+}
