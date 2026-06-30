@@ -10,6 +10,15 @@ Usage:
     python cgols_analyse.py    # reads them back, writes the figures
 """
 
+import os
+
+# The analysis only loads the saved .npy states and renders figures - it never
+# runs the sharded solver, so it must never claim more than one GPU. cgols.py
+# derives autocvd(num_gpus=...) from CGOLS_SHARD_SPLIT at import time (default
+# (1, 2, 2, 1) -> 4 GPUs), so pin it to a single device before importing cgols.
+# (setdefault lets an explicit CGOLS_SHARD_SPLIT override win, e.g. for debugging.)
+os.environ.setdefault("CGOLS_SHARD_SPLIT", "(1, 1, 1, 1)")
+
 import numpy as np
 import jax.numpy as jnp
 
