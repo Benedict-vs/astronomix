@@ -86,13 +86,15 @@ from astronomix.option_classes.simulation_config import (
     OPEN_BOUNDARY,
     PALLAS,
     RK4_LSRK,
-    SIMPLE_SOURCE_TERM,
+    SIMPLE_SOURCE,
     VARAXIS,
     XAXIS,
     YAXIS,
     ZAXIS,
     BoundarySettings,
     BoundarySettings1D,
+    GravityConfig,
+    PositivityConfig,
     StaticFloatVector,
     StaticIntVector,
     finalize_config,
@@ -408,34 +410,36 @@ def build_config():
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
-        self_gravity=False,
-        self_gravity_version=SIMPLE_SOURCE_TERM,
-        # Positivity backstops (all default OFF). vacuum_rest zeros a floored
-        # cell's momentum (recovered v=0 instead of momentum/rho_floor) and
-        # nan_safe resets non-finite cells to a valid floor state; both honoured by
-        # the PALLAS kernels. At 256x256x512 these sufficed, but at 512x512x1024 the
-        # crash only MOVED (vacuum_rest 73%; +stage REDISTRIBUTE 66%, earlier):
-        # both safeguards key off minimum_density, but the v=m/rho runaway forms in
-        # the near-floor BAND (rho just ABOVE the floor — observed min_rho=1.559e-4)
-        # in the outer-halo polar funnel, where no density-threshold safeguard
-        # reaches. positivity_velocity_clip is the global fix: it caps |v| at
-        # params.positivity_max_velocity for EVERY cell (not just sub-floor ones),
-        # inside the per-stage HARD_FLOOR enforcement, density-independent. Applied
-        # after the pressure inversion so thermal energy is preserved and only the
-        # unphysical kinetic excess is dropped. (Native + PALLAS, validated bit-
-        # identical; see cgols_512_precrash.png for the precursor.)
-        positivity_vacuum_rest=True,
-        positivity_nan_safe=True,
-        positivity_velocity_clip=True,
-        # Thermal twin of positivity_velocity_clip. With the paper's 300 pc
-        # injection radius the same Edot over ~4.6x less volume drives sharper,
-        # hotter contacts; a WENO energy overshoot into a near-floor-density cell
-        # otherwise gives T = (P/rho)*T_factor ~ 1e21-1e25 K, an unbounded sound
+        # Positivity backstops. default_positivity_protection turns the per-stage
+        # AND per-step HARD_FLOOR state floors on (the old enforce_positivity=True
+        # default). vacuum_rest zeros a floored cell's momentum (recovered v=0
+        # instead of momentum/rho_floor) and nan_safe resets non-finite cells to a
+        # valid floor state; both honoured by the PALLAS kernels. At 256x256x512
+        # these sufficed, but at 512x512x1024 the crash only MOVED (vacuum_rest 73%;
+        # +stage REDISTRIBUTE 66%, earlier): both safeguards key off minimum_density,
+        # but the v=m/rho runaway forms in the near-floor BAND (rho just ABOVE the
+        # floor — observed min_rho=1.559e-4) in the outer-halo polar funnel, where no
+        # density-threshold safeguard reaches. velocity_clip is the global fix: it
+        # caps |v| at params.positivity_max_velocity for EVERY cell (not just
+        # sub-floor ones), inside the per-stage HARD_FLOOR enforcement, density-
+        # independent. Applied after the pressure inversion so thermal energy is
+        # preserved and only the unphysical kinetic excess is dropped. (Native +
+        # PALLAS, validated bit-identical; see cgols_512_precrash.png.)
+        # temperature_clip is the thermal twin of velocity_clip. With the paper's
+        # 300 pc injection radius the same Edot over ~4.6x less volume drives
+        # sharper, hotter contacts; a WENO energy overshoot into a near-floor-density
+        # cell otherwise gives T = (P/rho)*T_factor ~ 1e21-1e25 K, an unbounded sound
         # speed, and a collapsed CFL timestep. This caps P/rho (see
         # positivity_max_pressure_over_density below) so c_s stays finite. It
         # replaces the larger-injection-radius CFL cushion the 500 pc workaround
         # relied on.
-        positivity_temperature_clip=True,
+        positivity_config=PositivityConfig(
+            default_positivity_protection=True,
+            vacuum_rest=True,
+            nan_safe=True,
+            velocity_clip=True,
+            temperature_clip=True,
+        ),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
         # progress_bar / monitor add per-step host syncs, so drop them when timing.
@@ -449,7 +453,11 @@ def build_config():
             BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
             BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
         ),
-        external_potential=True,
+        gravity_config=GravityConfig(
+            self_gravity=False,
+            self_gravity_version=SIMPLE_SOURCE,
+            external_potential=True,
+        ),
         donate_state=True,
         cgols_wind_config=CGOLSWindConfig(cgols_wind=True),
         # Intermediate output for the animation / wind time-series. We use the
