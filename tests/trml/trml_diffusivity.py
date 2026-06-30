@@ -51,6 +51,8 @@ from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     BoundarySettings,
     BoundarySettings1D,
+    GravityConfig,
+    PositivityConfig,
 )
 from astronomix._modules._cooling.cooling_options import (
     IMPLICIT_COOLING,
@@ -98,6 +100,7 @@ def build(num_cells_x):
 
     # ---- Config ----------------------------------------------------------
     config = SimulationConfig(
+        positivity_config=PositivityConfig(default_positivity_protection=True),
         solver_mode=FINITE_DIFFERENCE,
         backend=PALLAS,
         # diffusion bumps the ghost-cell ring to 6 -> padded dims are N+12,
@@ -121,7 +124,6 @@ def build(num_cells_x):
             y=BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
             z=BoundarySettings1D(OPEN_BOUNDARY, FIXED_BOUNDARY_OPEN_MOMENTUM),
         ),
-        enforce_positivity=True,
         cooling_config=CoolingConfig(
             cooling=True,
             cooling_method=IMPLICIT_COOLING,

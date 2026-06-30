@@ -218,7 +218,7 @@ def _cfl_time_step(
     # viscous time step constraint
     if config.diffusion:
         
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,

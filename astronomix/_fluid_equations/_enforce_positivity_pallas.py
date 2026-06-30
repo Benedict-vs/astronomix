@@ -133,9 +133,9 @@ def _enforce_positivity_pallas_local(
         BY = int(registered_variables.magnetic_index.y)
         BZ = int(registered_variables.magnetic_index.z)
 
-    vacuum_rest = bool(config.positivity_vacuum_rest)
-    velocity_clip = bool(config.positivity_velocity_clip)
-    temperature_clip = bool(config.positivity_temperature_clip)
+    vacuum_rest = bool(config.positivity_config.vacuum_rest)
+    velocity_clip = bool(config.positivity_config.velocity_clip)
+    temperature_clip = bool(config.positivity_config.temperature_clip)
     if ndim == 1:
         MOM_VARS = (MX,)
     elif ndim == 2:
@@ -178,7 +178,7 @@ def _enforce_positivity_pallas_local(
         vmax = vmax_ref[()]
         mpod = mpod_ref[()]
 
-        nan_safe = bool(config.positivity_nan_safe)
+        nan_safe = bool(config.positivity_config.nan_safe)
 
         def read(var):
             if ndim == 1:
@@ -227,7 +227,7 @@ def _enforce_positivity_pallas_local(
                 pressure = gm1 * (energy - 0.5 * rho_floored * v2)
             pressure_floored = jnp.maximum(pressure, pmin)
 
-            # Temperature ceiling (config.positivity_temperature_clip): mirror the
+            # Temperature ceiling (config.positivity_config.temperature_clip): mirror the
             # native clamp — cap P / rho at mpod (= max_pressure_over_density) so
             # T = (P / rho) * T_factor and the sound speed stay bounded in
             # near-floor-density cells.  Applied right after the pressure floor and
@@ -236,7 +236,7 @@ def _enforce_positivity_pallas_local(
             if temperature_clip:
                 pressure_floored = jnp.minimum(pressure_floored, rho_floored * mpod)
 
-            # Global velocity ceiling (config.positivity_velocity_clip): mirror the
+            # Global velocity ceiling (config.positivity_config.velocity_clip): mirror the
             # native clip — cap |v| per component, write the capped momentum, and
             # recompute v2 from the clipped velocities so the energy below carries
             # only the bounded kinetic part.  Applied AFTER the pressure inversion
@@ -370,7 +370,7 @@ def _redistribute_positivity_pallas_local(
     """Single-shard kernel build; shapes read from ``conserved_state.shape``."""
     is_mhd = config.mhd
     is_ideal = (config.equation_of_state == IDEAL_GAS)
-    temperature_clip = bool(config.positivity_temperature_clip)
+    temperature_clip = bool(config.positivity_config.temperature_clip)
     ndim = int(config.dimensionality)
     nvars = int(conserved_state.shape[0])
     spatial_shape = tuple(int(x) for x in conserved_state.shape[1:])
@@ -380,6 +380,7 @@ def _redistribute_positivity_pallas_local(
     bx_blk, by_blk, bz_blk = _as_3tuple_block_shape(config.pallas_block_shape, ndim)
     grid = (nx // bx_blk, ny // by_blk, nz // bz_blk)
 
+    vacuum_rest = bool(config.positivity_config.vacuum_rest)
     DENSITY = int(registered_variables.density_index)
     if ndim == 1:
         MOM = [int(registered_variables.momentum_index)]
@@ -467,7 +468,11 @@ def _redistribute_positivity_pallas_local(
         rho_patched = jnp.where(has, rho_sum / count_safe, threshold)
         mom_patched = []
         for c, ms in enumerate(mom_self):
-            v = jnp.where(has, mom_sum[c] / rho_sum_safe, ms / threshold)
+            # isolated (has=False) deep-void cell: rest it (v=0) under vacuum_rest,
+            # else keep v = mom/threshold. See native `_redistribute_positivity_native`
+            # for the run-away rationale; this kernel must stay bit-identical to it.
+            isolated_v = (ms * 0.0) if vacuum_rest else (ms / threshold)
+            v = jnp.where(has, mom_sum[c] / rho_sum_safe, isolated_v)
             v = jnp.clip(v, -vmax, vmax)
             mom_patched.append(rho_patched * v)
 

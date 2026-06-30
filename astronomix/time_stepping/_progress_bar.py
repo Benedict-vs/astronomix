@@ -58,6 +58,15 @@ def _show_progress(
     """
     Progress bar that adapts to terminal width and handles resizing.
     """
+    # NaN/inf-safe: on blow-up the sim time (iteration) goes non-finite, and
+    # ``int(NaN)`` would raise and abort the run. Clamp to ``total`` so the bar
+    # finishes cleanly instead of crashing (the diagnostics report the NaN).
+    try:
+        if not math.isfinite(float(iteration)):
+            iteration = total
+    except (TypeError, ValueError):
+        iteration = total
+
     # Get terminal width
     terminal_width = shutil.get_terminal_size((80, 20)).columns
 

@@ -17,7 +17,7 @@ from astronomix._fluid_equations._equations import (
 from astronomix._modules._gravity._poisson_solver import _compute_gravitational_potential
 from astronomix._modules._gravity._poisson_solver import _compute_gravitational_potential
 from astronomix.variable_registry.registered_variables import AxisInfo, RegisteredVariables
-from astronomix.option_classes.simulation_config import STATE_TYPE, WENO_FLUX_GRAVITY, SimulationConfig
+from astronomix.option_classes.simulation_config import STATE_TYPE, FOURTH_ORDER_CONSERVATIVE, SimulationConfig
 
 
 # @jaxtyped(typechecker=typechecker)

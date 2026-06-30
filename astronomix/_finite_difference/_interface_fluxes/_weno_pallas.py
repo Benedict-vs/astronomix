@@ -69,6 +69,28 @@ from astronomix.option_classes.simulation_config import IDEAL_GAS, ISOTHERMAL, P
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 
+# Use the hand-derived explicit MHD WENO window adjoint
+# (``_weno_mhd_flux_from_window_adjoint``) in the Pallas MHD backward kernel
+# instead of an in-kernel jax.vjp of the whole window.  The whole-window vjp
+# made the MHD backward ~63x the forward (vs ~9x for the hydro hand adjoint);
+# the explicit transpose restores parity.  Set to ``False`` to fall back to the
+# legacy jax.vjp path (kept for cross-checking / regression safety).
+_MHD_VJP_USE_HAND_ADJOINT = True
+
+# Within ``_weno_mhd_flux_from_window_adjoint`` the three residual in-kernel
+# ``jax.vjp`` calls (the eigenstructure building-block map ``_eigen_bb``, and the
+# per-mode R_col / L_row scalar functionals) are replaced by fully hand-derived
+# elementwise transposes when this is ``True``.  ``False`` selects the HYBRID
+# path (hand-transposed everywhere EXCEPT those three small local vjps).  Both
+# are bit-exact in interpret mode AND measure IDENTICAL runtime (18.8x
+# backward/forward at 64^3): a same-process A/B confirmed XLA/Triton already
+# lowers the tiny per-mode scalar vjps as efficiently as the hand transpose, so
+# the residual gap vs hydro's ~9x is the shared WENO-recon reverse (intrinsic to
+# MHD's larger 7-mode/8-var system), NOT these vjps.  DEFAULT = HYBRID (simpler,
+# equal speed, fewer lines); set ``True`` only to drop the in-kernel-autodiff
+# dependency for jax/Triton-version robustness.
+_MHD_VJP_FULL_HANDDERIVE = False
+
 
 def _backend_name(config: SimulationConfig) -> str:
     """Return a robust string representation of config.backend.
@@ -1479,6 +1501,1700 @@ def _weno_flux_mhd_pallas(
     return _weno5_shard_wrap(_local, conserved_state, config, axis)
 
 
+def _weno_mhd_flux_from_window(q_stencil, gamma, rhomin, pgmin, b_eps, sqrt_floor,
+                              ncomp, num_modes):
+    """Pure per-interface ideal-gas MHD WENO flux from a gathered 6-cell stencil.
+
+    ``q_stencil`` is the tuple ``(q[-2], q[-1], q[0], q[+1], q[+2], q[+3])`` where
+    each entry is a length-8 tuple of the local conserved components in per-axis
+    characteristic order ``(rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy)``.  Returns
+    the length-8 list of WENO interface fluxes ``flux_acc`` at ``i + 1/2``.
+
+    Single source of truth for the MHD WENO arithmetic: the forward Pallas kernel
+    gathers ``q_stencil`` from ``q_ref`` and calls this; the adjoint kernel
+    gathers the same stencil and calls ``jax.vjp`` of this, so the Pallas
+    backward is the exact transpose of the Pallas forward by construction (no
+    separately-derived adjoint math).  Every operation is elementwise on the
+    gathered arrays — no ref reads, slices or rolls — which is what lets
+    ``jax.vjp`` lower inside the Triton kernel (validated bit-exact and
+    compile-at-parity on jax >= 0.10; the old auto-VJP Triton miscompile that
+    forced the hydro hand-derivation is gone).  ``b_eps`` and ``sqrt_floor`` are
+    passed in as already-typed scalars (x64 + Triton dtype hygiene)."""
+    gm1 = gamma - 1.0
+    gam0 = 1.0 - gamma   # = -gm1
+    gam1 = 0.5 * (gamma - 1.0)
+    gam2 = (gamma - 2.0) / (gamma - 1.0)
+    epsilon = 1e-7
+    tiny = 1e-14
+    # Properly-typed literal scalars derived from gamma so the dtype follows the
+    # working dtype (bare 1.0 / -1.0 / 1/sqrt(2) arrive as f32 under x64 + Triton
+    # and trip a ('f64','f32') assertion in _truediv_lowering_rule).
+    zero_typed = gamma - gamma
+    one_typed = zero_typed + 1.0
+    neg_one_typed = zero_typed - 1.0
+    inv_sqrt_two_typed = zero_typed + (1.0 / 2.0 ** 0.5)
+    # AD-safe sqrt for non-negative-clamped quantities — mirrors the native
+    # ``_eigen_mhd.diff_safe_sqrt``: a *positive* floor so the reverse pass never
+    # forms ``sqrt'(0) = inf``.  ``jnp.sqrt(jnp.maximum(x, 0.0))`` is value-safe
+    # but its gradient is ``inf`` at the clamp; under reverse-mode that ``inf``
+    # meets a ``0`` cotangent and the in-kernel/multi-step backward yields NaN
+    # (XLA folds inf*0->0 for a single call, which is why a one-shot VJP looked
+    # clean).  The floor is below any physical value, so the forward stays
+    # bit-exact with the native flux (which floors the same way).
+    sqrt_eps = zero_typed + (1e-30 if jax.config.jax_enable_x64 else 1e-20)
+
+    def ssqrt(x):
+        return jnp.sqrt(jnp.maximum(x, sqrt_eps))
+
+    def primitive_from_q(q):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy = q
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho
+        vt1 = mt1 * inv_rho
+        vt2 = mt2 * inv_rho
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        b2 = Bn * Bn + Bt1 * Bt1 + Bt2 * Bt2
+        p = gm1 * (energy - 0.5 * (rho * v2 + b2))
+        return rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p
+
+    def floored_cell(q):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        troubled = (rho < rhomin) | (p < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        p_f = jnp.where(troubled, jnp.maximum(p, pgmin), p)
+        energy_f = jnp.where(troubled, p_f / gm1 + 0.5 * (rho_f * v2 + b2), energy)
+        # MHD enthalpy includes the magnetic contribution implicitly via
+        # the (energy + p_gas) / rho average used in the native code.
+        specific_enthalpy = (energy_f + p_f) / rho_f
+        sound_speed_sq = jnp.maximum(0.0, gamma * jnp.abs(p_f / rho_f))
+        sound_speed = jnp.sqrt(jnp.maximum(sound_speed_sq, sqrt_floor))
+        # MHD characteristic speeds (cell-centered — used for the local
+        # Lax-Friedrichs alpha; the FACE eigenstructure is computed
+        # separately further down).
+        bn2_over_rho = (Bn * Bn) / rho_f
+        disc_root = ssqrt(
+            (b2 / rho_f + sound_speed_sq) ** 2 - 4.0 * bn2_over_rho * sound_speed_sq
+        )
+        c_fast = ssqrt(0.5 * (b2 / rho_f + sound_speed_sq + disc_root))
+        c_alfven = ssqrt(bn2_over_rho)
+        c_slow = ssqrt(0.5 * (b2 / rho_f + sound_speed_sq - disc_root))
+        return (rho_f, mn, mt1, mt2, Bn, Bt1, Bt2, energy_f,
+                vn, vt1, vt2, v2, b2, p_f, specific_enthalpy,
+                sound_speed, sound_speed_sq, c_fast, c_alfven, c_slow)
+
+    def flux_from_q(q):
+        """MHD flux along the normal direction (local x).  B_normal flux
+        is identically zero (see ``_mhd_flux_x``)."""
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        p_total = p + 0.5 * b2
+        v_dot_B = vn * Bn + vt1 * Bt1 + vt2 * Bt2
+        return (
+            mn,                                  # density flux: rho * vn
+            rho * vn * vn + p_total - Bn * Bn,    # normal momentum
+            rho * vn * vt1 - Bn * Bt1,            # transverse 1
+            rho * vn * vt2 - Bn * Bt2,            # transverse 2
+            0.0,                                  # normal B flux is 0
+            Bt1 * vn - Bn * vt1,                  # transverse 1 B
+            Bt2 * vn - Bn * vt2,                  # transverse 2 B
+            (energy + p_total) * vn - v_dot_B * Bn,  # energy
+        )
+
+    def lambda_from_floored_cell(cell, mode):
+        vn = cell[8]; c_fast = cell[17]; c_alfven = cell[18]; c_slow = cell[19]
+        if mode == 0:
+            return vn - c_fast
+        if mode == 1:
+            return vn - c_alfven
+        if mode == 2:
+            return vn - c_slow
+        if mode == 3:
+            return vn
+        if mode == 4:
+            return vn + c_slow
+        if mode == 5:
+            return vn + c_alfven
+        return vn + c_fast
+
+    f_stencil = tuple(flux_from_q(q) for q in q_stencil)
+    floored_stencil = tuple(floored_cell(q) for q in q_stencil)
+    cell_l = floored_stencil[2]  # offset 0  (cell i)
+    cell_r = floored_stencil[3]  # offset 1  (cell i+1)
+
+    rho_i = cell_l[0]; mn_i = cell_l[1]; mt1_i = cell_l[2]; mt2_i = cell_l[3]
+    Bn_i = cell_l[4]; Bt1_i = cell_l[5]; Bt2_i = cell_l[6]
+    h_i = cell_l[14]
+    rho_j = cell_r[0]; mn_j = cell_r[1]; mt1_j = cell_r[2]; mt2_j = cell_r[3]
+    Bn_j = cell_r[4]; Bt1_j = cell_r[5]; Bt2_j = cell_r[6]
+    h_j = cell_r[14]
+
+    rho_face = jnp.maximum(
+        0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin)),
+        rhomin,
+    )
+    vn_face = 0.5 * (mn_i + mn_j) / rho_face
+    vt1_face = 0.5 * (mt1_i + mt1_j) / rho_face
+    vt2_face = 0.5 * (mt2_i + mt2_j) / rho_face
+    Bn_face = 0.5 * (Bn_i + Bn_j)
+    Bt1_face = 0.5 * (Bt1_i + Bt1_j)
+    Bt2_face = 0.5 * (Bt2_i + Bt2_j)
+    h_face = 0.5 * (h_i + h_j)
+
+    v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
+    b2_face = Bn_face * Bn_face + Bt1_face * Bt1_face + Bt2_face * Bt2_face
+    b2_over_rho_face = b2_face / rho_face
+    bn2_over_rho_face = (Bn_face * Bn_face) / rho_face
+
+    c_sq_face = gm1 * (h_face - 0.5 * (v2_face + b2_over_rho_face))
+    c_sq_face = jnp.maximum(c_sq_face, 0.0)
+    c_face = jnp.sqrt(jnp.maximum(c_sq_face, sqrt_floor))
+    c_sq_safe = jnp.where(c_sq_face > 0.0, c_sq_face, one_typed)
+    inv_c_sq = jnp.where(c_sq_face > 0.0, 1.0 / c_sq_safe, 0.0)
+
+    ms_disc = (b2_over_rho_face + c_sq_face) ** 2 - 4.0 * bn2_over_rho_face * c_sq_face
+    ms_disc_root = ssqrt(ms_disc)
+
+    lambda_fast = ssqrt(0.5 * (b2_over_rho_face + c_sq_face + ms_disc_root))
+    lambda_alfven = ssqrt(bn2_over_rho_face)
+    lambda_slow = ssqrt(0.5 * (b2_over_rho_face + c_sq_face - ms_disc_root))
+
+    # Tangential normalisation with the degeneracy fix.
+    bt_sq = Bt1_face * Bt1_face + Bt2_face * Bt2_face
+    bt_sq_safe = jnp.maximum(bt_sq, b_eps)
+    bt_n1 = jnp.where(
+        bt_sq >= b_eps,
+        Bt1_face / jnp.sqrt(bt_sq_safe),
+        inv_sqrt_two_typed,
+    )
+    bt_n2 = jnp.where(
+        bt_sq >= b_eps,
+        Bt2_face / jnp.sqrt(bt_sq_safe),
+        inv_sqrt_two_typed,
+    )
+
+    sgn_bn = jnp.where(Bn_face >= 0.0, one_typed, neg_one_typed)
+    sgn_bt = jnp.where(
+        Bt1_face != 0.0,
+        jnp.where(Bt1_face >= 0.0, one_typed, neg_one_typed),
+        jnp.where(Bt2_face >= 0.0, one_typed, neg_one_typed),
+    )
+
+    # Fast / slow mode weighting; same algebra as the native helper.
+    denom = lambda_fast * lambda_fast - lambda_slow * lambda_slow
+    denom_safe = jnp.maximum(denom, b_eps)
+    am_fast = jnp.where(
+        denom >= b_eps,
+        ssqrt(c_sq_face - lambda_slow * lambda_slow) / jnp.sqrt(denom_safe),
+        1.0,
+    )
+    am_slow = jnp.where(
+        denom >= b_eps,
+        ssqrt(lambda_fast * lambda_fast - c_sq_face) / jnp.sqrt(denom_safe),
+        1.0,
+    )
+
+    sqrt_rho_face = jnp.sqrt(jnp.maximum(rho_face, rhomin))
+    cs_geq_alfven = c_face >= lambda_alfven
+
+    def left_project(mode, values):
+        """L_row[mode] · values.  ``values`` is an 8-tuple in local order:
+        (rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy)."""
+        rho_v, mn_v, mt1_v, mt2_v, Bn_v, Bt1_v, Bt2_v, e_v = values
+        if mode == 0:  # fast-
+            L_rho = (
+                am_fast * (gam1 * v2_face + lambda_fast * vn_face)
+                - am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
+            )
+            L_mn = am_fast * (gam0 * vn_face - lambda_fast)
+            L_mt1 = gam0 * am_fast * vt1_face + am_slow * lambda_slow * bt_n1 * sgn_bn
+            L_mt2 = gam0 * am_fast * vt2_face + am_slow * lambda_slow * bt_n2 * sgn_bn
+            L_Bt1 = gam0 * am_fast * Bt1_face + c_face * am_slow * bt_n1 * sqrt_rho_face
+            L_Bt2 = gam0 * am_fast * Bt2_face + c_face * am_slow * bt_n2 * sqrt_rho_face
+            L_E = -gam0 * am_fast
+            acc = (
+                L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
+            )
+            acc = 0.5 * acc * inv_c_sq
+            return jnp.where(~cs_geq_alfven, acc * sgn_bt, acc)
+        if mode == 1:  # alfvén-
+            L_rho = bt_n2 * vt1_face - bt_n1 * vt2_face
+            L_mt1 = -bt_n2
+            L_mt2 = bt_n1
+            L_Bt1 = -bt_n2 * sgn_bn * sqrt_rho_face
+            L_Bt2 = bt_n1 * sgn_bn * sqrt_rho_face
+            acc = (
+                L_rho * rho_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v
+            )
+            return 0.5 * acc
+        if mode == 2:  # slow-
+            L_rho = (
+                am_slow * (gam1 * v2_face + lambda_slow * vn_face)
+                + am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
+            )
+            L_mn = am_slow * (gam0 * vn_face) - am_slow * lambda_slow
+            L_mt1 = gam0 * am_slow * vt1_face - am_fast * lambda_fast * bt_n1 * sgn_bn
+            L_mt2 = gam0 * am_slow * vt2_face - am_fast * lambda_fast * bt_n2 * sgn_bn
+            L_Bt1 = gam0 * am_slow * Bt1_face - c_face * am_fast * bt_n1 * sqrt_rho_face
+            L_Bt2 = gam0 * am_slow * Bt2_face - c_face * am_fast * bt_n2 * sqrt_rho_face
+            L_E = -gam0 * am_slow
+            acc = (
+                L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
+            )
+            acc = 0.5 * acc * inv_c_sq
+            return jnp.where(cs_geq_alfven, acc * sgn_bt, acc)
+        if mode == 3:  # entropy
+            L_rho = -c_sq_face / gam0 - 0.5 * v2_face
+            L_mn = vn_face
+            L_mt1 = vt1_face
+            L_mt2 = vt2_face
+            L_Bt1 = Bt1_face
+            L_Bt2 = Bt2_face
+            L_E = -1.0
+            acc = (
+                L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
+            )
+            return -gam0 * acc * inv_c_sq
+        if mode == 4:  # slow+
+            L_rho = (
+                am_slow * (gam1 * v2_face - lambda_slow * vn_face)
+                - am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
+            )
+            L_mn = am_slow * (gam0 * vn_face + lambda_slow)
+            L_mt1 = gam0 * am_slow * vt1_face + am_fast * lambda_fast * bt_n1 * sgn_bn
+            L_mt2 = gam0 * am_slow * vt2_face + am_fast * lambda_fast * bt_n2 * sgn_bn
+            L_Bt1 = gam0 * am_slow * Bt1_face - c_face * am_fast * bt_n1 * sqrt_rho_face
+            L_Bt2 = gam0 * am_slow * Bt2_face - c_face * am_fast * bt_n2 * sqrt_rho_face
+            L_E = -gam0 * am_slow
+            acc = (
+                L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
+            )
+            acc = 0.5 * acc * inv_c_sq
+            return jnp.where(cs_geq_alfven, acc * sgn_bt, acc)
+        if mode == 5:  # alfvén+
+            L_rho = bt_n2 * vt1_face - bt_n1 * vt2_face
+            L_mt1 = -bt_n2
+            L_mt2 = bt_n1
+            L_Bt1 = bt_n2 * sgn_bn * sqrt_rho_face
+            L_Bt2 = -bt_n1 * sgn_bn * sqrt_rho_face
+            acc = (
+                L_rho * rho_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v
+            )
+            return 0.5 * acc
+        # mode 6 — fast+
+        L_rho = (
+            am_fast * (gam1 * v2_face - lambda_fast * vn_face)
+            + am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
+        )
+        L_mn = am_fast * (gam0 * vn_face + lambda_fast)
+        L_mt1 = gam0 * am_fast * vt1_face - am_slow * lambda_slow * bt_n1 * sgn_bn
+        L_mt2 = gam0 * am_fast * vt2_face - am_slow * lambda_slow * bt_n2 * sgn_bn
+        L_Bt1 = gam0 * am_fast * Bt1_face + c_face * am_slow * bt_n1 * sqrt_rho_face
+        L_Bt2 = gam0 * am_fast * Bt2_face + c_face * am_slow * bt_n2 * sqrt_rho_face
+        L_E = -gam0 * am_fast
+        acc = (
+            L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
+            + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
+        )
+        acc = 0.5 * acc * inv_c_sq
+        return jnp.where(~cs_geq_alfven, acc * sgn_bt, acc)
+
+    def add_right_correction(flux_acc, mode, Fs):
+        """flux_acc += Fs * R_col[:, mode] (local order, ncomp=8).
+        B_normal slot (index 4) always gets 0."""
+        if mode == 0:  # fast-
+            R = (
+                am_fast,
+                am_fast * (vn_face - lambda_fast),
+                am_fast * vt1_face + am_slow * lambda_slow * bt_n1 * sgn_bn,
+                am_fast * vt2_face + am_slow * lambda_slow * bt_n2 * sgn_bn,
+                0.0,
+                c_face * am_slow * bt_n1 / sqrt_rho_face,
+                c_face * am_slow * bt_n2 / sqrt_rho_face,
+                am_fast * (
+                    lambda_fast * lambda_fast
+                    - lambda_fast * vn_face
+                    + 0.5 * v2_face
+                    - gam2 * c_sq_face
+                )
+                + am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
+            )
+            scale = jnp.where(~cs_geq_alfven, sgn_bt, 1.0)
+        elif mode == 1:  # alfvén-
+            R = (
+                0.0,
+                0.0,
+                -bt_n2,
+                bt_n1,
+                0.0,
+                -bt_n2 * sgn_bn / sqrt_rho_face,
+                bt_n1 * sgn_bn / sqrt_rho_face,
+                bt_n1 * vt2_face - bt_n2 * vt1_face,
+            )
+            scale = 1.0
+        elif mode == 2:  # slow-
+            R = (
+                am_slow,
+                am_slow * (vn_face - lambda_slow),
+                am_slow * vt1_face - am_fast * lambda_fast * bt_n1 * sgn_bn,
+                am_slow * vt2_face - am_fast * lambda_fast * bt_n2 * sgn_bn,
+                0.0,
+                -c_face * am_fast * bt_n1 / sqrt_rho_face,
+                -c_face * am_fast * bt_n2 / sqrt_rho_face,
+                am_slow * (
+                    lambda_slow * lambda_slow
+                    - lambda_slow * vn_face
+                    + 0.5 * v2_face
+                    - gam2 * c_sq_face
+                )
+                - am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
+            )
+            scale = jnp.where(cs_geq_alfven, sgn_bt, 1.0)
+        elif mode == 3:  # entropy
+            R = (
+                1.0,
+                vn_face,
+                vt1_face,
+                vt2_face,
+                0.0,
+                0.0,
+                0.0,
+                0.5 * v2_face,
+            )
+            scale = 1.0
+        elif mode == 4:  # slow+
+            R = (
+                am_slow,
+                am_slow * (vn_face + lambda_slow),
+                am_slow * vt1_face + am_fast * lambda_fast * bt_n1 * sgn_bn,
+                am_slow * vt2_face + am_fast * lambda_fast * bt_n2 * sgn_bn,
+                0.0,
+                -c_face * am_fast * bt_n1 / sqrt_rho_face,
+                -c_face * am_fast * bt_n2 / sqrt_rho_face,
+                am_slow * (
+                    lambda_slow * lambda_slow
+                    + lambda_slow * vn_face
+                    + 0.5 * v2_face
+                    - gam2 * c_sq_face
+                )
+                + am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
+            )
+            scale = jnp.where(cs_geq_alfven, sgn_bt, 1.0)
+        elif mode == 5:  # alfvén+
+            R = (
+                0.0,
+                0.0,
+                -bt_n2,
+                bt_n1,
+                0.0,
+                bt_n2 * sgn_bn / sqrt_rho_face,
+                -bt_n1 * sgn_bn / sqrt_rho_face,
+                bt_n1 * vt2_face - bt_n2 * vt1_face,
+            )
+            scale = 1.0
+        else:  # mode == 6 — fast+
+            R = (
+                am_fast,
+                am_fast * (vn_face + lambda_fast),
+                am_fast * vt1_face - am_slow * lambda_slow * bt_n1 * sgn_bn,
+                am_fast * vt2_face - am_slow * lambda_slow * bt_n2 * sgn_bn,
+                0.0,
+                c_face * am_slow * bt_n1 / sqrt_rho_face,
+                c_face * am_slow * bt_n2 / sqrt_rho_face,
+                am_fast * (
+                    lambda_fast * lambda_fast
+                    + lambda_fast * vn_face
+                    + 0.5 * v2_face
+                    - gam2 * c_sq_face
+                )
+                - am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
+            )
+            scale = jnp.where(~cs_geq_alfven, sgn_bt, 1.0)
+        return [flux_acc[slot] + (R[slot] * scale) * Fs for slot in range(ncomp)]
+
+    def alpha_for_mode(mode):
+        amx = jnp.abs(lambda_from_floored_cell(floored_stencil[0], mode))
+        for k in range(1, 6):
+            amx = jnp.maximum(
+                amx, jnp.abs(lambda_from_floored_cell(floored_stencil[k], mode))
+            )
+        return amx
+
+    # First-order centered part (1/12 stencil), one per component.
+    flux_acc = [
+        (-f_stencil[1][slot] + 7.0 * f_stencil[2][slot]
+         + 7.0 * f_stencil[3][slot] - f_stencil[4][slot]) / 12.0
+        for slot in range(ncomp)
+    ]
+
+    for mode in range(num_modes):
+        s = tuple(left_project(mode, f_stencil[k]) for k in range(6))
+        qproj = tuple(left_project(mode, q_stencil[k]) for k in range(6))
+
+        d0 = s[1] - s[0]; d1 = s[2] - s[1]; d2 = s[3] - s[2]
+        d3 = s[4] - s[3]; d4 = s[5] - s[4]
+        dq0 = qproj[1] - qproj[0]; dq1 = qproj[2] - qproj[1]
+        dq2 = qproj[3] - qproj[2]; dq3 = qproj[4] - qproj[3]
+        dq4 = qproj[5] - qproj[4]
+
+        amx = alpha_for_mode(mode)
+
+        aterm_p = 0.5 * (d0 + amx * dq0)
+        bterm_p = 0.5 * (d1 + amx * dq1)
+        cterm_p = 0.5 * (d2 + amx * dq2)
+        dterm_p = 0.5 * (d3 + amx * dq3)
+        IS0_p = 13.0 * (aterm_p - bterm_p) ** 2 + 3.0 * (aterm_p - 3.0 * bterm_p) ** 2
+        IS1_p = 13.0 * (bterm_p - cterm_p) ** 2 + 3.0 * (bterm_p + cterm_p) ** 2
+        IS2_p = 13.0 * (cterm_p - dterm_p) ** 2 + 3.0 * (3.0 * cterm_p - dterm_p) ** 2
+        alpha0_p = 1.0 / (epsilon + IS0_p) ** 2
+        alpha1_p = 6.0 / (epsilon + IS1_p) ** 2
+        alpha2_p = 3.0 / (epsilon + IS2_p) ** 2
+        alpha_sum_p = jnp.maximum(alpha0_p + alpha1_p + alpha2_p, tiny)
+        omega0_p = alpha0_p / alpha_sum_p
+        omega2_p = alpha2_p / alpha_sum_p
+        second = (omega0_p * (aterm_p - 2.0 * bterm_p + cterm_p) / 3.0
+                  + (omega2_p - 0.5) * (bterm_p - 2.0 * cterm_p + dterm_p) / 6.0)
+
+        aterm_m = 0.5 * (d4 - amx * dq4)
+        bterm_m = 0.5 * (d3 - amx * dq3)
+        cterm_m = 0.5 * (d2 - amx * dq2)
+        dterm_m = 0.5 * (d1 - amx * dq1)
+        IS0_m = 13.0 * (aterm_m - bterm_m) ** 2 + 3.0 * (aterm_m - 3.0 * bterm_m) ** 2
+        IS1_m = 13.0 * (bterm_m - cterm_m) ** 2 + 3.0 * (bterm_m + cterm_m) ** 2
+        IS2_m = 13.0 * (cterm_m - dterm_m) ** 2 + 3.0 * (3.0 * cterm_m - dterm_m) ** 2
+        alpha0_m = 1.0 / (epsilon + IS0_m) ** 2
+        alpha1_m = 6.0 / (epsilon + IS1_m) ** 2
+        alpha2_m = 3.0 / (epsilon + IS2_m) ** 2
+        alpha_sum_m = jnp.maximum(alpha0_m + alpha1_m + alpha2_m, tiny)
+        omega0_m = alpha0_m / alpha_sum_m
+        omega2_m = alpha2_m / alpha_sum_m
+        third = (omega0_m * (aterm_m - 2.0 * bterm_m + cterm_m) / 3.0
+                 + (omega2_m - 0.5) * (bterm_m - 2.0 * cterm_m + dterm_m) / 6.0)
+
+        Fs = -second + third
+        flux_acc = add_right_correction(flux_acc, mode, Fs)
+
+    return flux_acc
+
+
+def _weno_mhd_flux_from_window_adjoint(
+    q_stencil, flux_bar, gamma, rhomin, pgmin, b_eps, sqrt_floor, ncomp, num_modes
+):
+    """Explicit reverse pass (vector-Jacobian product) of
+    :func:`_weno_mhd_flux_from_window`.
+
+    Given the 6-cell window ``q_stencil`` (length-6 of length-8) and the output
+    cotangent ``flux_bar`` (length-8) returns ``qbar_stencil`` — a length-6 list
+    of length-8 lists, the cotangent w.r.t. every stencil input.
+
+    HYBRID derivation (mirrors the hydro hand-derived adjoint
+    :func:`_weno_hydro_flux_from_window_adjoint` section-by-section):
+
+    * The per-mode characteristic projection (``left_project`` /
+      ``add_right_correction``), the WENO smoothness reconstruction, the
+      ``amx = max_k|lambda_k|`` Lax-Friedrichs fold, the centered flux, and the
+      per-cell ``flux_from_q`` / ``floored_cell`` / ``primitive_from_q`` maps are
+      ALL hand-transposed as plain elementwise arithmetic (no ``jax.vjp``).
+    * The ONLY part wrapped in a small local ``jax.vjp`` is the MHD eigenvector
+      *building-block* map ``_eigen_bb`` : the per-face scalar function from the
+      eight linear-in-cell base face quantities
+      ``(rho_face, vn_face, vt1_face, vt2_face, Bn_face, Bt1_face, Bt2_face,
+      h_face)`` to the derived eigenstructure
+      ``(v2_face, c_sq_face, inv_c_sq, c_face, lambda_fast, lambda_slow,
+      am_fast, am_slow, bt_n1, bt_n2, sgn_bn, sgn_bt, sqrt_rho_face,
+      cs_geq_alfven)``.  Hand-deriving that block (several nested ``ssqrt`` /
+      degeneracy ``where`` branches: fast/slow split, tangential normalisation,
+      sign conventions) bit-exact is intractable by hand; a local vjp of a tiny
+      scalar-in/scalar-out function lowers far better in Triton than the
+      whole-window vjp the old kernel used (which is the cause of the 63x
+      forward/backward blow-up).  Everything downstream of those building blocks
+      is explicit, so the in-kernel vjp scope shrinks from 48 stencil scalars
+      through the entire WENO machinery to 8 face scalars through pure algebra.
+
+    Validated bit-exact (~1e-12, x64) against ``jax.vjp`` of the forward window
+    in ``pytests/pallas/_weno_mhd_window_adjoint_check.py``.  ``b_eps`` and
+    ``sqrt_floor`` are typed scalars (x64 + Triton dtype hygiene)."""
+    gm1 = gamma - 1.0
+    gam0 = 1.0 - gamma
+    gam1 = 0.5 * (gamma - 1.0)
+    gam2 = (gamma - 2.0) / (gamma - 1.0)
+    epsilon = 1e-7
+    tiny = 1e-14
+    zero_typed = gamma - gamma
+    one_typed = zero_typed + 1.0
+    neg_one_typed = zero_typed - 1.0
+    inv_sqrt_two_typed = zero_typed + (1.0 / 2.0 ** 0.5)
+    sqrt_eps = zero_typed + (1e-30 if jax.config.jax_enable_x64 else 1e-20)
+
+    def ssqrt(x):
+        return jnp.sqrt(jnp.maximum(x, sqrt_eps))
+
+    # ---- per-cell forward maps (recomputed) ----
+    def primitive_from_q(q):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy = q
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho
+        vt1 = mt1 * inv_rho
+        vt2 = mt2 * inv_rho
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        b2 = Bn * Bn + Bt1 * Bt1 + Bt2 * Bt2
+        p = gm1 * (energy - 0.5 * (rho * v2 + b2))
+        return rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p
+
+    def floored_cell(q):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        troubled = (rho < rhomin) | (p < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        p_f = jnp.where(troubled, jnp.maximum(p, pgmin), p)
+        energy_f = jnp.where(troubled, p_f / gm1 + 0.5 * (rho_f * v2 + b2), energy)
+        specific_enthalpy = (energy_f + p_f) / rho_f
+        sound_speed_sq = jnp.maximum(0.0, gamma * jnp.abs(p_f / rho_f))
+        sound_speed = jnp.sqrt(jnp.maximum(sound_speed_sq, sqrt_floor))
+        bn2_over_rho = (Bn * Bn) / rho_f
+        disc_root = ssqrt(
+            (b2 / rho_f + sound_speed_sq) ** 2 - 4.0 * bn2_over_rho * sound_speed_sq
+        )
+        c_fast = ssqrt(0.5 * (b2 / rho_f + sound_speed_sq + disc_root))
+        c_alfven = ssqrt(bn2_over_rho)
+        c_slow = ssqrt(0.5 * (b2 / rho_f + sound_speed_sq - disc_root))
+        return (rho_f, mn, mt1, mt2, Bn, Bt1, Bt2, energy_f,
+                vn, vt1, vt2, v2, b2, p_f, specific_enthalpy,
+                sound_speed, sound_speed_sq, c_fast, c_alfven, c_slow)
+
+    def flux_from_q(q):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        p_total = p + 0.5 * b2
+        v_dot_B = vn * Bn + vt1 * Bt1 + vt2 * Bt2
+        return (
+            mn,
+            rho * vn * vn + p_total - Bn * Bn,
+            rho * vn * vt1 - Bn * Bt1,
+            rho * vn * vt2 - Bn * Bt2,
+            zero_typed,
+            Bt1 * vn - Bn * vt1,
+            Bt2 * vn - Bn * vt2,
+            (energy + p_total) * vn - v_dot_B * Bn,
+        )
+
+    # ---- per-cell adjoints ----
+    def primitive_from_q_adj(q, bars):
+        # bars: cotangents for the 14-tuple primitive_from_q output, in order
+        # (rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p).
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy = q
+        inv_rho = 1.0 / rho
+        vn = mn * inv_rho
+        vt1 = mt1 * inv_rho
+        vt2 = mt2 * inv_rho
+        (b_rho, b_mn, b_mt1, b_mt2, b_Bn, b_Bt1, b_Bt2, b_energy,
+         b_vn, b_vt1, b_vt2, b_v2, b_b2, b_p) = bars
+        # p = gm1 * (energy - 0.5 * (rho * v2 + b2))
+        #   d p/d energy = gm1; d p/d rho = gm1*(-0.5*v2);
+        #   d p/d v2 = gm1*(-0.5*rho); d p/d b2 = gm1*(-0.5)
+        b_energy = b_energy + gm1 * b_p
+        v2 = vn * vn + vt1 * vt1 + vt2 * vt2
+        b_rho = b_rho + gm1 * (-0.5 * v2) * b_p
+        b_v2 = b_v2 + gm1 * (-0.5 * rho) * b_p
+        b_b2 = b_b2 + gm1 * (-0.5) * b_p
+        # b2 = Bn^2 + Bt1^2 + Bt2^2
+        b_Bn = b_Bn + 2.0 * Bn * b_b2
+        b_Bt1 = b_Bt1 + 2.0 * Bt1 * b_b2
+        b_Bt2 = b_Bt2 + 2.0 * Bt2 * b_b2
+        # v2 = vn^2 + vt1^2 + vt2^2
+        b_vn = b_vn + 2.0 * vn * b_v2
+        b_vt1 = b_vt1 + 2.0 * vt1 * b_v2
+        b_vt2 = b_vt2 + 2.0 * vt2 * b_v2
+        # vn = mn*inv_rho, etc.
+        b_inv_rho = mt2 * b_vt2 + mt1 * b_vt1 + mn * b_vn
+        b_mt2 = b_mt2 + inv_rho * b_vt2
+        b_mt1 = b_mt1 + inv_rho * b_vt1
+        b_mn = b_mn + inv_rho * b_vn
+        b_rho = b_rho + (-inv_rho * inv_rho) * b_inv_rho
+        return [b_rho, b_mn, b_mt1, b_mt2, b_Bn, b_Bt1, b_Bt2, b_energy]
+
+    def flux_from_q_adj(q, fbar):
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        bd = [0.0] * 14  # bars for primitive_from_q outputs
+        # indices: 0 rho,1 mn,2 mt1,3 mt2,4 Bn,5 Bt1,6 Bt2,7 energy,
+        #          8 vn,9 vt1,10 vt2,11 v2,12 b2,13 p
+        p_total = p + 0.5 * b2
+        # f0 = mn
+        bd[1] += fbar[0]
+        # f1 = rho*vn*vn + p_total - Bn*Bn ; p_total = p + 0.5*b2
+        bd[0] += fbar[1] * (vn * vn)
+        bd[8] += fbar[1] * (2.0 * rho * vn)
+        bd[13] += fbar[1]
+        bd[12] += fbar[1] * 0.5
+        bd[4] += fbar[1] * (-2.0 * Bn)
+        # f2 = rho*vn*vt1 - Bn*Bt1
+        bd[0] += fbar[2] * (vn * vt1)
+        bd[8] += fbar[2] * (rho * vt1)
+        bd[9] += fbar[2] * (rho * vn)
+        bd[4] += fbar[2] * (-Bt1)
+        bd[5] += fbar[2] * (-Bn)
+        # f3 = rho*vn*vt2 - Bn*Bt2
+        bd[0] += fbar[3] * (vn * vt2)
+        bd[8] += fbar[3] * (rho * vt2)
+        bd[10] += fbar[3] * (rho * vn)
+        bd[4] += fbar[3] * (-Bt2)
+        bd[6] += fbar[3] * (-Bn)
+        # f4 = 0  -> no contribution
+        # f5 = Bt1*vn - Bn*vt1
+        bd[5] += fbar[5] * vn
+        bd[8] += fbar[5] * Bt1
+        bd[4] += fbar[5] * (-vt1)
+        bd[9] += fbar[5] * (-Bn)
+        # f6 = Bt2*vn - Bn*vt2
+        bd[6] += fbar[6] * vn
+        bd[8] += fbar[6] * Bt2
+        bd[4] += fbar[6] * (-vt2)
+        bd[10] += fbar[6] * (-Bn)
+        # f7 = (energy + p_total)*vn - v_dot_B*Bn ;
+        #      v_dot_B = vn*Bn + vt1*Bt1 + vt2*Bt2
+        v_dot_B = vn * Bn + vt1 * Bt1 + vt2 * Bt2
+        bd[7] += fbar[7] * vn
+        bd[13] += fbar[7] * vn          # p_total via p
+        bd[12] += fbar[7] * 0.5 * vn    # p_total via 0.5*b2
+        bd[8] += fbar[7] * (energy + p_total)
+        # - v_dot_B * Bn
+        bd[4] += fbar[7] * (-v_dot_B)
+        bd[8] += fbar[7] * (-Bn * Bn)
+        bd[4] += fbar[7] * (-Bn * vn)
+        bd[9] += fbar[7] * (-Bn * Bt1)
+        bd[5] += fbar[7] * (-Bn * vt1)
+        bd[10] += fbar[7] * (-Bn * Bt2)
+        bd[6] += fbar[7] * (-Bn * vt2)
+        return primitive_from_q_adj(q, bd)
+
+    def floored_cell_adj(q, bars20):
+        # bars20: cotangents for the 20-tuple floored_cell output.
+        rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
+        troubled = (rho < rhomin) | (p < pgmin)
+        rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
+        p_f = jnp.where(troubled, jnp.maximum(p, pgmin), p)
+        energy_f = jnp.where(troubled, p_f / gm1 + 0.5 * (rho_f * v2 + b2), energy)
+        ratio = p_f / rho_f
+        ss_sq = jnp.maximum(0.0, gamma * jnp.abs(ratio))
+        bn2_over_rho = (Bn * Bn) / rho_f
+        b2_over_rho = b2 / rho_f
+        disc_arg = (b2_over_rho + ss_sq) ** 2 - 4.0 * bn2_over_rho * ss_sq
+        disc_root = ssqrt(disc_arg)
+        cf_arg = 0.5 * (b2_over_rho + ss_sq + disc_root)
+        cs_arg = 0.5 * (b2_over_rho + ss_sq - disc_root)
+        ca_arg = bn2_over_rho
+        ss_floor_arg = jnp.maximum(ss_sq, sqrt_floor)
+
+        (b_rho_f, b_mn, b_mt1, b_mt2, b_Bn, b_Bt1, b_Bt2, b_energy_f,
+         b_vn, b_vt1, b_vt2, b_v2, b_b2, b_p_f, b_h,
+         b_sound, b_ss_sq, b_c_fast, b_c_alfven, b_c_slow) = bars20
+
+        # --- characteristic speeds (reverse) ---
+        # c_fast = ssqrt(cf_arg); ssqrt'(x)=0.5/sqrt(max(x,eps)) * [x>eps]
+        def dssqrt(arg, bar):
+            val = jnp.sqrt(jnp.maximum(arg, sqrt_eps))
+            return jnp.where(arg > sqrt_eps, bar * 0.5 / val, 0.0)
+        b_cf_arg = dssqrt(cf_arg, b_c_fast)
+        b_cs_arg = dssqrt(cs_arg, b_c_slow)
+        b_ca_arg = dssqrt(ca_arg, b_c_alfven)
+        # cf_arg = 0.5*(b2_over_rho + ss_sq + disc_root)
+        b_b2_over_rho = 0.5 * b_cf_arg
+        b_ss_sq2 = 0.5 * b_cf_arg
+        b_disc_root = 0.5 * b_cf_arg
+        # cs_arg = 0.5*(b2_over_rho + ss_sq - disc_root)
+        b_b2_over_rho += 0.5 * b_cs_arg
+        b_ss_sq2 += 0.5 * b_cs_arg
+        b_disc_root += -0.5 * b_cs_arg
+        # ca_arg = bn2_over_rho
+        b_bn2_over_rho = b_ca_arg
+        # disc_root = ssqrt(disc_arg)
+        b_disc_arg = dssqrt(disc_arg, b_disc_root)
+        # disc_arg = (b2_over_rho + ss_sq)^2 - 4*bn2_over_rho*ss_sq
+        s_bo = b2_over_rho + ss_sq
+        b_b2_over_rho += b_disc_arg * 2.0 * s_bo
+        b_ss_sq2 += b_disc_arg * 2.0 * s_bo
+        b_bn2_over_rho += b_disc_arg * (-4.0 * ss_sq)
+        b_ss_sq2 += b_disc_arg * (-4.0 * bn2_over_rho)
+        # sound_speed = sqrt(max(ss_sq, sqrt_floor))
+        sval = jnp.sqrt(ss_floor_arg)
+        b_ss_sq2 += jnp.where(ss_sq > sqrt_floor, b_sound * 0.5 / sval, 0.0)
+        # explicit ss_sq output bar
+        b_ss_sq2 += b_ss_sq
+        # bn2_over_rho = Bn^2 / rho_f
+        b_Bn += b_bn2_over_rho * (2.0 * Bn / rho_f)
+        b_rho_f += b_bn2_over_rho * (-(Bn * Bn) / (rho_f * rho_f))
+        # b2_over_rho = b2 / rho_f
+        b_b2 += b_b2_over_rho / rho_f
+        b_rho_f += b_b2_over_rho * (-b2 / (rho_f * rho_f))
+        # ss_sq = max(0, gamma*|ratio|)
+        active = ss_sq > 0.0
+        b_ratio = jnp.where(active, b_ss_sq2 * gamma * jnp.sign(ratio), 0.0)
+        # ratio = p_f / rho_f
+        b_p_f += b_ratio / rho_f
+        b_rho_f += b_ratio * (-p_f / (rho_f * rho_f))
+
+        # --- specific_enthalpy h = (energy_f + p_f) / rho_f ---
+        b_energy_f += b_h / rho_f
+        b_p_f += b_h / rho_f
+        b_rho_f += b_h * (-(energy_f + p_f) / (rho_f * rho_f))
+
+        # --- energy_f = where(troubled, p_f/gm1 + 0.5*(rho_f*v2 + b2), energy) ---
+        b_p_f += jnp.where(troubled, b_energy_f / gm1, 0.0)
+        b_rho_f += jnp.where(troubled, b_energy_f * 0.5 * v2, 0.0)
+        b_v2 += jnp.where(troubled, b_energy_f * 0.5 * rho_f, 0.0)
+        b_b2 += jnp.where(troubled, b_energy_f * 0.5, 0.0)
+        b_energy = jnp.where(troubled, 0.0, b_energy_f)
+        # --- p_f = where(troubled, max(p, pgmin), p) ---
+        b_p = b_p_f * jnp.where(troubled, jnp.where(p > pgmin, 1.0, 0.0), 1.0)
+        # --- rho_f = where(troubled, max(rho, rhomin), rho) ---
+        b_rho = b_rho_f * jnp.where(troubled, jnp.where(rho > rhomin, 1.0, 0.0), 1.0)
+
+        # Assemble primitive_from_q bars (14-tuple) and chain back.
+        bd = [b_rho, b_mn, b_mt1, b_mt2, b_Bn, b_Bt1, b_Bt2, b_energy,
+              b_vn, b_vt1, b_vt2, b_v2, b_b2, b_p]
+        return primitive_from_q_adj(q, bd)
+
+    # ---- eigenvector building blocks: base face quantities -> derived (local vjp) ----
+    def _eigen_bb(rho_face, vn_face, vt1_face, vt2_face,
+                  Bn_face, Bt1_face, Bt2_face, h_face):
+        v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
+        b2_face = Bn_face * Bn_face + Bt1_face * Bt1_face + Bt2_face * Bt2_face
+        b2_over_rho_face = b2_face / rho_face
+        bn2_over_rho_face = (Bn_face * Bn_face) / rho_face
+        c_sq_face = gm1 * (h_face - 0.5 * (v2_face + b2_over_rho_face))
+        c_sq_face = jnp.maximum(c_sq_face, 0.0)
+        c_face = jnp.sqrt(jnp.maximum(c_sq_face, sqrt_floor))
+        c_sq_safe = jnp.where(c_sq_face > 0.0, c_sq_face, one_typed)
+        inv_c_sq = jnp.where(c_sq_face > 0.0, 1.0 / c_sq_safe, 0.0)
+        ms_disc = (b2_over_rho_face + c_sq_face) ** 2 - 4.0 * bn2_over_rho_face * c_sq_face
+        ms_disc_root = ssqrt(ms_disc)
+        lambda_fast = ssqrt(0.5 * (b2_over_rho_face + c_sq_face + ms_disc_root))
+        lambda_alfven = ssqrt(bn2_over_rho_face)
+        lambda_slow = ssqrt(0.5 * (b2_over_rho_face + c_sq_face - ms_disc_root))
+        bt_sq = Bt1_face * Bt1_face + Bt2_face * Bt2_face
+        bt_sq_safe = jnp.maximum(bt_sq, b_eps)
+        bt_n1 = jnp.where(bt_sq >= b_eps, Bt1_face / jnp.sqrt(bt_sq_safe), inv_sqrt_two_typed)
+        bt_n2 = jnp.where(bt_sq >= b_eps, Bt2_face / jnp.sqrt(bt_sq_safe), inv_sqrt_two_typed)
+        sgn_bn = jnp.where(Bn_face >= 0.0, one_typed, neg_one_typed)
+        sgn_bt = jnp.where(
+            Bt1_face != 0.0,
+            jnp.where(Bt1_face >= 0.0, one_typed, neg_one_typed),
+            jnp.where(Bt2_face >= 0.0, one_typed, neg_one_typed),
+        )
+        denom = lambda_fast * lambda_fast - lambda_slow * lambda_slow
+        denom_safe = jnp.maximum(denom, b_eps)
+        am_fast = jnp.where(
+            denom >= b_eps,
+            ssqrt(c_sq_face - lambda_slow * lambda_slow) / jnp.sqrt(denom_safe),
+            1.0,
+        )
+        am_slow = jnp.where(
+            denom >= b_eps,
+            ssqrt(lambda_fast * lambda_fast - c_sq_face) / jnp.sqrt(denom_safe),
+            1.0,
+        )
+        sqrt_rho_face = jnp.sqrt(jnp.maximum(rho_face, rhomin))
+        # Only the *differentiable* float outputs are returned (sgn_bn / sgn_bt /
+        # cs_geq_alfven are piecewise-constant -> zero cotangent, and lambda_alfven
+        # only feeds the constant comparison; all three are computed outside the
+        # differentiated map).
+        return (v2_face, c_sq_face, inv_c_sq, c_face, lambda_fast, lambda_slow,
+                am_fast, am_slow, bt_n1, bt_n2, sqrt_rho_face)
+
+    def _eigen_consts(rho_face, vn_face, vt1_face, vt2_face,
+                      Bn_face, Bt1_face, Bt2_face, h_face):
+        """Non-differentiable companions of ``_eigen_bb`` (signs + the
+        cs>=alfven branch flag)."""
+        v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
+        b2_face = Bn_face * Bn_face + Bt1_face * Bt1_face + Bt2_face * Bt2_face
+        b2_over_rho_face = b2_face / rho_face
+        bn2_over_rho_face = (Bn_face * Bn_face) / rho_face
+        c_sq_face = jnp.maximum(gm1 * (h_face - 0.5 * (v2_face + b2_over_rho_face)), 0.0)
+        c_face = jnp.sqrt(jnp.maximum(c_sq_face, sqrt_floor))
+        lambda_alfven = ssqrt(bn2_over_rho_face)
+        sgn_bn = jnp.where(Bn_face >= 0.0, one_typed, neg_one_typed)
+        sgn_bt = jnp.where(
+            Bt1_face != 0.0,
+            jnp.where(Bt1_face >= 0.0, one_typed, neg_one_typed),
+            jnp.where(Bt2_face >= 0.0, one_typed, neg_one_typed),
+        )
+        cs_geq_alfven = c_face >= lambda_alfven
+        return sgn_bn, sgn_bt, cs_geq_alfven
+
+    def _eigen_bb_adj(base_q, ct):
+        """Hand-derived Jacobian-transpose of :func:`_eigen_bb`.
+
+        ``base_q`` is the 8-tuple of base face quantities (rho, vn, vt1, vt2, Bn,
+        Bt1, Bt2, h); ``ct`` is the 11-tuple of output cotangents in the order
+        returned by ``_eigen_bb`` (v2, csq, inv_c_sq, c_face, lambda_fast,
+        lambda_slow, am_fast, am_slow, bt_n1, bt_n2, sqrt_rho_face).  Returns the
+        length-8 cotangent over the base quantities.  Bit-exact vs
+        ``jax.vjp(_eigen_bb)`` for non-degenerate states; matches it to FP-order
+        on the measure-zero zero-tangential-B / no-field degeneracies (the
+        ``1/sqrt(bt^2)`` near-singularity, where the native vjp is no more exact
+        — both straddle central FD identically).  Validated in
+        ``pytests/pallas/_weno_mhd_eigenbb_adjoint_isolated.py``."""
+        (rho_face, vn_face, vt1_face, vt2_face,
+         Bn_face, Bt1_face, Bt2_face, h_face) = base_q
+        (b_v2, b_csq_out, b_invc, b_cface, b_lf, b_ls,
+         b_amf, b_ams, b_bn1, b_bn2, b_srho) = ct
+
+        # forward recompute (intermediates)
+        v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
+        b2_face = Bn_face * Bn_face + Bt1_face * Bt1_face + Bt2_face * Bt2_face
+        b2_over_rho_face = b2_face / rho_face
+        bn2_over_rho_face = (Bn_face * Bn_face) / rho_face
+        c_sq_raw = gm1 * (h_face - 0.5 * (v2_face + b2_over_rho_face))
+        c_sq_face = jnp.maximum(c_sq_raw, 0.0)
+        ms_disc = (b2_over_rho_face + c_sq_face) ** 2 - 4.0 * bn2_over_rho_face * c_sq_face
+        ms_disc_root = ssqrt(ms_disc)
+        lf_arg = 0.5 * (b2_over_rho_face + c_sq_face + ms_disc_root)
+        ls_arg = 0.5 * (b2_over_rho_face + c_sq_face - ms_disc_root)
+        lambda_fast = ssqrt(lf_arg)
+        lambda_slow = ssqrt(ls_arg)
+        bt_sq = Bt1_face * Bt1_face + Bt2_face * Bt2_face
+        bt_sq_safe = jnp.maximum(bt_sq, b_eps)
+        sqrt_btss = jnp.sqrt(bt_sq_safe)
+        denom = lambda_fast * lambda_fast - lambda_slow * lambda_slow
+        denom_safe = jnp.maximum(denom, b_eps)
+        sqrt_denom = jnp.sqrt(denom_safe)
+        amf_num_arg = c_sq_face - lambda_slow * lambda_slow
+        ams_num_arg = lambda_fast * lambda_fast - c_sq_face
+        amf_num = ssqrt(amf_num_arg)
+        ams_num = ssqrt(ams_num_arg)
+
+        def dssqrt(arg, bar):
+            val = jnp.sqrt(jnp.maximum(arg, sqrt_eps))
+            return jnp.where(arg > sqrt_eps, bar * 0.5 / val, 0.0)
+
+        b_rho = zero_typed; b_vn = zero_typed; b_vt1 = zero_typed; b_vt2 = zero_typed
+        b_Bn = zero_typed; b_Bt1 = zero_typed; b_Bt2 = zero_typed; b_h = zero_typed
+        b_b2or = zero_typed
+        b_bn2or = zero_typed
+        b_csq = b_csq_out               # direct output cotangent on c_sq_face
+        b_lf_acc = b_lf
+        b_ls_acc = b_ls
+
+        # sqrt_rho_face = sqrt(max(rho, rhomin))
+        srho_val = jnp.sqrt(jnp.maximum(rho_face, rhomin))
+        b_rho += jnp.where(rho_face > rhomin, b_srho * 0.5 / srho_val, 0.0)
+
+        # bt_n1 / bt_n2
+        active_bt = bt_sq >= b_eps
+        inv_sb = 1.0 / sqrt_btss
+        b_btsq_safe = zero_typed
+        b_Bt1 += jnp.where(active_bt, b_bn1 * inv_sb, 0.0)
+        b_btsq_safe += jnp.where(active_bt, b_bn1 * (-0.5 * Bt1_face / bt_sq_safe ** 1.5), 0.0)
+        b_Bt2 += jnp.where(active_bt, b_bn2 * inv_sb, 0.0)
+        b_btsq_safe += jnp.where(active_bt, b_bn2 * (-0.5 * Bt2_face / bt_sq_safe ** 1.5), 0.0)
+        b_btsq = jnp.where(bt_sq > b_eps, b_btsq_safe, 0.0)
+        b_Bt1 += b_btsq * 2.0 * Bt1_face
+        b_Bt2 += b_btsq * 2.0 * Bt2_face
+
+        # am_fast / am_slow
+        use = denom >= b_eps
+        b_amf_num = jnp.where(use, b_amf / sqrt_denom, 0.0)
+        b_sqrt_denom = jnp.where(use, b_amf * (-amf_num / sqrt_denom ** 2), 0.0)
+        b_ams_num = jnp.where(use, b_ams / sqrt_denom, 0.0)
+        b_sqrt_denom += jnp.where(use, b_ams * (-ams_num / sqrt_denom ** 2), 0.0)
+        b_denom_safe = b_sqrt_denom * 0.5 / sqrt_denom
+        b_denom = jnp.where(denom > b_eps, b_denom_safe, 0.0)
+        b_amf_num_arg = dssqrt(amf_num_arg, b_amf_num)
+        b_csq += b_amf_num_arg
+        b_ls_acc += b_amf_num_arg * (-2.0 * lambda_slow)
+        b_ams_num_arg = dssqrt(ams_num_arg, b_ams_num)
+        b_lf_acc += b_ams_num_arg * (2.0 * lambda_fast)
+        b_csq += b_ams_num_arg * (-1.0)
+        b_lf_acc += b_denom * (2.0 * lambda_fast)
+        b_ls_acc += b_denom * (-2.0 * lambda_slow)
+
+        # lambda_fast / lambda_slow
+        b_lf_arg = dssqrt(lf_arg, b_lf_acc)
+        b_ls_arg = dssqrt(ls_arg, b_ls_acc)
+        b_b2or += 0.5 * b_lf_arg + 0.5 * b_ls_arg
+        b_csq += 0.5 * b_lf_arg + 0.5 * b_ls_arg
+        b_ms_root = 0.5 * b_lf_arg - 0.5 * b_ls_arg
+        b_ms_disc = dssqrt(ms_disc, b_ms_root)
+        s_mc = b2_over_rho_face + c_sq_face
+        b_b2or += b_ms_disc * 2.0 * s_mc
+        b_csq += b_ms_disc * 2.0 * s_mc
+        b_bn2or += b_ms_disc * (-4.0 * c_sq_face)
+        b_csq += b_ms_disc * (-4.0 * bn2_over_rho_face)
+
+        # c_face = sqrt(max(csq, sqrt_floor))
+        cface_val = jnp.sqrt(jnp.maximum(c_sq_face, sqrt_floor))
+        b_csq += jnp.where(c_sq_face > sqrt_floor, b_cface * 0.5 / cface_val, 0.0)
+        # inv_c_sq = where(csq>0, 1/csq, 0)
+        b_csq += jnp.where(c_sq_face > 0.0, b_invc * (-1.0 / c_sq_face ** 2), 0.0)
+
+        # c_sq_face = max(c_sq_raw, 0)
+        b_csq_raw = jnp.where(c_sq_raw > 0.0, b_csq, 0.0)
+        b_h += b_csq_raw * gm1
+        b_v2_internal = b_csq_raw * gm1 * (-0.5)
+        b_b2or += b_csq_raw * gm1 * (-0.5)
+
+        # bn2_over_rho_face = Bn^2 / rho
+        b_Bn += b_bn2or * (2.0 * Bn_face / rho_face)
+        b_rho += b_bn2or * (-(Bn_face * Bn_face) / rho_face ** 2)
+        # b2_over_rho_face = b2 / rho
+        b_b2 = b_b2or / rho_face
+        b_rho += b_b2or * (-b2_face / rho_face ** 2)
+        b_Bn += b_b2 * 2.0 * Bn_face
+        b_Bt1 += b_b2 * 2.0 * Bt1_face
+        b_Bt2 += b_b2 * 2.0 * Bt2_face
+
+        # v2_face (output bar + internal)
+        b_v2_total = b_v2 + b_v2_internal
+        b_vn += b_v2_total * 2.0 * vn_face
+        b_vt1 += b_v2_total * 2.0 * vt1_face
+        b_vt2 += b_v2_total * 2.0 * vt2_face
+
+        return [b_rho, b_vn, b_vt1, b_vt2, b_Bn, b_Bt1, b_Bt2, b_h]
+
+    # ---- left_project given the eigenstructure (forward + adjoint) ----
+    # ``fp`` carries every face quantity consumed by the projections.  The
+    # adjoint accumulates cotangents into ``fpbar`` (same keys) and into the
+    # per-cell values ``vbar``.  This mirrors left_project_adj in the hydro
+    # template but for the 7 MHD waves.
+    def _Lrows(mode, fp):
+        """Return (coeffs, idxs): L_row[mode] as a list of (coeff, value_index)
+        pairs, plus the per-mode overall scale.  value indices map to the
+        8-tuple local order (rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy)."""
+        vn = fp['vn']; vt1 = fp['vt1']; vt2 = fp['vt2']
+        Bt1 = fp['Bt1']; Bt2 = fp['Bt2']
+        v2 = fp['v2']; csq = fp['csq']; cface = fp['cface']
+        lf = fp['lf']; ls = fp['ls']; amf = fp['amf']; ams = fp['ams']
+        bn1 = fp['bn1']; bn2 = fp['bn2']; sbn = fp['sbn']; sbt = fp['sbt']
+        srho = fp['srho']; geq = fp['geq']; invc = fp['invc']
+        if mode == 0:  # fast-
+            L = [
+                (amf * (gam1 * v2 + lf * vn) - ams * ls * (bn1 * vt1 + bn2 * vt2) * sbn, 0),
+                (amf * (gam0 * vn - lf), 1),
+                (gam0 * amf * vt1 + ams * ls * bn1 * sbn, 2),
+                (gam0 * amf * vt2 + ams * ls * bn2 * sbn, 3),
+                (gam0 * amf * Bt1 + cface * ams * bn1 * srho, 5),
+                (gam0 * amf * Bt2 + cface * ams * bn2 * srho, 6),
+                (-gam0 * amf, 7),
+            ]
+            scale = 0.5 * invc * jnp.where(~geq, sbt, one_typed)
+            return L, scale
+        if mode == 1:  # alfven-
+            L = [
+                (bn2 * vt1 - bn1 * vt2, 0),
+                (-bn2, 2),
+                (bn1, 3),
+                (-bn2 * sbn * srho, 5),
+                (bn1 * sbn * srho, 6),
+            ]
+            return L, 0.5 + zero_typed
+        if mode == 2:  # slow-
+            L = [
+                (ams * (gam1 * v2 + ls * vn) + amf * lf * (bn1 * vt1 + bn2 * vt2) * sbn, 0),
+                (ams * (gam0 * vn) - ams * ls, 1),
+                (gam0 * ams * vt1 - amf * lf * bn1 * sbn, 2),
+                (gam0 * ams * vt2 - amf * lf * bn2 * sbn, 3),
+                (gam0 * ams * Bt1 - cface * amf * bn1 * srho, 5),
+                (gam0 * ams * Bt2 - cface * amf * bn2 * srho, 6),
+                (-gam0 * ams, 7),
+            ]
+            scale = 0.5 * invc * jnp.where(geq, sbt, one_typed)
+            return L, scale
+        if mode == 3:  # entropy
+            L = [
+                (-csq / gam0 - 0.5 * v2, 0),
+                (vn, 1),
+                (vt1, 2),
+                (vt2, 3),
+                (Bt1, 5),
+                (Bt2, 6),
+                (-1.0 + zero_typed, 7),
+            ]
+            return L, -gam0 * invc
+        if mode == 4:  # slow+
+            L = [
+                (ams * (gam1 * v2 - ls * vn) - amf * lf * (bn1 * vt1 + bn2 * vt2) * sbn, 0),
+                (ams * (gam0 * vn + ls), 1),
+                (gam0 * ams * vt1 + amf * lf * bn1 * sbn, 2),
+                (gam0 * ams * vt2 + amf * lf * bn2 * sbn, 3),
+                (gam0 * ams * Bt1 - cface * amf * bn1 * srho, 5),
+                (gam0 * ams * Bt2 - cface * amf * bn2 * srho, 6),
+                (-gam0 * ams, 7),
+            ]
+            scale = 0.5 * invc * jnp.where(geq, sbt, one_typed)
+            return L, scale
+        if mode == 5:  # alfven+
+            L = [
+                (bn2 * vt1 - bn1 * vt2, 0),
+                (-bn2, 2),
+                (bn1, 3),
+                (bn2 * sbn * srho, 5),
+                (-bn1 * sbn * srho, 6),
+            ]
+            return L, 0.5 + zero_typed
+        # mode 6 — fast+
+        L = [
+            (amf * (gam1 * v2 - lf * vn) + ams * ls * (bn1 * vt1 + bn2 * vt2) * sbn, 0),
+            (amf * (gam0 * vn + lf), 1),
+            (gam0 * amf * vt1 - ams * ls * bn1 * sbn, 2),
+            (gam0 * amf * vt2 - ams * ls * bn2 * sbn, 3),
+            (gam0 * amf * Bt1 + cface * ams * bn1 * srho, 5),
+            (gam0 * amf * Bt2 + cface * ams * bn2 * srho, 6),
+            (-gam0 * amf, 7),
+        ]
+        scale = 0.5 * invc * jnp.where(~geq, sbt, one_typed)
+        return L, scale
+
+    def left_project_fwd(mode, values, fp):
+        L, scale = _Lrows(mode, fp)
+        acc = zero_typed
+        for coeff, idx in L:
+            acc = acc + coeff * values[idx]
+        return acc * scale
+
+    def _Rcols(mode, fp):
+        """R_col[:, mode] as a length-8 list, plus the per-mode scale.  Mirrors
+        ``add_right_correction`` in the forward window (B_normal slot is 0)."""
+        vn = fp['vn']; vt1 = fp['vt1']; vt2 = fp['vt2']
+        v2 = fp['v2']; csq = fp['csq']; cface = fp['cface']
+        lf = fp['lf']; ls = fp['ls']; amf = fp['amf']; ams = fp['ams']
+        bn1 = fp['bn1']; bn2 = fp['bn2']; sbn = fp['sbn']; sbt = fp['sbt']
+        srho = fp['srho']; geq = fp['geq']
+        if mode == 0:  # fast-
+            R = [
+                amf,
+                amf * (vn - lf),
+                amf * vt1 + ams * ls * bn1 * sbn,
+                amf * vt2 + ams * ls * bn2 * sbn,
+                zero_typed,
+                cface * ams * bn1 / srho,
+                cface * ams * bn2 / srho,
+                amf * (lf * lf - lf * vn + 0.5 * v2 - gam2 * csq)
+                + ams * ls * (bn1 * vt1 + bn2 * vt2) * sbn,
+            ]
+            scale = jnp.where(~geq, sbt, one_typed)
+        elif mode == 1:  # alfven-
+            R = [
+                zero_typed, zero_typed, -bn2, bn1, zero_typed,
+                -bn2 * sbn / srho, bn1 * sbn / srho,
+                bn1 * vt2 - bn2 * vt1,
+            ]
+            scale = one_typed
+        elif mode == 2:  # slow-
+            R = [
+                ams,
+                ams * (vn - ls),
+                ams * vt1 - amf * lf * bn1 * sbn,
+                ams * vt2 - amf * lf * bn2 * sbn,
+                zero_typed,
+                -cface * amf * bn1 / srho,
+                -cface * amf * bn2 / srho,
+                ams * (ls * ls - ls * vn + 0.5 * v2 - gam2 * csq)
+                - amf * lf * (bn1 * vt1 + bn2 * vt2) * sbn,
+            ]
+            scale = jnp.where(geq, sbt, one_typed)
+        elif mode == 3:  # entropy
+            R = [one_typed, vn, vt1, vt2, zero_typed, zero_typed, zero_typed, 0.5 * v2]
+            scale = one_typed
+        elif mode == 4:  # slow+
+            R = [
+                ams,
+                ams * (vn + ls),
+                ams * vt1 + amf * lf * bn1 * sbn,
+                ams * vt2 + amf * lf * bn2 * sbn,
+                zero_typed,
+                -cface * amf * bn1 / srho,
+                -cface * amf * bn2 / srho,
+                ams * (ls * ls + ls * vn + 0.5 * v2 - gam2 * csq)
+                + amf * lf * (bn1 * vt1 + bn2 * vt2) * sbn,
+            ]
+            scale = jnp.where(geq, sbt, one_typed)
+        elif mode == 5:  # alfven+
+            R = [
+                zero_typed, zero_typed, -bn2, bn1, zero_typed,
+                bn2 * sbn / srho, -bn1 * sbn / srho,
+                bn1 * vt2 - bn2 * vt1,
+            ]
+            scale = one_typed
+        else:  # mode == 6 — fast+
+            R = [
+                amf,
+                amf * (vn + lf),
+                amf * vt1 - ams * ls * bn1 * sbn,
+                amf * vt2 - ams * ls * bn2 * sbn,
+                zero_typed,
+                cface * ams * bn1 / srho,
+                cface * ams * bn2 / srho,
+                amf * (lf * lf + lf * vn + 0.5 * v2 - gam2 * csq)
+                - ams * ls * (bn1 * vt1 + bn2 * vt2) * sbn,
+            ]
+            scale = jnp.where(~geq, sbt, one_typed)
+        return R, scale
+
+    def _Rcol_apply(mode, fp_base, scal_tuple):
+        """Return the length-8 tuple ``R[slot]*scale`` as a function of the
+        differentiable scalar vector (used for the local vjp of R_col).  Every
+        entry is broadcast to the tile shape (the scalar vector's leading entry
+        is always tile-shaped) so jax.vjp's output/cotangent shapes match even
+        for the structurally-constant R entries (the entropy/alfvén zeros)."""
+        fpl = dict(fp_base)
+        for key, val in zip(proj_keys, scal_tuple):
+            fpl[key] = val
+        R, scale = _Rcols(mode, fpl)
+        ref = scal_tuple[0]
+        return tuple(jnp.broadcast_to(R[slot] * scale, jnp.shape(ref))
+                     for slot in range(ncomp))
+
+    def _accum_scalar_bar(key, value, eig_bar, base_bar, base_index_of):
+        """Route a cotangent on a consumed scalar (``key`` in ``proj_keys``) to
+        either the base-face cotangent vector (vn/vt1/vt2/Bt1/Bt2 are base
+        quantities) or the derived-eigenstructure accumulator ``eig_bar``."""
+        if key == 'vn':
+            base_bar[1] += value
+        elif key == 'vt1':
+            base_bar[2] += value
+        elif key == 'vt2':
+            base_bar[3] += value
+        elif key == 'Bt1':
+            base_bar[5] += value
+        elif key == 'Bt2':
+            base_bar[6] += value
+        else:
+            eig_bar[key] += value
+
+    def _weno_recon_fwd(aterm, bterm, cterm, dterm):
+        IS0 = 13.0 * (aterm - bterm) ** 2 + 3.0 * (aterm - 3.0 * bterm) ** 2
+        IS1 = 13.0 * (bterm - cterm) ** 2 + 3.0 * (bterm + cterm) ** 2
+        IS2 = 13.0 * (cterm - dterm) ** 2 + 3.0 * (3.0 * cterm - dterm) ** 2
+        a0 = 1.0 / (epsilon + IS0) ** 2; a1 = 6.0 / (epsilon + IS1) ** 2; a2 = 3.0 / (epsilon + IS2) ** 2
+        asum = jnp.maximum(a0 + a1 + a2, tiny)
+        om0 = a0 / asum; om2 = a2 / asum
+        return om0 * (aterm - 2.0 * bterm + cterm) / 3.0 + (om2 - 0.5) * (bterm - 2.0 * cterm + dterm) / 6.0
+
+    def _weno_recon_adj(aterm, bterm, cterm, dterm, recon_bar):
+        IS0 = 13.0 * (aterm - bterm) ** 2 + 3.0 * (aterm - 3.0 * bterm) ** 2
+        IS1 = 13.0 * (bterm - cterm) ** 2 + 3.0 * (bterm + cterm) ** 2
+        IS2 = 13.0 * (cterm - dterm) ** 2 + 3.0 * (3.0 * cterm - dterm) ** 2
+        e0 = epsilon + IS0; e1 = epsilon + IS1; e2 = epsilon + IS2
+        a0 = 1.0 / e0 ** 2; a1 = 6.0 / e1 ** 2; a2 = 3.0 / e2 ** 2
+        s3 = a0 + a1 + a2; asum = jnp.maximum(s3, tiny)
+        om0 = a0 / asum; om2 = a2 / asum
+        P0 = (aterm - 2.0 * bterm + cterm) / 3.0
+        P2 = (bterm - 2.0 * cterm + dterm) / 6.0
+        ab = bb = cb = db = 0.0
+        om0_bar = recon_bar * P0; P0_bar = recon_bar * om0
+        om2_bar = recon_bar * P2; P2_bar = recon_bar * (om2 - 0.5)
+        ab += P0_bar / 3.0; bb += -2.0 * P0_bar / 3.0; cb += P0_bar / 3.0
+        bb += P2_bar / 6.0; cb += -2.0 * P2_bar / 6.0; db += P2_bar / 6.0
+        a0_bar = om0_bar / asum; asum_bar = om0_bar * (-a0 / asum ** 2)
+        a2_bar = om2_bar / asum; asum_bar += om2_bar * (-a2 / asum ** 2)
+        s3_bar = jnp.where(s3 > tiny, asum_bar, 0.0)
+        a0_bar += s3_bar; a1_bar = s3_bar; a2_bar += s3_bar
+        IS0_bar = a0_bar * (-2.0) * e0 ** (-3)
+        IS1_bar = a1_bar * 6.0 * (-2.0) * e1 ** (-3)
+        IS2_bar = a2_bar * 3.0 * (-2.0) * e2 ** (-3)
+        ab += IS0_bar * (26.0 * (aterm - bterm) + 6.0 * (aterm - 3.0 * bterm))
+        bb += IS0_bar * (-26.0 * (aterm - bterm) - 18.0 * (aterm - 3.0 * bterm))
+        bb += IS1_bar * (26.0 * (bterm - cterm) + 6.0 * (bterm + cterm))
+        cb += IS1_bar * (-26.0 * (bterm - cterm) + 6.0 * (bterm + cterm))
+        cb += IS2_bar * (26.0 * (cterm - dterm) + 18.0 * (3.0 * cterm - dterm))
+        db += IS2_bar * (-26.0 * (cterm - dterm) - 6.0 * (3.0 * cterm - dterm))
+        return ab, bb, cb, db
+
+    def lam_of(cell, mode):
+        vn = cell[8]; c_fast = cell[17]; c_alfven = cell[18]; c_slow = cell[19]
+        if mode == 0:
+            return vn - c_fast
+        if mode == 1:
+            return vn - c_alfven
+        if mode == 2:
+            return vn - c_slow
+        if mode == 3:
+            return vn
+        if mode == 4:
+            return vn + c_slow
+        if mode == 5:
+            return vn + c_alfven
+        return vn + c_fast
+
+    # ============================ forward recompute ============================
+    f_st = [flux_from_q(q) for q in q_stencil]
+    fl_st = [floored_cell(q) for q in q_stencil]
+    cl, cr = fl_st[2], fl_st[3]
+    rho_i = cl[0]; mn_i = cl[1]; mt1_i = cl[2]; mt2_i = cl[3]
+    Bn_i = cl[4]; Bt1_i = cl[5]; Bt2_i = cl[6]; h_i = cl[14]
+    rho_j = cr[0]; mn_j = cr[1]; mt1_j = cr[2]; mt2_j = cr[3]
+    Bn_j = cr[4]; Bt1_j = cr[5]; Bt2_j = cr[6]; h_j = cr[14]
+
+    rho_face = jnp.maximum(0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin)), rhomin)
+    vn_face = 0.5 * (mn_i + mn_j) / rho_face
+    vt1_face = 0.5 * (mt1_i + mt1_j) / rho_face
+    vt2_face = 0.5 * (mt2_i + mt2_j) / rho_face
+    Bn_face = 0.5 * (Bn_i + Bn_j)
+    Bt1_face = 0.5 * (Bt1_i + Bt1_j)
+    Bt2_face = 0.5 * (Bt2_i + Bt2_j)
+    h_face = 0.5 * (h_i + h_j)
+
+    base = (rho_face, vn_face, vt1_face, vt2_face, Bn_face, Bt1_face, Bt2_face, h_face)
+    if _MHD_VJP_FULL_HANDDERIVE:
+        (v2_face, c_sq_face, inv_c_sq, c_face, lambda_fast, lambda_slow,
+         am_fast, am_slow, bt_n1, bt_n2, sqrt_rho_face) = _eigen_bb(*base)
+        eig_vjp = None  # replaced by the hand transpose _eigen_bb_adj below
+    else:
+        (v2_face, c_sq_face, inv_c_sq, c_face, lambda_fast, lambda_slow,
+         am_fast, am_slow, bt_n1, bt_n2, sqrt_rho_face), eig_vjp = jax.vjp(_eigen_bb, *base)
+    sgn_bn, sgn_bt, cs_geq_alfven = _eigen_consts(*base)
+
+    fp = dict(vn=vn_face, vt1=vt1_face, vt2=vt2_face, Bt1=Bt1_face, Bt2=Bt2_face,
+              v2=v2_face, csq=c_sq_face, cface=c_face, lf=lambda_fast, ls=lambda_slow,
+              amf=am_fast, ams=am_slow, bn1=bt_n1, bn2=bt_n2, sbn=sgn_bn, sbt=sgn_bt,
+              srho=sqrt_rho_face, geq=cs_geq_alfven, invc=inv_c_sq)
+
+    # ---- left_project adjoint via local vjp over the consumed fp-scalars ----
+    # The consumed *differentiable* fp scalars (sgn_bn/sgn_bt/cs_geq_alfven are
+    # constants in the projection — their derivative is 0).  We differentiate the
+    # whole projection w.r.t. this scalar vector with one tiny jax.vjp per (mode,
+    # values); cheap and avoids re-deriving 7x messy L-rows by hand.
+    proj_keys = ('vn', 'vt1', 'vt2', 'Bt1', 'Bt2', 'v2', 'csq', 'cface',
+                 'lf', 'ls', 'amf', 'ams', 'bn1', 'bn2', 'srho', 'invc')
+
+    def _project_scalar(mode, values_tuple, scal_tuple):
+        fpl = dict(fp)
+        for key, val in zip(proj_keys, scal_tuple):
+            fpl[key] = val
+        return left_project_fwd(mode, values_tuple, fpl)
+
+    _pk_index = {k: i for i, k in enumerate(proj_keys)}
+
+    def _rcol_apply_adj(mode, rsbar):
+        """Hand transpose of :func:`_Rcol_apply` for one mode: given the length-8
+        cotangents ``rsbar`` on the outputs ``R[slot]*scale``, return the
+        length-16 cotangent over ``proj_keys``.  ``scale`` is the piecewise-const
+        sign/branch factor (zero cotangent); only ``R[slot]`` carries scalar
+        dependence.  Bit-exact vs ``jax.vjp(_Rcol_apply)`` (validated in
+        ``pytests/pallas/_weno_mhd_RL_adjoint_isolated.py``)."""
+        vn = fp['vn']; vt1 = fp['vt1']; vt2 = fp['vt2']
+        cface = fp['cface']; lf = fp['lf']; ls = fp['ls']
+        amf = fp['amf']; ams = fp['ams']
+        bn1 = fp['bn1']; bn2 = fp['bn2']; sbn = fp['sbn']; sbt = fp['sbt']
+        srho = fp['srho']; geq = fp['geq']
+        g = [zero_typed] * 16
+        if mode in (0, 6):
+            scale = jnp.where(~geq, sbt, one_typed)
+        elif mode in (2, 4):
+            scale = jnp.where(geq, sbt, one_typed)
+        else:
+            scale = one_typed
+        rb = [rsbar[slot] * scale for slot in range(ncomp)]
+
+        def add(key, val):
+            g[_pk_index[key]] = g[_pk_index[key]] + val
+
+        if mode == 0:
+            add('amf', rb[0])
+            add('amf', rb[1] * (vn - lf)); add('vn', rb[1] * amf); add('lf', rb[1] * (-amf))
+            add('amf', rb[2] * vt1); add('vt1', rb[2] * amf)
+            add('ams', rb[2] * ls * bn1 * sbn); add('ls', rb[2] * ams * bn1 * sbn); add('bn1', rb[2] * ams * ls * sbn)
+            add('amf', rb[3] * vt2); add('vt2', rb[3] * amf)
+            add('ams', rb[3] * ls * bn2 * sbn); add('ls', rb[3] * ams * bn2 * sbn); add('bn2', rb[3] * ams * ls * sbn)
+            add('cface', rb[5] * ams * bn1 / srho); add('ams', rb[5] * cface * bn1 / srho)
+            add('bn1', rb[5] * cface * ams / srho); add('srho', rb[5] * (-cface * ams * bn1 / srho ** 2))
+            add('cface', rb[6] * ams * bn2 / srho); add('ams', rb[6] * cface * bn2 / srho)
+            add('bn2', rb[6] * cface * ams / srho); add('srho', rb[6] * (-cface * ams * bn2 / srho ** 2))
+            E = (lf * lf - lf * vn + 0.5 * fp['v2'] - gam2 * fp['csq'])
+            add('amf', rb[7] * E)
+            add('lf', rb[7] * amf * (2.0 * lf - vn)); add('vn', rb[7] * amf * (-lf))
+            add('v2', rb[7] * amf * 0.5); add('csq', rb[7] * amf * (-gam2))
+            bsum = (bn1 * vt1 + bn2 * vt2)
+            add('ams', rb[7] * ls * bsum * sbn); add('ls', rb[7] * ams * bsum * sbn)
+            add('bn1', rb[7] * ams * ls * vt1 * sbn); add('vt1', rb[7] * ams * ls * bn1 * sbn)
+            add('bn2', rb[7] * ams * ls * vt2 * sbn); add('vt2', rb[7] * ams * ls * bn2 * sbn)
+        elif mode == 1:
+            add('bn2', rb[2] * (-1.0)); add('bn1', rb[3] * 1.0)
+            add('bn2', rb[5] * (-sbn / srho)); add('srho', rb[5] * (bn2 * sbn / srho ** 2))
+            add('bn1', rb[6] * (sbn / srho)); add('srho', rb[6] * (-bn1 * sbn / srho ** 2))
+            add('bn1', rb[7] * vt2); add('vt2', rb[7] * bn1); add('bn2', rb[7] * (-vt1)); add('vt1', rb[7] * (-bn2))
+        elif mode == 2:
+            add('ams', rb[0])
+            add('ams', rb[1] * (vn - ls)); add('vn', rb[1] * ams); add('ls', rb[1] * (-ams))
+            add('ams', rb[2] * vt1); add('vt1', rb[2] * ams)
+            add('amf', rb[2] * (-lf * bn1 * sbn)); add('lf', rb[2] * (-amf * bn1 * sbn)); add('bn1', rb[2] * (-amf * lf * sbn))
+            add('ams', rb[3] * vt2); add('vt2', rb[3] * ams)
+            add('amf', rb[3] * (-lf * bn2 * sbn)); add('lf', rb[3] * (-amf * bn2 * sbn)); add('bn2', rb[3] * (-amf * lf * sbn))
+            add('cface', rb[5] * (-amf * bn1 / srho)); add('amf', rb[5] * (-cface * bn1 / srho))
+            add('bn1', rb[5] * (-cface * amf / srho)); add('srho', rb[5] * (cface * amf * bn1 / srho ** 2))
+            add('cface', rb[6] * (-amf * bn2 / srho)); add('amf', rb[6] * (-cface * bn2 / srho))
+            add('bn2', rb[6] * (-cface * amf / srho)); add('srho', rb[6] * (cface * amf * bn2 / srho ** 2))
+            E = (ls * ls - ls * vn + 0.5 * fp['v2'] - gam2 * fp['csq'])
+            add('ams', rb[7] * E)
+            add('ls', rb[7] * ams * (2.0 * ls - vn)); add('vn', rb[7] * ams * (-ls))
+            add('v2', rb[7] * ams * 0.5); add('csq', rb[7] * ams * (-gam2))
+            bsum = (bn1 * vt1 + bn2 * vt2)
+            add('amf', rb[7] * (-lf * bsum * sbn)); add('lf', rb[7] * (-amf * bsum * sbn))
+            add('bn1', rb[7] * (-amf * lf * vt1 * sbn)); add('vt1', rb[7] * (-amf * lf * bn1 * sbn))
+            add('bn2', rb[7] * (-amf * lf * vt2 * sbn)); add('vt2', rb[7] * (-amf * lf * bn2 * sbn))
+        elif mode == 3:
+            add('vn', rb[1]); add('vt1', rb[2]); add('vt2', rb[3]); add('v2', rb[7] * 0.5)
+        elif mode == 4:
+            add('ams', rb[0])
+            add('ams', rb[1] * (vn + ls)); add('vn', rb[1] * ams); add('ls', rb[1] * ams)
+            add('ams', rb[2] * vt1); add('vt1', rb[2] * ams)
+            add('amf', rb[2] * (lf * bn1 * sbn)); add('lf', rb[2] * (amf * bn1 * sbn)); add('bn1', rb[2] * (amf * lf * sbn))
+            add('ams', rb[3] * vt2); add('vt2', rb[3] * ams)
+            add('amf', rb[3] * (lf * bn2 * sbn)); add('lf', rb[3] * (amf * bn2 * sbn)); add('bn2', rb[3] * (amf * lf * sbn))
+            add('cface', rb[5] * (-amf * bn1 / srho)); add('amf', rb[5] * (-cface * bn1 / srho))
+            add('bn1', rb[5] * (-cface * amf / srho)); add('srho', rb[5] * (cface * amf * bn1 / srho ** 2))
+            add('cface', rb[6] * (-amf * bn2 / srho)); add('amf', rb[6] * (-cface * bn2 / srho))
+            add('bn2', rb[6] * (-cface * amf / srho)); add('srho', rb[6] * (cface * amf * bn2 / srho ** 2))
+            E = (ls * ls + ls * vn + 0.5 * fp['v2'] - gam2 * fp['csq'])
+            add('ams', rb[7] * E)
+            add('ls', rb[7] * ams * (2.0 * ls + vn)); add('vn', rb[7] * ams * ls)
+            add('v2', rb[7] * ams * 0.5); add('csq', rb[7] * ams * (-gam2))
+            bsum = (bn1 * vt1 + bn2 * vt2)
+            add('amf', rb[7] * (lf * bsum * sbn)); add('lf', rb[7] * (amf * bsum * sbn))
+            add('bn1', rb[7] * (amf * lf * vt1 * sbn)); add('vt1', rb[7] * (amf * lf * bn1 * sbn))
+            add('bn2', rb[7] * (amf * lf * vt2 * sbn)); add('vt2', rb[7] * (amf * lf * bn2 * sbn))
+        elif mode == 5:
+            add('bn2', rb[2] * (-1.0)); add('bn1', rb[3] * 1.0)
+            add('bn2', rb[5] * (sbn / srho)); add('srho', rb[5] * (-bn2 * sbn / srho ** 2))
+            add('bn1', rb[6] * (-sbn / srho)); add('srho', rb[6] * (bn1 * sbn / srho ** 2))
+            add('bn1', rb[7] * vt2); add('vt2', rb[7] * bn1); add('bn2', rb[7] * (-vt1)); add('vt1', rb[7] * (-bn2))
+        else:  # mode 6
+            add('amf', rb[0])
+            add('amf', rb[1] * (vn + lf)); add('vn', rb[1] * amf); add('lf', rb[1] * amf)
+            add('amf', rb[2] * vt1); add('vt1', rb[2] * amf)
+            add('ams', rb[2] * (-ls * bn1 * sbn)); add('ls', rb[2] * (-ams * bn1 * sbn)); add('bn1', rb[2] * (-ams * ls * sbn))
+            add('amf', rb[3] * vt2); add('vt2', rb[3] * amf)
+            add('ams', rb[3] * (-ls * bn2 * sbn)); add('ls', rb[3] * (-ams * bn2 * sbn)); add('bn2', rb[3] * (-ams * ls * sbn))
+            add('cface', rb[5] * ams * bn1 / srho); add('ams', rb[5] * cface * bn1 / srho)
+            add('bn1', rb[5] * cface * ams / srho); add('srho', rb[5] * (-cface * ams * bn1 / srho ** 2))
+            add('cface', rb[6] * ams * bn2 / srho); add('ams', rb[6] * cface * bn2 / srho)
+            add('bn2', rb[6] * cface * ams / srho); add('srho', rb[6] * (-cface * ams * bn2 / srho ** 2))
+            E = (lf * lf + lf * vn + 0.5 * fp['v2'] - gam2 * fp['csq'])
+            add('amf', rb[7] * E)
+            add('lf', rb[7] * amf * (2.0 * lf + vn)); add('vn', rb[7] * amf * lf)
+            add('v2', rb[7] * amf * 0.5); add('csq', rb[7] * amf * (-gam2))
+            bsum = (bn1 * vt1 + bn2 * vt2)
+            add('ams', rb[7] * (-ls * bsum * sbn)); add('ls', rb[7] * (-ams * bsum * sbn))
+            add('bn1', rb[7] * (-ams * ls * vt1 * sbn)); add('vt1', rb[7] * (-ams * ls * bn1 * sbn))
+            add('bn2', rb[7] * (-ams * ls * vt2 * sbn)); add('vt2', rb[7] * (-ams * ls * bn2 * sbn))
+        return g
+
+    def _lrow_apply_adj(mode, values, out_bar):
+        """Hand transpose of ``left_project_fwd`` w.r.t. the ``proj_keys`` scalars
+        for one mode and one (fixed) 8-vector ``values``.  ``out_bar`` is the
+        scalar cotangent on the projected output.  ``out = scale * sum_i
+        coeff_i * values[idx_i]``; ``scale`` carries the differentiable ``invc``
+        factor (for modes 0/2/3/4/6) plus piecewise-const sign/branch factors.
+        Bit-exact vs ``jax.vjp`` of the cell-summed projection functional."""
+        vn = fp['vn']; vt1 = fp['vt1']; vt2 = fp['vt2']
+        cface = fp['cface']; lf = fp['lf']; ls = fp['ls']
+        amf = fp['amf']; ams = fp['ams']
+        bn1 = fp['bn1']; bn2 = fp['bn2']; sbn = fp['sbn']; sbt = fp['sbt']
+        srho = fp['srho']; geq = fp['geq']
+        g = [zero_typed] * 16
+        L, scale = _Lrows(mode, fp)
+        S = zero_typed
+        for coeff, idx in L:
+            S = S + coeff * values[idx]
+
+        def add(key, val):
+            g[_pk_index[key]] = g[_pk_index[key]] + val
+
+        # invc dependence of scale
+        if mode in (0, 6):
+            sc_const = 0.5 * jnp.where(~geq, sbt, one_typed)
+            add('invc', out_bar * sc_const * S)
+        elif mode in (2, 4):
+            sc_const = 0.5 * jnp.where(geq, sbt, one_typed)
+            add('invc', out_bar * sc_const * S)
+        elif mode == 3:
+            add('invc', out_bar * (-gam0) * S)
+
+        ob_S = out_bar * scale
+        cb = {idx: ob_S * values[idx] for (_c, idx) in L}
+
+        if mode == 0:
+            c = cb[0]
+            add('amf', c * (gam1 * fp['v2'] + lf * vn)); add('v2', c * amf * gam1); add('lf', c * amf * vn); add('vn', c * amf * lf)
+            bsum = bn1 * vt1 + bn2 * vt2
+            add('ams', c * (-ls * bsum * sbn)); add('ls', c * (-ams * bsum * sbn))
+            add('bn1', c * (-ams * ls * vt1 * sbn)); add('vt1', c * (-ams * ls * bn1 * sbn))
+            add('bn2', c * (-ams * ls * vt2 * sbn)); add('vt2', c * (-ams * ls * bn2 * sbn))
+            c = cb[1]; add('amf', c * (gam0 * vn - lf)); add('vn', c * amf * gam0); add('lf', c * (-amf))
+            c = cb[2]; add('amf', c * gam0 * vt1); add('vt1', c * gam0 * amf)
+            add('ams', c * ls * bn1 * sbn); add('ls', c * ams * bn1 * sbn); add('bn1', c * ams * ls * sbn)
+            c = cb[3]; add('amf', c * gam0 * vt2); add('vt2', c * gam0 * amf)
+            add('ams', c * ls * bn2 * sbn); add('ls', c * ams * bn2 * sbn); add('bn2', c * ams * ls * sbn)
+            c = cb[5]; add('amf', c * gam0 * fp['Bt1']); add('Bt1', c * gam0 * amf)
+            add('cface', c * ams * bn1 * srho); add('ams', c * cface * bn1 * srho)
+            add('bn1', c * cface * ams * srho); add('srho', c * cface * ams * bn1)
+            c = cb[6]; add('amf', c * gam0 * fp['Bt2']); add('Bt2', c * gam0 * amf)
+            add('cface', c * ams * bn2 * srho); add('ams', c * cface * bn2 * srho)
+            add('bn2', c * cface * ams * srho); add('srho', c * cface * ams * bn2)
+            c = cb[7]; add('amf', c * (-gam0))
+        elif mode == 1:
+            c = cb[0]; add('bn2', c * vt1); add('vt1', c * bn2); add('bn1', c * (-vt2)); add('vt2', c * (-bn1))
+            c = cb[2]; add('bn2', c * (-1.0))
+            c = cb[3]; add('bn1', c * 1.0)
+            c = cb[5]; add('bn2', c * (-sbn * srho)); add('srho', c * (-bn2 * sbn))
+            c = cb[6]; add('bn1', c * (sbn * srho)); add('srho', c * (bn1 * sbn))
+        elif mode == 2:
+            c = cb[0]
+            add('ams', c * (gam1 * fp['v2'] + ls * vn)); add('v2', c * ams * gam1); add('ls', c * ams * vn); add('vn', c * ams * ls)
+            bsum = bn1 * vt1 + bn2 * vt2
+            add('amf', c * lf * bsum * sbn); add('lf', c * amf * bsum * sbn)
+            add('bn1', c * amf * lf * vt1 * sbn); add('vt1', c * amf * lf * bn1 * sbn)
+            add('bn2', c * amf * lf * vt2 * sbn); add('vt2', c * amf * lf * bn2 * sbn)
+            c = cb[1]; add('ams', c * (gam0 * vn - ls)); add('vn', c * ams * gam0); add('ls', c * (-ams))
+            c = cb[2]; add('ams', c * gam0 * vt1); add('vt1', c * gam0 * ams)
+            add('amf', c * (-lf * bn1 * sbn)); add('lf', c * (-amf * bn1 * sbn)); add('bn1', c * (-amf * lf * sbn))
+            c = cb[3]; add('ams', c * gam0 * vt2); add('vt2', c * gam0 * ams)
+            add('amf', c * (-lf * bn2 * sbn)); add('lf', c * (-amf * bn2 * sbn)); add('bn2', c * (-amf * lf * sbn))
+            c = cb[5]; add('ams', c * gam0 * fp['Bt1']); add('Bt1', c * gam0 * ams)
+            add('cface', c * (-amf * bn1 * srho)); add('amf', c * (-cface * bn1 * srho))
+            add('bn1', c * (-cface * amf * srho)); add('srho', c * (-cface * amf * bn1))
+            c = cb[6]; add('ams', c * gam0 * fp['Bt2']); add('Bt2', c * gam0 * ams)
+            add('cface', c * (-amf * bn2 * srho)); add('amf', c * (-cface * bn2 * srho))
+            add('bn2', c * (-cface * amf * srho)); add('srho', c * (-cface * amf * bn2))
+            c = cb[7]; add('ams', c * (-gam0))
+        elif mode == 3:
+            c = cb[0]; add('csq', c * (-1.0 / gam0)); add('v2', c * (-0.5))
+            c = cb[1]; add('vn', c)
+            c = cb[2]; add('vt1', c)
+            c = cb[3]; add('vt2', c)
+            c = cb[5]; add('Bt1', c)
+            c = cb[6]; add('Bt2', c)
+        elif mode == 4:
+            c = cb[0]
+            add('ams', c * (gam1 * fp['v2'] - ls * vn)); add('v2', c * ams * gam1); add('ls', c * (-ams * vn)); add('vn', c * (-ams * ls))
+            bsum = bn1 * vt1 + bn2 * vt2
+            add('amf', c * (-lf * bsum * sbn)); add('lf', c * (-amf * bsum * sbn))
+            add('bn1', c * (-amf * lf * vt1 * sbn)); add('vt1', c * (-amf * lf * bn1 * sbn))
+            add('bn2', c * (-amf * lf * vt2 * sbn)); add('vt2', c * (-amf * lf * bn2 * sbn))
+            c = cb[1]; add('ams', c * (gam0 * vn + ls)); add('vn', c * ams * gam0); add('ls', c * ams)
+            c = cb[2]; add('ams', c * gam0 * vt1); add('vt1', c * gam0 * ams)
+            add('amf', c * lf * bn1 * sbn); add('lf', c * amf * bn1 * sbn); add('bn1', c * amf * lf * sbn)
+            c = cb[3]; add('ams', c * gam0 * vt2); add('vt2', c * gam0 * ams)
+            add('amf', c * lf * bn2 * sbn); add('lf', c * amf * bn2 * sbn); add('bn2', c * amf * lf * sbn)
+            c = cb[5]; add('ams', c * gam0 * fp['Bt1']); add('Bt1', c * gam0 * ams)
+            add('cface', c * (-amf * bn1 * srho)); add('amf', c * (-cface * bn1 * srho))
+            add('bn1', c * (-cface * amf * srho)); add('srho', c * (-cface * amf * bn1))
+            c = cb[6]; add('ams', c * gam0 * fp['Bt2']); add('Bt2', c * gam0 * ams)
+            add('cface', c * (-amf * bn2 * srho)); add('amf', c * (-cface * bn2 * srho))
+            add('bn2', c * (-cface * amf * srho)); add('srho', c * (-cface * amf * bn2))
+            c = cb[7]; add('ams', c * (-gam0))
+        elif mode == 5:
+            c = cb[0]; add('bn2', c * vt1); add('vt1', c * bn2); add('bn1', c * (-vt2)); add('vt2', c * (-bn1))
+            c = cb[2]; add('bn2', c * (-1.0))
+            c = cb[3]; add('bn1', c * 1.0)
+            c = cb[5]; add('bn2', c * (sbn * srho)); add('srho', c * (bn2 * sbn))
+            c = cb[6]; add('bn1', c * (-sbn * srho)); add('srho', c * (-bn1 * sbn))
+        else:  # mode 6
+            c = cb[0]
+            add('amf', c * (gam1 * fp['v2'] - lf * vn)); add('v2', c * amf * gam1); add('lf', c * (-amf * vn)); add('vn', c * (-amf * lf))
+            bsum = bn1 * vt1 + bn2 * vt2
+            add('ams', c * ls * bsum * sbn); add('ls', c * ams * bsum * sbn)
+            add('bn1', c * ams * ls * vt1 * sbn); add('vt1', c * ams * ls * bn1 * sbn)
+            add('bn2', c * ams * ls * vt2 * sbn); add('vt2', c * ams * ls * bn2 * sbn)
+            c = cb[1]; add('amf', c * (gam0 * vn + lf)); add('vn', c * amf * gam0); add('lf', c * amf)
+            c = cb[2]; add('amf', c * gam0 * vt1); add('vt1', c * gam0 * amf)
+            add('ams', c * (-ls * bn1 * sbn)); add('ls', c * (-ams * bn1 * sbn)); add('bn1', c * (-ams * ls * sbn))
+            c = cb[3]; add('amf', c * gam0 * vt2); add('vt2', c * gam0 * amf)
+            add('ams', c * (-ls * bn2 * sbn)); add('ls', c * (-ams * bn2 * sbn)); add('bn2', c * (-ams * ls * sbn))
+            c = cb[5]; add('amf', c * gam0 * fp['Bt1']); add('Bt1', c * gam0 * amf)
+            add('cface', c * ams * bn1 * srho); add('ams', c * cface * bn1 * srho)
+            add('bn1', c * cface * ams * srho); add('srho', c * cface * ams * bn1)
+            c = cb[6]; add('amf', c * gam0 * fp['Bt2']); add('Bt2', c * gam0 * amf)
+            add('cface', c * ams * bn2 * srho); add('ams', c * cface * bn2 * srho)
+            add('bn2', c * cface * ams * srho); add('srho', c * cface * ams * bn2)
+            c = cb[7]; add('amf', c * (-gam0))
+        return g
+
+    # ============================ reverse accumulation ============================
+    qbar = [[zero_typed] * ncomp for _ in range(6)]
+    fbar_cell = [[zero_typed] * ncomp for _ in range(6)]
+    fl_bar = [[zero_typed] * 20 for _ in range(6)]
+    base_bar = [zero_typed] * 8  # cotangents for base face quantities
+    eig_bar = {k: zero_typed for k in (
+        'v2', 'csq', 'invc', 'cface', 'lf', 'ls', 'amf', 'ams', 'bn1', 'bn2',
+        'srho')}  # differentiable derived eigenstructure
+    # plus direct contributions to vn_face/vt1_face/vt2_face/Bt1_face/Bt2_face
+    # which are base quantities -> accumulate into base_bar via proj.
+
+    scal_vec = tuple(fp[k] for k in proj_keys)
+
+    # Centered flux part.
+    cc = [-1.0 / 12, 7.0 / 12, 7.0 / 12, -1.0 / 12]
+    for j, k in enumerate((1, 2, 3, 4)):
+        for slot in range(ncomp):
+            fbar_cell[k][slot] += flux_bar[slot] * cc[j]
+
+    # map proj_keys -> (base_bar index) or eig_bar key
+    base_index_of = {'vn': 1, 'vt1': 2, 'vt2': 3}  # Bt1/Bt2 handled below
+    for mode in range(num_modes):
+        s = [left_project_fwd(mode, f_st[k], fp) for k in range(6)]
+        qp = [left_project_fwd(mode, q_stencil[k], fp) for k in range(6)]
+        d = [s[i + 1] - s[i] for i in range(5)]
+        dq = [qp[i + 1] - qp[i] for i in range(5)]
+        lams = [lam_of(fl_st[k], mode) for k in range(6)]
+        absl = [jnp.abs(x) for x in lams]
+        amxs = [absl[0]]
+        for k in range(1, 6):
+            amxs.append(jnp.maximum(amxs[-1], absl[k]))
+        amx = amxs[-1]
+        ap = 0.5 * (d[0] + amx * dq[0]); bp = 0.5 * (d[1] + amx * dq[1])
+        cp = 0.5 * (d[2] + amx * dq[2]); dp = 0.5 * (d[3] + amx * dq[3])
+        am = 0.5 * (d[4] - amx * dq[4]); bm = 0.5 * (d[3] - amx * dq[3])
+        cm = 0.5 * (d[2] - amx * dq[2]); dm = 0.5 * (d[1] - amx * dq[1])
+        second = _weno_recon_fwd(ap, bp, cp, dp)
+        third = _weno_recon_fwd(am, bm, cm, dm)
+        Fs = -second + third
+
+        # --- add_right_correction adjoint: flux_acc[slot] += R[slot]*scale*Fs ---
+        R, scaleR = _Rcols(mode, fp)
+        Fs_bar = zero_typed
+        for slot in range(ncomp):
+            Fs_bar = Fs_bar + flux_bar[slot] * R[slot] * scaleR
+        # cotangent on (R[slot]*scaleR): flux_bar[slot]*Fs
+        rsbar = [flux_bar[slot] * Fs for slot in range(ncomp)]
+        if _MHD_VJP_FULL_HANDDERIVE:
+            rcol_grad = _rcol_apply_adj(mode, rsbar)
+        else:
+            _, rcol_vjp = jax.vjp(lambda sv: _Rcol_apply(mode, fp, sv), scal_vec)
+            (rcol_grad,) = rcol_vjp(tuple(rsbar))
+        for ki, key in enumerate(proj_keys):
+            _accum_scalar_bar(key, rcol_grad[ki], eig_bar, base_bar, base_index_of)
+
+        # --- WENO recon adjoint ---
+        second_bar = -Fs_bar; third_bar = Fs_bar
+        ap_b, bp_b, cp_b, dp_b = _weno_recon_adj(ap, bp, cp, dp, second_bar)
+        am_b, bm_b, cm_b, dm_b = _weno_recon_adj(am, bm, cm, dm, third_bar)
+        d_b = [zero_typed] * 5; dq_b = [zero_typed] * 5; amx_b = zero_typed
+        for (tb, di) in ((ap_b, 0), (bp_b, 1), (cp_b, 2), (dp_b, 3)):
+            d_b[di] += 0.5 * tb; dq_b[di] += 0.5 * amx * tb; amx_b += 0.5 * dq[di] * tb
+        for (tb, di) in ((am_b, 4), (bm_b, 3), (cm_b, 2), (dm_b, 1)):
+            d_b[di] += 0.5 * tb; dq_b[di] += -0.5 * amx * tb; amx_b += -0.5 * dq[di] * tb
+        s_b = [zero_typed] * 6; qp_b = [zero_typed] * 6
+        for i in range(5):
+            s_b[i + 1] += d_b[i]; s_b[i] += -d_b[i]
+            qp_b[i + 1] += dq_b[i]; qp_b[i] += -dq_b[i]
+
+        # --- left_project adjoint ---
+        # The projection is bilinear: out = scale(fp) * sum_i coeff_i(fp) * v[idx_i].
+        # The cotangent w.r.t. the input ``values`` is hand-derived exactly from
+        # the L-row coefficients (no vjp).  The cotangent w.r.t. the (messy) fp
+        # eigenstructure scalars is obtained with a SINGLE local vjp per mode of
+        # the cell-summed scalar functional (folding all 6 f-cells and 6 q-cells
+        # in via their s_b / qp_b weights), instead of 12 per-cell vjps.
+        L, scaleL = _Lrows(mode, fp)
+        for k in range(6):
+            for coeff, idx in L:
+                fbar_cell[k][idx] += s_b[k] * scaleL * coeff
+                qbar[k][idx] += qp_b[k] * scaleL * coeff
+
+        if _MHD_VJP_FULL_HANDDERIVE:
+            # The functional acc = sum_k s_b[k]*proj(f_st[k]) + qp_b[k]*proj(q[k])
+            # is linear in each projection output, so its cotangent w.r.t. the
+            # scalar vector is the s_b/qp_b-weighted sum of the per-(mode, values)
+            # L-row transposes (out_bar = the cell weight).
+            proj_grad = [zero_typed] * 16
+            for k in range(6):
+                gk = _lrow_apply_adj(mode, tuple(f_st[k]), s_b[k])
+                gq = _lrow_apply_adj(mode, tuple(q_stencil[k]), qp_b[k])
+                for ki in range(16):
+                    proj_grad[ki] = proj_grad[ki] + gk[ki] + gq[ki]
+        else:
+            def _proj_functional(sv, _mode=mode, _sb=tuple(s_b), _qpb=tuple(qp_b)):
+                acc = zero_typed
+                for k in range(6):
+                    acc = acc + _sb[k] * _project_scalar(_mode, tuple(f_st[k]), sv)
+                    acc = acc + _qpb[k] * _project_scalar(_mode, tuple(q_stencil[k]), sv)
+                return acc
+
+            proj_out, proj_vjp = jax.vjp(_proj_functional, scal_vec)
+            (proj_grad,) = proj_vjp(jnp.ones_like(proj_out))
+        for ki, key in enumerate(proj_keys):
+            _accum_scalar_bar(key, proj_grad[ki], eig_bar, base_bar, base_index_of)
+
+        # --- amx fold adjoint (strict tie-break, matches lax.max VJP) ---
+        acc = amx_b
+        absl_bar = [zero_typed] * 6
+        for k in range(5, 0, -1):
+            prev_gets = amxs[k - 1] > absl[k]
+            absl_bar[k] = absl_bar[k] + jnp.where(prev_gets, 0.0, acc)
+            acc = jnp.where(prev_gets, acc, 0.0)
+        absl_bar[0] = absl_bar[0] + acc
+        for k in range(6):
+            lam_b = absl_bar[k] * jnp.sign(lams[k])
+            fl_bar[k][8] += lam_b                  # vn
+            if mode == 0:
+                fl_bar[k][17] += lam_b * (-1.0)    # c_fast
+            elif mode == 1:
+                fl_bar[k][18] += lam_b * (-1.0)    # c_alfven
+            elif mode == 2:
+                fl_bar[k][19] += lam_b * (-1.0)    # c_slow
+            elif mode == 4:
+                fl_bar[k][19] += lam_b * (1.0)
+            elif mode == 5:
+                fl_bar[k][18] += lam_b * (1.0)
+            elif mode == 6:
+                fl_bar[k][17] += lam_b * (1.0)
+            # mode == 3 -> only vn
+
+    # ---- eigenstructure adjoint: derived eig_bar -> base_bar via local vjp ----
+    # jax.vjp wants cotangents matching outputs; sgn_bn/sgn_bt are non-diff
+    # (sign) and cs_geq_alfven is bool -> zero cotangents for all three.
+    eig_ct = (
+        eig_bar['v2'], eig_bar['csq'], eig_bar['invc'], eig_bar['cface'],
+        eig_bar['lf'], eig_bar['ls'], eig_bar['amf'], eig_bar['ams'],
+        eig_bar['bn1'], eig_bar['bn2'], eig_bar['srho'],
+    )
+    if _MHD_VJP_FULL_HANDDERIVE:
+        base_grad = _eigen_bb_adj(base, eig_ct)
+    else:
+        base_grad = eig_vjp(eig_ct)
+    for i in range(8):
+        base_bar[i] = base_bar[i] + base_grad[i]
+
+    # ---- base face quantities adjoint -> floored cells 2, 3 ----
+    (b_rho_face, b_vn_face, b_vt1_face, b_vt2_face,
+     b_Bn_face, b_Bt1_face, b_Bt2_face, b_h_face) = base_bar
+    # h_face = 0.5*(h_i + h_j)
+    fl_bar[2][14] += 0.5 * b_h_face; fl_bar[3][14] += 0.5 * b_h_face
+    # Bn_face = 0.5*(Bn_i + Bn_j)
+    fl_bar[2][4] += 0.5 * b_Bn_face; fl_bar[3][4] += 0.5 * b_Bn_face
+    # Bt1_face = 0.5*(Bt1_i + Bt1_j)
+    fl_bar[2][5] += 0.5 * b_Bt1_face; fl_bar[3][5] += 0.5 * b_Bt1_face
+    # Bt2_face = 0.5*(Bt2_i + Bt2_j)
+    fl_bar[2][6] += 0.5 * b_Bt2_face; fl_bar[3][6] += 0.5 * b_Bt2_face
+    # vt2_face = 0.5*(mt2_i+mt2_j)/rho_face
+    rho_face_b = zero_typed
+    num2 = 0.5 * (mt2_i + mt2_j); num2_b = b_vt2_face / rho_face
+    rho_face_b += b_vt2_face * (-num2 / rho_face ** 2)
+    fl_bar[2][3] += 0.5 * num2_b; fl_bar[3][3] += 0.5 * num2_b
+    num1 = 0.5 * (mt1_i + mt1_j); num1_b = b_vt1_face / rho_face
+    rho_face_b += b_vt1_face * (-num1 / rho_face ** 2)
+    fl_bar[2][2] += 0.5 * num1_b; fl_bar[3][2] += 0.5 * num1_b
+    numn = 0.5 * (mn_i + mn_j); numn_b = b_vn_face / rho_face
+    rho_face_b += b_vn_face * (-numn / rho_face ** 2)
+    fl_bar[2][1] += 0.5 * numn_b; fl_bar[3][1] += 0.5 * numn_b
+    rho_face_b += b_rho_face
+    inner = 0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin))
+    inner_b = jnp.where(inner > rhomin, rho_face_b, 0.0)
+    fl_bar[2][0] += 0.5 * jnp.where(rho_i > rhomin, 1.0, 0.0) * inner_b
+    fl_bar[3][0] += 0.5 * jnp.where(rho_j > rhomin, 1.0, 0.0) * inner_b
+
+    # ---- per-cell floored + flux adjoints ----
+    for k in range(6):
+        gq_fl = floored_cell_adj(q_stencil[k], fl_bar[k])
+        gq_fx = flux_from_q_adj(q_stencil[k], fbar_cell[k])
+        for c in range(ncomp):
+            qbar[k][c] = qbar[k][c] + gq_fl[c] + gq_fx[c]
+    return qbar
+
+
 def _weno_flux_mhd_pallas_local(
     conserved_state,
     params: SimulationParams,
@@ -1490,13 +3206,15 @@ def _weno_flux_mhd_pallas_local(
     """Single-shard ideal-gas MHD WENO build.  Mirrors
     ``_weno_flux_hydro_pallas`` but with 8 conserved variables and 7
     characteristic waves (fast-, alfvén-, slow-, entropy, slow+, alfvén+,
-    fast+).  All face eigenstructure (the body of
-    ``_eigen_mhd._eigenvector_building_blocks``) is inlined as kernel-local
-    closures, and ``L_row``/``R_col``/``λ`` projections are dispatched at
-    compile time via Python ``if mode == k`` branches inside the per-mode
-    loop, matching the structure of the native ``_eigen_L_row`` /
-    ``_eigen_R_col`` functions.  No full-domain projection matrices are ever
-    materialised — every component is computed per-tile in registers."""
+    fast+).  The per-interface arithmetic — all face eigenstructure (the body
+    of ``_eigen_mhd._eigenvector_building_blocks``) and the ``L_row``/``R_col``/
+    ``λ`` projections dispatched at compile time via ``if mode == k`` branches —
+    lives in the shared pure :func:`_weno_mhd_flux_from_window`, which the
+    kernel calls on the gathered 6-cell stencil.  Factoring it into one function
+    makes the kernel the single source of truth for both this forward pass and
+    the :func:`_weno_flux_mhd_pallas_vjp_local` adjoint (which ``jax.vjp``\\s the
+    same window).  No full-domain projection matrices are ever materialised —
+    every component is computed per-tile in registers."""
     ndim = 3
     nvars = int(conserved_state.shape[0])
     spatial_shape = tuple(int(x) for x in conserved_state.shape[1:])
@@ -1507,8 +3225,6 @@ def _weno_flux_mhd_pallas_local(
     local_indices = _mhd_indices_for_axis(config, registered_variables, axis)
     ncomp = 8
     num_modes = 7
-    epsilon = 1e-7
-    tiny = 1e-14
 
     # Tile sizes / specs — identical to the hydro kernel.
     block_shape_out = (nvars, bx, by, bz)
@@ -1533,22 +3249,13 @@ def _weno_flux_mhd_pallas_local(
         jj = (bj * by + jnp.arange(by)[None, :, None]) % ny
         kk = (bk * bz + jnp.arange(bz)[None, None, :]) % nz
 
+        # Scalars are read here and passed to the shared window function, which
+        # derives gm1/gam0/typed-literal scalars internally (the per-interface
+        # arithmetic — including all x64/Triton dtype hygiene — lives there so
+        # the forward kernel and the jax.vjp adjoint share one source of truth).
         gamma = gamma_ref[()]
-        gm1 = gamma - 1.0
-        gam0 = 1.0 - gamma   # = -gm1
-        gam1 = 0.5 * (gamma - 1.0)
-        gam2 = (gamma - 2.0) / (gamma - 1.0)
         b_eps = b_eps_ref[()]
         sqrt_floor = sqrt_floor_ref[()]
-        # Properly-typed literal scalars.  In x64 + Triton, bare Python
-        # ``1.0`` / ``-1.0`` / ``1.0 / jnp.sqrt(2.0)`` inside ``jnp.where``
-        # arrive in the lowering as f32 and trip a ``('f64', 'f32')``
-        # assertion in ``_truediv_lowering_rule``.  Deriving them from
-        # ``gamma`` ensures the dtype follows the kernel's working dtype.
-        zero_typed = gamma - gamma
-        one_typed = zero_typed + 1.0
-        neg_one_typed = zero_typed - 1.0
-        inv_sqrt_two_typed = zero_typed + (1.0 / 2.0 ** 0.5)
         rhomin = rhomin_ref[()]
         pgmin = pgmin_ref[()]
 
@@ -1563,466 +3270,10 @@ def _weno_flux_mhd_pallas_local(
             # local order: rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy
             return tuple(q_at(idx, offset) for idx in local_indices)
 
-        def primitive_from_q(q):
-            rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy = q
-            inv_rho = 1.0 / rho
-            vn = mn * inv_rho
-            vt1 = mt1 * inv_rho
-            vt2 = mt2 * inv_rho
-            v2 = vn * vn + vt1 * vt1 + vt2 * vt2
-            b2 = Bn * Bn + Bt1 * Bt1 + Bt2 * Bt2
-            p = gm1 * (energy - 0.5 * (rho * v2 + b2))
-            return rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p
-
-        def floored_cell(q):
-            rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
-            troubled = (rho < rhomin) | (p < pgmin)
-            rho_f = jnp.where(troubled, jnp.maximum(rho, rhomin), rho)
-            p_f = jnp.where(troubled, jnp.maximum(p, pgmin), p)
-            energy_f = jnp.where(troubled, p_f / gm1 + 0.5 * (rho_f * v2 + b2), energy)
-            # MHD enthalpy includes the magnetic contribution implicitly via
-            # the (energy + p_gas) / rho average used in the native code.
-            specific_enthalpy = (energy_f + p_f) / rho_f
-            sound_speed_sq = jnp.maximum(0.0, gamma * jnp.abs(p_f / rho_f))
-            sound_speed = jnp.sqrt(jnp.maximum(sound_speed_sq, sqrt_floor))
-            # MHD characteristic speeds (cell-centered — used for the local
-            # Lax-Friedrichs alpha; the FACE eigenstructure is computed
-            # separately further down).
-            bn2_over_rho = (Bn * Bn) / rho_f
-            disc_root = jnp.sqrt(jnp.maximum(
-                0.0,
-                (b2 / rho_f + sound_speed_sq) ** 2 - 4.0 * bn2_over_rho * sound_speed_sq,
-            ))
-            c_fast = jnp.sqrt(jnp.maximum(
-                0.0, 0.5 * (b2 / rho_f + sound_speed_sq + disc_root)
-            ))
-            c_alfven = jnp.sqrt(jnp.maximum(0.0, bn2_over_rho))
-            c_slow = jnp.sqrt(jnp.maximum(
-                0.0, 0.5 * (b2 / rho_f + sound_speed_sq - disc_root)
-            ))
-            return (rho_f, mn, mt1, mt2, Bn, Bt1, Bt2, energy_f,
-                    vn, vt1, vt2, v2, b2, p_f, specific_enthalpy,
-                    sound_speed, sound_speed_sq, c_fast, c_alfven, c_slow)
-
-        def flux_from_q(q):
-            """MHD flux along the normal direction (local x).  B_normal flux
-            is identically zero (see ``_mhd_flux_x``)."""
-            rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy, vn, vt1, vt2, v2, b2, p = primitive_from_q(q)
-            p_total = p + 0.5 * b2
-            v_dot_B = vn * Bn + vt1 * Bt1 + vt2 * Bt2
-            return (
-                mn,                                  # density flux: rho * vn
-                rho * vn * vn + p_total - Bn * Bn,    # normal momentum
-                rho * vn * vt1 - Bn * Bt1,            # transverse 1
-                rho * vn * vt2 - Bn * Bt2,            # transverse 2
-                0.0,                                  # normal B flux is 0
-                Bt1 * vn - Bn * vt1,                  # transverse 1 B
-                Bt2 * vn - Bn * vt2,                  # transverse 2 B
-                (energy + p_total) * vn - v_dot_B * Bn,  # energy
-            )
-
-        def lambda_from_floored_cell(cell, mode: int):
-            vn = cell[8]; c_fast = cell[17]; c_alfven = cell[18]; c_slow = cell[19]
-            if mode == 0:
-                return vn - c_fast
-            if mode == 1:
-                return vn - c_alfven
-            if mode == 2:
-                return vn - c_slow
-            if mode == 3:
-                return vn
-            if mode == 4:
-                return vn + c_slow
-            if mode == 5:
-                return vn + c_alfven
-            return vn + c_fast
-
-        # ------------------------------------------------------------------
-        # Build the FACE eigenstructure once per program (six cells, two of
-        # which — at offsets 0 and 1 — straddle the interface i+1/2 we are
-        # currently computing).  Matches the body of
-        # ``_eigen_mhd._eigenvector_building_blocks``.
-        # ------------------------------------------------------------------
         q_stencil = tuple(q_local(off) for off in range(-2, 4))     # offsets -2..3
-        f_stencil = tuple(flux_from_q(q) for q in q_stencil)
-        floored_stencil = tuple(floored_cell(q) for q in q_stencil)
-        cell_l = floored_stencil[2]  # offset 0  (cell i)
-        cell_r = floored_stencil[3]  # offset 1  (cell i+1)
-
-        # Native MHD uses ``avg(momentum) / avg(max(rho, rhomin))`` to define
-        # the interface velocity (NOT avg of velocities).  Same conventions
-        # here.  Indices match the floored-cell tuple above.
-        rho_i = cell_l[0]; mn_i = cell_l[1]; mt1_i = cell_l[2]; mt2_i = cell_l[3]
-        Bn_i = cell_l[4]; Bt1_i = cell_l[5]; Bt2_i = cell_l[6]
-        h_i = cell_l[14]
-        rho_j = cell_r[0]; mn_j = cell_r[1]; mt1_j = cell_r[2]; mt2_j = cell_r[3]
-        Bn_j = cell_r[4]; Bt1_j = cell_r[5]; Bt2_j = cell_r[6]
-        h_j = cell_r[14]
-
-        rho_face = jnp.maximum(
-            0.5 * (jnp.maximum(rho_i, rhomin) + jnp.maximum(rho_j, rhomin)),
-            rhomin,
+        flux_acc = _weno_mhd_flux_from_window(
+            q_stencil, gamma, rhomin, pgmin, b_eps, sqrt_floor, ncomp, num_modes
         )
-        vn_face = 0.5 * (mn_i + mn_j) / rho_face
-        vt1_face = 0.5 * (mt1_i + mt1_j) / rho_face
-        vt2_face = 0.5 * (mt2_i + mt2_j) / rho_face
-        Bn_face = 0.5 * (Bn_i + Bn_j)
-        Bt1_face = 0.5 * (Bt1_i + Bt1_j)
-        Bt2_face = 0.5 * (Bt2_i + Bt2_j)
-        h_face = 0.5 * (h_i + h_j)
-
-        v2_face = vn_face * vn_face + vt1_face * vt1_face + vt2_face * vt2_face
-        b2_face = Bn_face * Bn_face + Bt1_face * Bt1_face + Bt2_face * Bt2_face
-        b2_over_rho_face = b2_face / rho_face
-        bn2_over_rho_face = (Bn_face * Bn_face) / rho_face
-
-        c_sq_face = gm1 * (h_face - 0.5 * (v2_face + b2_over_rho_face))
-        c_sq_face = jnp.maximum(c_sq_face, 0.0)
-        c_face = jnp.sqrt(jnp.maximum(c_sq_face, sqrt_floor))
-        inv_c_sq = jnp.where(c_sq_face > 0.0, 1.0 / c_sq_face, 0.0)
-
-        ms_disc = (b2_over_rho_face + c_sq_face) ** 2 - 4.0 * bn2_over_rho_face * c_sq_face
-        ms_disc_root = jnp.sqrt(jnp.maximum(ms_disc, 0.0))
-
-        lambda_fast = jnp.sqrt(jnp.maximum(
-            0.0, 0.5 * (b2_over_rho_face + c_sq_face + ms_disc_root)
-        ))
-        lambda_alfven = jnp.sqrt(jnp.maximum(0.0, bn2_over_rho_face))
-        lambda_slow = jnp.sqrt(jnp.maximum(
-            0.0, 0.5 * (b2_over_rho_face + c_sq_face - ms_disc_root)
-        ))
-
-        # Tangential normalisation with the degeneracy fix.
-        bt_sq = Bt1_face * Bt1_face + Bt2_face * Bt2_face
-        bt_sq_safe = jnp.maximum(bt_sq, b_eps)
-        bt_n1 = jnp.where(
-            bt_sq >= b_eps,
-            Bt1_face / jnp.sqrt(bt_sq_safe),
-            inv_sqrt_two_typed,
-        )
-        bt_n2 = jnp.where(
-            bt_sq >= b_eps,
-            Bt2_face / jnp.sqrt(bt_sq_safe),
-            inv_sqrt_two_typed,
-        )
-
-        sgn_bn = jnp.where(Bn_face >= 0.0, one_typed, neg_one_typed)
-        sgn_bt = jnp.where(
-            Bt1_face != 0.0,
-            jnp.where(Bt1_face >= 0.0, one_typed, neg_one_typed),
-            jnp.where(Bt2_face >= 0.0, one_typed, neg_one_typed),
-        )
-
-        # Fast / slow mode weighting; same algebra as the native helper.
-        denom = lambda_fast * lambda_fast - lambda_slow * lambda_slow
-        denom_safe = jnp.maximum(denom, b_eps)
-        am_fast = jnp.where(
-            denom >= b_eps,
-            jnp.sqrt(jnp.maximum(
-                0.0, c_sq_face - lambda_slow * lambda_slow
-            )) / jnp.sqrt(denom_safe),
-            1.0,
-        )
-        am_slow = jnp.where(
-            denom >= b_eps,
-            jnp.sqrt(jnp.maximum(
-                0.0, lambda_fast * lambda_fast - c_sq_face
-            )) / jnp.sqrt(denom_safe),
-            1.0,
-        )
-
-        sqrt_rho_face = jnp.sqrt(jnp.maximum(rho_face, rhomin))
-        cs_geq_alfven = c_face >= lambda_alfven
-
-        # ------------------------------------------------------------------
-        # Inlined ``L_row`` and ``R_col`` for each of the 7 modes.  Each
-        # ``left_project(mode, values)`` returns the scalar tile L_row · q,
-        # ``add_right_correction(flux_acc, mode, Fs)`` adds Fs * R_col[:, mode]
-        # to flux_acc.  All formulas are 1:1 translations of
-        # ``_eigen_mhd._eigen_L_row`` and ``_eigen_R_col``.
-        # ------------------------------------------------------------------
-        def left_project(mode: int, values):
-            """L_row[mode] · values.  ``values`` is an 8-tuple in local order:
-            (rho, mn, mt1, mt2, Bn, Bt1, Bt2, energy)."""
-            rho_v, mn_v, mt1_v, mt2_v, Bn_v, Bt1_v, Bt2_v, e_v = values
-            if mode == 0:  # fast-
-                L_rho = (
-                    am_fast * (gam1 * v2_face + lambda_fast * vn_face)
-                    - am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
-                )
-                L_mn = am_fast * (gam0 * vn_face - lambda_fast)
-                L_mt1 = gam0 * am_fast * vt1_face + am_slow * lambda_slow * bt_n1 * sgn_bn
-                L_mt2 = gam0 * am_fast * vt2_face + am_slow * lambda_slow * bt_n2 * sgn_bn
-                L_Bt1 = gam0 * am_fast * Bt1_face + c_face * am_slow * bt_n1 * sqrt_rho_face
-                L_Bt2 = gam0 * am_fast * Bt2_face + c_face * am_slow * bt_n2 * sqrt_rho_face
-                L_E = -gam0 * am_fast
-                acc = (
-                    L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
-                )
-                acc = 0.5 * acc * inv_c_sq
-                return jnp.where(~cs_geq_alfven, acc * sgn_bt, acc)
-            if mode == 1:  # alfvén-
-                L_rho = bt_n2 * vt1_face - bt_n1 * vt2_face
-                L_mt1 = -bt_n2
-                L_mt2 = bt_n1
-                L_Bt1 = -bt_n2 * sgn_bn * sqrt_rho_face
-                L_Bt2 = bt_n1 * sgn_bn * sqrt_rho_face
-                acc = (
-                    L_rho * rho_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v
-                )
-                return 0.5 * acc
-            if mode == 2:  # slow-
-                L_rho = (
-                    am_slow * (gam1 * v2_face + lambda_slow * vn_face)
-                    + am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
-                )
-                L_mn = am_slow * (gam0 * vn_face) - am_slow * lambda_slow
-                L_mt1 = gam0 * am_slow * vt1_face - am_fast * lambda_fast * bt_n1 * sgn_bn
-                L_mt2 = gam0 * am_slow * vt2_face - am_fast * lambda_fast * bt_n2 * sgn_bn
-                L_Bt1 = gam0 * am_slow * Bt1_face - c_face * am_fast * bt_n1 * sqrt_rho_face
-                L_Bt2 = gam0 * am_slow * Bt2_face - c_face * am_fast * bt_n2 * sqrt_rho_face
-                L_E = -gam0 * am_slow
-                acc = (
-                    L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
-                )
-                acc = 0.5 * acc * inv_c_sq
-                return jnp.where(cs_geq_alfven, acc * sgn_bt, acc)
-            if mode == 3:  # entropy
-                L_rho = -c_sq_face / gam0 - 0.5 * v2_face
-                L_mn = vn_face
-                L_mt1 = vt1_face
-                L_mt2 = vt2_face
-                L_Bt1 = Bt1_face
-                L_Bt2 = Bt2_face
-                L_E = -1.0
-                acc = (
-                    L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
-                )
-                return -gam0 * acc * inv_c_sq
-            if mode == 4:  # slow+
-                L_rho = (
-                    am_slow * (gam1 * v2_face - lambda_slow * vn_face)
-                    - am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
-                )
-                L_mn = am_slow * (gam0 * vn_face + lambda_slow)
-                L_mt1 = gam0 * am_slow * vt1_face + am_fast * lambda_fast * bt_n1 * sgn_bn
-                L_mt2 = gam0 * am_slow * vt2_face + am_fast * lambda_fast * bt_n2 * sgn_bn
-                L_Bt1 = gam0 * am_slow * Bt1_face - c_face * am_fast * bt_n1 * sqrt_rho_face
-                L_Bt2 = gam0 * am_slow * Bt2_face - c_face * am_fast * bt_n2 * sqrt_rho_face
-                L_E = -gam0 * am_slow
-                acc = (
-                    L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
-                )
-                acc = 0.5 * acc * inv_c_sq
-                return jnp.where(cs_geq_alfven, acc * sgn_bt, acc)
-            if mode == 5:  # alfvén+
-                L_rho = bt_n2 * vt1_face - bt_n1 * vt2_face
-                L_mt1 = -bt_n2
-                L_mt2 = bt_n1
-                L_Bt1 = bt_n2 * sgn_bn * sqrt_rho_face
-                L_Bt2 = -bt_n1 * sgn_bn * sqrt_rho_face
-                acc = (
-                    L_rho * rho_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                    + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v
-                )
-                return 0.5 * acc
-            # mode 6 — fast+
-            L_rho = (
-                am_fast * (gam1 * v2_face - lambda_fast * vn_face)
-                + am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn
-            )
-            L_mn = am_fast * (gam0 * vn_face + lambda_fast)
-            L_mt1 = gam0 * am_fast * vt1_face - am_slow * lambda_slow * bt_n1 * sgn_bn
-            L_mt2 = gam0 * am_fast * vt2_face - am_slow * lambda_slow * bt_n2 * sgn_bn
-            L_Bt1 = gam0 * am_fast * Bt1_face + c_face * am_slow * bt_n1 * sqrt_rho_face
-            L_Bt2 = gam0 * am_fast * Bt2_face + c_face * am_slow * bt_n2 * sqrt_rho_face
-            L_E = -gam0 * am_fast
-            acc = (
-                L_rho * rho_v + L_mn * mn_v + L_mt1 * mt1_v + L_mt2 * mt2_v
-                + L_Bt1 * Bt1_v + L_Bt2 * Bt2_v + L_E * e_v
-            )
-            acc = 0.5 * acc * inv_c_sq
-            return jnp.where(~cs_geq_alfven, acc * sgn_bt, acc)
-
-        def add_right_correction(flux_acc, mode: int, Fs):
-            """flux_acc += Fs * R_col[:, mode] (local order, ncomp=8).
-            B_normal slot (index 4) always gets 0."""
-            if mode == 0:  # fast-
-                R = (
-                    am_fast,
-                    am_fast * (vn_face - lambda_fast),
-                    am_fast * vt1_face + am_slow * lambda_slow * bt_n1 * sgn_bn,
-                    am_fast * vt2_face + am_slow * lambda_slow * bt_n2 * sgn_bn,
-                    0.0,
-                    c_face * am_slow * bt_n1 / sqrt_rho_face,
-                    c_face * am_slow * bt_n2 / sqrt_rho_face,
-                    am_fast * (
-                        lambda_fast * lambda_fast
-                        - lambda_fast * vn_face
-                        + 0.5 * v2_face
-                        - gam2 * c_sq_face
-                    )
-                    + am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
-                )
-                scale = jnp.where(~cs_geq_alfven, sgn_bt, 1.0)
-            elif mode == 1:  # alfvén-
-                R = (
-                    0.0,
-                    0.0,
-                    -bt_n2,
-                    bt_n1,
-                    0.0,
-                    -bt_n2 * sgn_bn / sqrt_rho_face,
-                    bt_n1 * sgn_bn / sqrt_rho_face,
-                    bt_n1 * vt2_face - bt_n2 * vt1_face,
-                )
-                scale = 1.0
-            elif mode == 2:  # slow-
-                R = (
-                    am_slow,
-                    am_slow * (vn_face - lambda_slow),
-                    am_slow * vt1_face - am_fast * lambda_fast * bt_n1 * sgn_bn,
-                    am_slow * vt2_face - am_fast * lambda_fast * bt_n2 * sgn_bn,
-                    0.0,
-                    -c_face * am_fast * bt_n1 / sqrt_rho_face,
-                    -c_face * am_fast * bt_n2 / sqrt_rho_face,
-                    am_slow * (
-                        lambda_slow * lambda_slow
-                        - lambda_slow * vn_face
-                        + 0.5 * v2_face
-                        - gam2 * c_sq_face
-                    )
-                    - am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
-                )
-                scale = jnp.where(cs_geq_alfven, sgn_bt, 1.0)
-            elif mode == 3:  # entropy
-                R = (
-                    1.0,
-                    vn_face,
-                    vt1_face,
-                    vt2_face,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.5 * v2_face,
-                )
-                scale = 1.0
-            elif mode == 4:  # slow+
-                R = (
-                    am_slow,
-                    am_slow * (vn_face + lambda_slow),
-                    am_slow * vt1_face + am_fast * lambda_fast * bt_n1 * sgn_bn,
-                    am_slow * vt2_face + am_fast * lambda_fast * bt_n2 * sgn_bn,
-                    0.0,
-                    -c_face * am_fast * bt_n1 / sqrt_rho_face,
-                    -c_face * am_fast * bt_n2 / sqrt_rho_face,
-                    am_slow * (
-                        lambda_slow * lambda_slow
-                        + lambda_slow * vn_face
-                        + 0.5 * v2_face
-                        - gam2 * c_sq_face
-                    )
-                    + am_fast * lambda_fast * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
-                )
-                scale = jnp.where(cs_geq_alfven, sgn_bt, 1.0)
-            elif mode == 5:  # alfvén+
-                R = (
-                    0.0,
-                    0.0,
-                    -bt_n2,
-                    bt_n1,
-                    0.0,
-                    bt_n2 * sgn_bn / sqrt_rho_face,
-                    -bt_n1 * sgn_bn / sqrt_rho_face,
-                    bt_n1 * vt2_face - bt_n2 * vt1_face,
-                )
-                scale = 1.0
-            else:  # mode == 6 — fast+
-                R = (
-                    am_fast,
-                    am_fast * (vn_face + lambda_fast),
-                    am_fast * vt1_face - am_slow * lambda_slow * bt_n1 * sgn_bn,
-                    am_fast * vt2_face - am_slow * lambda_slow * bt_n2 * sgn_bn,
-                    0.0,
-                    c_face * am_slow * bt_n1 / sqrt_rho_face,
-                    c_face * am_slow * bt_n2 / sqrt_rho_face,
-                    am_fast * (
-                        lambda_fast * lambda_fast
-                        + lambda_fast * vn_face
-                        + 0.5 * v2_face
-                        - gam2 * c_sq_face
-                    )
-                    - am_slow * lambda_slow * (bt_n1 * vt1_face + bt_n2 * vt2_face) * sgn_bn,
-                )
-                scale = jnp.where(~cs_geq_alfven, sgn_bt, 1.0)
-            return [flux_acc[slot] + (R[slot] * scale) * Fs for slot in range(ncomp)]
-
-        def alpha_for_mode(mode: int):
-            amx = jnp.abs(lambda_from_floored_cell(floored_stencil[0], mode))
-            for k in range(1, 6):
-                amx = jnp.maximum(
-                    amx, jnp.abs(lambda_from_floored_cell(floored_stencil[k], mode))
-                )
-            return amx
-
-        # First-order centered part (1/12 stencil), one per component.
-        flux_acc = [
-            (-f_stencil[1][slot] + 7.0 * f_stencil[2][slot]
-             + 7.0 * f_stencil[3][slot] - f_stencil[4][slot]) / 12.0
-            for slot in range(ncomp)
-        ]
-
-        for mode in range(num_modes):
-            s = tuple(left_project(mode, f_stencil[k]) for k in range(6))
-            qproj = tuple(left_project(mode, q_stencil[k]) for k in range(6))
-
-            d0 = s[1] - s[0]; d1 = s[2] - s[1]; d2 = s[3] - s[2]
-            d3 = s[4] - s[3]; d4 = s[5] - s[4]
-            dq0 = qproj[1] - qproj[0]; dq1 = qproj[2] - qproj[1]
-            dq2 = qproj[3] - qproj[2]; dq3 = qproj[4] - qproj[3]
-            dq4 = qproj[5] - qproj[4]
-
-            amx = alpha_for_mode(mode)
-
-            aterm_p = 0.5 * (d0 + amx * dq0)
-            bterm_p = 0.5 * (d1 + amx * dq1)
-            cterm_p = 0.5 * (d2 + amx * dq2)
-            dterm_p = 0.5 * (d3 + amx * dq3)
-            IS0_p = 13.0 * (aterm_p - bterm_p) ** 2 + 3.0 * (aterm_p - 3.0 * bterm_p) ** 2
-            IS1_p = 13.0 * (bterm_p - cterm_p) ** 2 + 3.0 * (bterm_p + cterm_p) ** 2
-            IS2_p = 13.0 * (cterm_p - dterm_p) ** 2 + 3.0 * (3.0 * cterm_p - dterm_p) ** 2
-            alpha0_p = 1.0 / (epsilon + IS0_p) ** 2
-            alpha1_p = 6.0 / (epsilon + IS1_p) ** 2
-            alpha2_p = 3.0 / (epsilon + IS2_p) ** 2
-            alpha_sum_p = jnp.maximum(alpha0_p + alpha1_p + alpha2_p, tiny)
-            omega0_p = alpha0_p / alpha_sum_p
-            omega2_p = alpha2_p / alpha_sum_p
-            second = (omega0_p * (aterm_p - 2.0 * bterm_p + cterm_p) / 3.0
-                      + (omega2_p - 0.5) * (bterm_p - 2.0 * cterm_p + dterm_p) / 6.0)
-
-            aterm_m = 0.5 * (d4 - amx * dq4)
-            bterm_m = 0.5 * (d3 - amx * dq3)
-            cterm_m = 0.5 * (d2 - amx * dq2)
-            dterm_m = 0.5 * (d1 - amx * dq1)
-            IS0_m = 13.0 * (aterm_m - bterm_m) ** 2 + 3.0 * (aterm_m - 3.0 * bterm_m) ** 2
-            IS1_m = 13.0 * (bterm_m - cterm_m) ** 2 + 3.0 * (bterm_m + cterm_m) ** 2
-            IS2_m = 13.0 * (cterm_m - dterm_m) ** 2 + 3.0 * (3.0 * cterm_m - dterm_m) ** 2
-            alpha0_m = 1.0 / (epsilon + IS0_m) ** 2
-            alpha1_m = 6.0 / (epsilon + IS1_m) ** 2
-            alpha2_m = 3.0 / (epsilon + IS2_m) ** 2
-            alpha_sum_m = jnp.maximum(alpha0_m + alpha1_m + alpha2_m, tiny)
-            omega0_m = alpha0_m / alpha_sum_m
-            omega2_m = alpha2_m / alpha_sum_m
-            third = (omega0_m * (aterm_m - 2.0 * bterm_m + cterm_m) / 3.0
-                     + (omega2_m - 0.5) * (bterm_m - 2.0 * cterm_m + dterm_m) / 6.0)
-
-            Fs = -second + third
-            flux_acc = add_right_correction(flux_acc, mode, Fs)
 
         # Write every output component.  Hydro/MHD covers all conserved
         # variables, but explicitly zero anything not in ``local_indices``
@@ -2055,6 +3306,177 @@ def _weno_flux_mhd_pallas_local(
         jnp.asarray(b_eps_value, dtype=conserved_state.dtype),
         jnp.asarray(sqrt_floor_value, dtype=conserved_state.dtype),
     )
+
+
+def _weno_flux_mhd_pallas_vjp_local(
+    conserved_state,
+    flux_bar,
+    params: SimulationParams,
+    config: SimulationConfig,
+    registered_variables: RegisteredVariables,
+    *,
+    axis: int,
+):
+    """Native Pallas adjoint (VJP) of :func:`_weno_flux_mhd_pallas_local`.
+
+    Given the primal input ``conserved_state`` and the output cotangent
+    ``flux_bar`` (same shape as the MHD WENO flux), returns the input cotangent
+    w.r.t. ``conserved_state``.  Each grid block gathers its 6-cell WENO stencil
+    from ``q_ref`` exactly as the forward kernel does and runs ``jax.vjp`` of the
+    *shared* per-window flux :func:`_weno_mhd_flux_from_window` against the
+    tile's flux cotangent, so the Pallas backward is the exact transpose of the
+    Pallas forward by construction (no separately-derived MHD adjoint math — on
+    jax >= 0.10 the in-kernel auto-VJP lowers cleanly on Triton and compiles at
+    parity with the primal; the old miscompile that forced the hydro
+    hand-derivation is gone).  The six per-offset stencil contributions are
+    emitted into six non-overlapping BlockSpec-tiled buffers and assembled by a
+    plain-JAX ``roll``-and-sum afterwards (avoids cross-block atomics).
+
+    Like the hydro adjoint, the kernel always gathers/scatters along the
+    *leading* spatial axis: for ``axis != 0`` the flux axis is transposed to the
+    front (the in-kernel VJP is bit-exact for every axis in interpret mode, but
+    older Triton miscompiled a non-leading gather axis; the transpose keeps the
+    GPU-correct axis-0 path).  The momentum/magnetic component permutation lives
+    in the variable axis (``local_indices``) and is applied/undone in plain JAX.
+
+    Single-device build (no ``shard_map``): the inverse-problem regime runs on
+    one GPU, differentiating w.r.t. the conserved STATE only (params are physical
+    constants for the flux)."""
+    ndim = int(config.dimensionality)
+    assert ndim == 3, "MHD Pallas adjoint is built for 3D"
+    local_indices = _mhd_indices_for_axis(config, registered_variables, axis)
+    li = jnp.asarray(local_indices)
+    ncomp = len(local_indices)  # 8
+    num_modes = 7
+
+    # Bring the flux spatial axis to the front AND permute the conserved
+    # components into characteristic order, both in plain JAX (the in-kernel VJP
+    # is only GPU-correct for an identity-indexed, axis-0 gather).  Undone after.
+    if axis == 0:
+        cs_s, fb_s, inv_perm = conserved_state, flux_bar, None
+    else:
+        perm = [0, axis + 1] + [a for a in range(1, ndim + 1) if a != axis + 1]
+        inv_perm = [perm.index(i) for i in range(ndim + 1)]
+        cs_s = jnp.transpose(conserved_state, perm)
+        fb_s = jnp.transpose(flux_bar, perm)
+    cs = cs_s[li]  # characteristic component order -> identity inside the kernel
+    fb = fb_s[li]
+
+    nvars = int(cs.shape[0])
+    spatial_shape = tuple(int(x) for x in cs.shape[1:])
+    nx, ny, nz = spatial_shape
+    bx, by, bz = _as_3tuple_block_shape(config.pallas_block_shape, ndim)
+    grid = (nx // bx, ny // by, nz // bz)
+
+    offsets = tuple(range(-2, 4))  # WENO5 stencil window
+
+    # Same typed floors as the forward kernel (x64 + Triton dtype hygiene).
+    b_eps_value = 1e-20
+    sqrt_floor_value = 1e-12
+
+    scalar_spec = pl.BlockSpec((), lambda bi, bj, bk: ())
+    full_spec = pl.BlockSpec(cs.shape, lambda bi, bj, bk: tuple([0] * (ndim + 1)))
+    block_shape = (nvars, bx, by, bz)
+    out_spec = pl.BlockSpec(block_shape, lambda bi, bj, bk: (0, bi, bj, bk))
+
+    def kernel(q_ref, fbar_ref, gamma_ref, rhomin_ref, pgmin_ref, b_eps_ref,
+               sqrt_floor_ref, *out_refs):
+        bi = pl.program_id(0)
+        bj = pl.program_id(1)
+        bk = pl.program_id(2)
+
+        ii = (bi * bx + jnp.arange(bx)[:, None, None]) % nx
+        jj = (bj * by + jnp.arange(by)[None, :, None]) % ny
+        kk = (bk * bz + jnp.arange(bz)[None, None, :]) % nz
+
+        gamma = gamma_ref[()]
+        rhomin = rhomin_ref[()]
+        pgmin = pgmin_ref[()]
+        b_eps = b_eps_ref[()]
+        sqrt_floor = sqrt_floor_ref[()]
+
+        def shifted_index(offset: int):
+            # Always offset the leading spatial axis (the flux axis, brought to
+            # the front by the transpose above).
+            return ((ii + offset) % nx, jj, kk)
+
+        def q_local(offset: int):
+            idx = shifted_index(offset)
+            return tuple(q_ref[(var,) + idx] for var in range(ncomp))
+
+        q_stencil = tuple(q_local(o) for o in offsets)
+        own = shifted_index(0)
+        flux_bar_slot = tuple(fbar_ref[(var,) + own] for var in range(ncomp))
+
+        if _MHD_VJP_USE_HAND_ADJOINT:
+            # Hand-derived explicit adjoint (mostly pure elementwise arithmetic;
+            # the only in-kernel jax.vjp is of the small per-face eigenvector
+            # building-block map).  This replaces the whole-window jax.vjp, whose
+            # Triton lowering made the MHD backward ~63x the forward; the hand
+            # adjoint shrinks the vjp scope to a handful of face scalars.
+            qbar_stencil = _weno_mhd_flux_from_window_adjoint(
+                q_stencil, flux_bar_slot, gamma, rhomin, pgmin, b_eps,
+                sqrt_floor, ncomp, num_modes)
+        else:
+            # Legacy fallback: in-kernel jax.vjp of the whole shared window flux
+            # (the exact transpose of the forward, but slow to lower on Triton).
+            flat = [q_stencil[k][c] for k in range(6) for c in range(ncomp)]
+
+            def wf(*flat_qs):
+                qs = tuple(
+                    tuple(flat_qs[k * ncomp + c] for c in range(ncomp))
+                    for k in range(6)
+                )
+                return tuple(_weno_mhd_flux_from_window(
+                    qs, gamma, rhomin, pgmin, b_eps, sqrt_floor, ncomp, num_modes))
+
+            _, vjp_fn = jax.vjp(wf, *flat)
+            cts = vjp_fn(tuple(flux_bar_slot))
+            qbar_stencil = [[cts[k * ncomp + c] for c in range(ncomp)] for k in range(6)]
+
+        for o_idx in range(len(offsets)):
+            out_ref = out_refs[o_idx]
+            for comp in range(ncomp):
+                out_ref[comp, ...] = qbar_stencil[o_idx][comp]
+
+    kwargs = {}
+    compiler_params = _pallas_compiler_params(config)
+    if compiler_params is not None:
+        kwargs["compiler_params"] = compiler_params
+
+    out_shapes = tuple(jax.ShapeDtypeStruct(cs.shape, cs.dtype) for _ in offsets)
+    contributions = pl.pallas_call(
+        kernel,
+        out_shape=out_shapes,
+        grid=grid,
+        in_specs=[full_spec, full_spec, scalar_spec, scalar_spec, scalar_spec,
+                  scalar_spec, scalar_spec],
+        out_specs=tuple(out_spec for _ in offsets),
+        interpret=config.pallas_interpret,
+        name=f"mhd_weno_flux_vjp_axis_{axis}",
+        **kwargs,
+    )(
+        cs,
+        fb,
+        jnp.asarray(params.gamma, dtype=cs.dtype),
+        jnp.asarray(params.minimum_density, dtype=cs.dtype),
+        jnp.asarray(params.minimum_pressure, dtype=cs.dtype),
+        jnp.asarray(b_eps_value, dtype=cs.dtype),
+        jnp.asarray(sqrt_floor_value, dtype=cs.dtype),
+    )
+
+    # contributions[o] holds, at interface cell i, the cotangent destined for
+    # source cell i + offset (along the leading spatial axis = array axis 1):
+    # U_bar[j] = sum_o contributions[o][j - offset] = sum_o roll(., offset).
+    ubar_char = sum(
+        jnp.roll(contributions[o_idx], offset, axis=1)
+        for o_idx, offset in enumerate(offsets)
+    )
+    # Undo the component permutation, then the spatial transpose (plain JAX).
+    conserved_state_bar = jnp.zeros_like(cs_s).at[li].set(ubar_char)
+    if inv_perm is not None:
+        conserved_state_bar = jnp.transpose(conserved_state_bar, inv_perm)
+    return conserved_state_bar
 
 
 # -----------------------------------------------------------------------------

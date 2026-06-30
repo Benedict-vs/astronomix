@@ -25,8 +25,8 @@ from astronomix._modules._turbulent_forcing._turbulent_forcing_options import Tu
 NATIVE_JAX = 0
 PALLAS = 1
 
-# positivity-enforcement modes (used by ``positivity_per_stage_mode`` /
-# ``positivity_per_step_mode``).  HARD_FLOOR clamps density (and, for ideal
+# positivity-enforcement modes (used by ``PositivityConfig.per_stage_mode`` /
+# ``per_step_mode``).  HARD_FLOOR clamps density (and, for ideal
 # gas, pressure) pointwise — cheap, non-conservative, matches the *adiabatic*
 # HOW-MHD ``prot.f``.  REDISTRIBUTE neighbour-averages density+momentum (and
 # energy) over the valid 3x3x3 neighbourhood of sub-threshold cells — much
@@ -36,9 +36,14 @@ PALLAS = 1
 POSITIVITY_NONE = 0
 POSITIVITY_HARD_FLOOR = 1
 POSITIVITY_REDISTRIBUTE = 2
-#: internal sentinel: derive the mode from the legacy ``enforce_positivity``
-#: bool (True -> HARD_FLOOR, False -> NONE).  Resolved in ``finalize_config``.
-POSITIVITY_FOLLOW_LEGACY = -1
+#: CONSERVATIVE: enforce internal-energy positivity by an antisymmetric
+#: face-flux diffusion that pulls internal energy into (near-)negative-pressure
+#: cells from their hotter neighbours (exact total-energy conservation), plus a
+#: density floor / vacuum-rest for voids and a minimal residual pressure floor
+#: as the unconditional guarantee. The smooth, conservative cousin of HARD_FLOOR:
+#: it keeps the energy-conserving self-gravity scheme stable on violent collapse
+#: without the 100%+ energy injection a bare floor causes.
+POSITIVITY_CONSERVATIVE = 3
 
 # solver modes
 FINITE_VOLUME = 0
@@ -105,14 +110,14 @@ GHOST_CELLS = 0
 PERIODIC_ROLL = 1
 # OPEN_SHIFT = 2
 
-# self-gravity versions
-SIMPLE_SOURCE_TERM = 0
-DONOR_ACCOUNTING = 1
-RIEMANN_SPLIT = 2
-RIEMANN_SPLIT_UNSTABLE = 3
-HALF_SPLIT = 4
-FD_FLUX_GRAVITY = 5
-WENO_FLUX_GRAVITY = 6
+# self-gravity coupling schemes (FD):
+#   SIMPLE_SOURCE              - rho * v * a energy source (non-conservative)
+#   SECOND_ORDER_CONSERVATIVE  - flux-based energy source (2nd-order accurate)
+#   FOURTH_ORDER_CONSERVATIVE  - corrected flux-based energy source (4th-order,
+#                                the energy-conserving high-order scheme)
+SIMPLE_SOURCE = 0
+SECOND_ORDER_CONSERVATIVE = 1
+FOURTH_ORDER_CONSERVATIVE = 2
 
 # Magnetic part integrators for split MHD
 IMPLICIT_MIDPOINT = 0
@@ -237,6 +242,116 @@ class BoundarySettings(NamedTuple):
     y: BoundarySettings1D = BoundarySettings1D()
     z: BoundarySettings1D = BoundarySettings1D()
 
+
+class GravityConfig(NamedTuple):
+    """Self-gravity and external-potential configuration."""
+
+    #: Self-gravity switch (currently only for periodic / manual-open boundaries).
+    self_gravity: bool = False
+
+    #: Coupling of the self-gravity source to the hydrodynamics. One of
+    #: ``SIMPLE_SOURCE`` / ``SECOND_ORDER_CONSERVATIVE`` /
+    #: ``FOURTH_ORDER_CONSERVATIVE``.
+    self_gravity_version: int = FOURTH_ORDER_CONSERVATIVE
+
+    #: Enable an external, static gravitational potential provided via
+    #: ``params.gravitational_potential``. It is added to the self-gravity
+    #: potential (if any) in ``_compute_total_potential``.
+    external_potential: bool = False
+
+    #: Manual open boundary conditions in the Poisson solver.
+    poisson_manual_open_boundaries: bool = False
+
+    #: Master gravity switch. Set automatically in ``finalize_config`` to
+    #: ``self_gravity or external_potential``; gates the gravity source-term
+    #: machinery so an external potential works without self-gravity. Not set
+    #: by the user directly.
+    gravity: bool = False
+
+
+class PositivityConfig(NamedTuple):
+    """
+    Density/pressure positivity-enforcement configuration.
+    """
+
+    #: Casual on/off switch for the per-stage / per-step STATE floors. Default
+    #: False (no flooring). When True, finalize_config sets per_stage_mode and
+    #: per_step_mode to HARD_FLOOR unless explicitly overridden. Does NOT affect
+    #: the read-only ``clamp_in_estimates`` (always respected).
+    default_positivity_protection: bool = False
+
+    #: Positivity enforcement applied inside every SSPRK/LSRK stage (on the
+    #: conserved state — the CFL lever for strong shocks). One of
+    #: ``POSITIVITY_{NONE,HARD_FLOOR,REDISTRIBUTE,CONSERVATIVE}``. Default NONE;
+    #: set to HARD_FLOOR by finalize when ``default_positivity_protection``.
+    per_stage_mode: int = POSITIVITY_NONE
+
+    #: Positivity enforcement applied once per step before the evolve (on the
+    #: primitive state). With turbulent forcing + ``vacuum_protection`` the
+    #: conservative ``prot`` redistribution already runs once per step, so a
+    #: per-step REDISTRIBUTE here is redundant and is auto-skipped.
+    per_step_mode: int = POSITIVITY_NONE
+
+    #: Read-only density/pressure clamp in the flux / eigenvalue / timestep
+    #: estimates (NaN-safety; does NOT modify the evolved state). This is the
+    #: role the old ``enforce_positivity`` bool played in those estimators.
+    #: DECOUPLED from ``default_positivity_protection`` and ON by default --
+    #: cheap insurance that never touches the conserved solution.
+    clamp_in_estimates: bool = True
+
+    #: Vacuum-rest velocity recovery: zero the momentum in below-floor (vacuum)
+    #: cells so the recovered velocity is 0 rather than ``momentum/rho_floored``
+    #: (which spikes and drives high-Mach blow-up); lets ``minimum_density`` be
+    #: lowered by orders of magnitude without instability.
+    vacuum_rest: bool = False
+
+    #: NaN/inf backstop: reset non-finite conserved entries to zero before the
+    #: density/pressure floors so they become a valid floored state.
+    nan_safe: bool = False
+
+    #: Global velocity ceiling in the density-floor enforcement (ideal gas). When
+    #: True, ``|v|`` is capped at ``params.positivity_max_velocity`` for EVERY cell
+    #: (not just sub-floor ones, unlike ``vacuum_rest``/``REDISTRIBUTE`` which key
+    #: off ``minimum_density``). This catches the ``v = momentum / rho`` runaway
+    #: that forms in the *near-floor band* — cells whose density sits just ABOVE
+    #: the floor, where no density-threshold safeguard reaches. The cap is applied
+    #: after inverting the (floored) pressure, so the thermal energy is preserved
+    #: and only the unphysical kinetic excess is discarded. Off by default.
+    velocity_clip: bool = False
+
+    #: Temperature ceiling in the density-floor enforcement (ideal gas), the
+    #: thermal twin of ``velocity_clip``. When True, ``P / rho`` is capped at
+    #: ``params.positivity_max_pressure_over_density`` for EVERY cell. Without it,
+    #: a near-floor-density cell handed a reconstruction energy overshoot keeps a
+    #: large ``P`` over a floored ``rho``, so ``c_s = sqrt(gamma P / rho)`` blows
+    #: up and the CFL timestep collapses (the floors and the velocity clip are all
+    #: *lower* bounds / kinetic, and never reach this). The cap is applied right
+    #: after the pressure floor, so only the unphysical thermal excess of rarefied
+    #: cells is removed and dense gas is untouched. Off by default.
+    temperature_clip: bool = False
+
+    #: POSITIVITY_CONSERVATIVE-mode parameters (conservative internal-energy
+    #: redistribution): per-axis diffusion coefficient (stability needs
+    #: < 1/(2*dim)), number of Jacobi passes, and the activation margin in units
+    #: of the internal-energy floor (keep ~1 -- genuine near-violations only).
+    cons_coeff: float = 0.15
+    cons_passes: int = 16
+    cons_activate: float = 1.0
+
+    #: Deep-void first-order flux blending (FOFC-style): blend the WENO interface
+    #: flux toward LLF in cells near the density floor; the weight ramps from 1
+    #: at the floor to 0 at ``deepvoid_blend_factor * minimum_density``.
+    deepvoid_blend: bool = False
+    deepvoid_blend_factor: float = 8.0
+
+    #: Positivity-preserving (Hu-Adams-Shu / Zalesak FCT) flux limiter: blend the
+    #: WENO flux toward LLF by the largest weight keeping the LF-updated density
+    #: AND pressure above their floors. Shares the unified flux-blending
+    #: infrastructure with ``deepvoid_blend`` (different activation path; both may
+    #: be on, the stronger blend wins). Forces the non-fused WENO+divergence path.
+    preserving_flux: bool = False
+
+
 class SimulationConfig(NamedTuple):
     """
     Configuration object for the simulation.
@@ -328,81 +443,11 @@ class SimulationConfig(NamedTuple):
     #: Integrator used for the magnetic part in the FV MHD scheme.
     fv_magnetic_integrator: int = IMPLICIT_MIDPOINT
 
-    #: Enforce positivity of density and pressure.
-    #: NOTE: CURRENTLY ONLY IMPLEMENTED FOR 
-    #: FINITE DIFFERENCE MODE.
-    enforce_positivity: bool = True
+    #: Density/pressure positivity-enforcement configuration (see PositivityConfig).
+    positivity_config: PositivityConfig = PositivityConfig()
 
-    #: Positivity enforcement applied inside every SSPRK/LSRK stage (on the
-    #: conserved state — the CFL lever for strong shocks). One of
-    #: ``POSITIVITY_{NONE,HARD_FLOOR,REDISTRIBUTE}``.
-    positivity_per_stage_mode: int = POSITIVITY_FOLLOW_LEGACY
-
-    #: Positivity enforcement applied once per step before the evolve (on the
-    #: primitive state). One of ``POSITIVITY_{NONE,HARD_FLOOR,REDISTRIBUTE}``.
-    #: NOTE: with turbulent forcing + ``vacuum_protection`` the conservative
-    #: ``prot`` redistribution already runs once per step, so a per-step
-    #: REDISTRIBUTE here is redundant and is automatically skipped.
-    positivity_per_step_mode: int = POSITIVITY_FOLLOW_LEGACY
-
-    #: Vacuum-rest velocity recovery. When True, the density-floor enforcement
-    #: zeros the momentum in cells whose density is below ``minimum_density``, so
-    #: the recovered velocity is ``v = 0`` instead of ``momentum / rho_floored``
-    #: (which spikes to huge values in near-vacuum cells and is the usual cause
-    #: of high-Mach blow-up). A floored cell is effectively vacuum and has no
-    #: well-defined velocity, so resting it is physical — and it lets
-    #: ``minimum_density`` be lowered by orders of magnitude without instability.
-    positivity_vacuum_rest: bool = False
-
-    #: NaN/inf backstop for the positivity floor. ``jnp.maximum(NaN, floor)`` is
-    #: NaN, so a non-finite cell would survive the floor and propagate; when True,
-    #: non-finite conserved entries are reset to zero before the density/pressure
-    #: floors so they become a valid floored state. Off by default (adds a pass).
-    positivity_nan_safe: bool = False
-
-    #: Global velocity ceiling in the density-floor enforcement (ideal gas). When
-    #: True, ``|v|`` is capped at ``params.positivity_max_velocity`` for EVERY cell
-    #: (not just sub-floor ones, unlike ``vacuum_rest``/``REDISTRIBUTE`` which key
-    #: off ``minimum_density``). This catches the ``v = momentum / rho`` runaway
-    #: that forms in the *near-floor band* — cells whose density sits just ABOVE
-    #: the floor, where no density-threshold safeguard reaches. The cap is applied
-    #: after inverting the (floored) pressure, so the thermal energy is preserved
-    #: and only the unphysical kinetic excess is discarded. Off by default.
-    positivity_velocity_clip: bool = False
-
-    #: Temperature ceiling in the density-floor enforcement (ideal gas), the
-    #: thermal twin of ``positivity_velocity_clip``. When True, ``P / rho`` is
-    #: capped at ``params.positivity_max_pressure_over_density`` for EVERY cell.
-    #: Without it, a near-floor-density cell handed a reconstruction energy
-    #: overshoot keeps a large ``P`` over a floored ``rho``, so ``c_s = sqrt(gamma
-    #: P / rho)`` blows up and the CFL timestep collapses (the floors and the
-    #: velocity clip are all *lower* bounds / kinetic, and never reach this). The
-    #: cap is applied right after the pressure floor, so only the unphysical
-    #: thermal excess of rarefied cells is removed and dense gas is untouched.
-    #: Off by default.
-    positivity_temperature_clip: bool = False
-
-    #: Self gravity switch, currently only
-    #: for periodic boundaries.
-    self_gravity: bool = False
-
-    #: Coupling of the self-gravity to the
-    #: hydrodynamics.
-    self_gravity_version: int = DONOR_ACCOUNTING
-
-    #: Enable an external, static gravitational potential provided via
-    #: params.gravitational_potential. It is added to the self-gravity
-    #: potential (if any) in _compute_total_potential.
-    external_potential: bool = False
-
-    #: Master gravity switch. Set automatically in finalize_config to
-    #: self_gravity or external_potential; gates the gravity source-term
-    #: machinery so an external potential works without self-gravity.
-    gravity: bool = False
-
-    #: Manual open boundary conditions in the
-    #: Poisson solver.
-    poisson_manual_open_boundaries: bool = False
+    #: Self-gravity / external-potential configuration (see GravityConfig).
+    gravity_config: GravityConfig = GravityConfig()
 
     #: Explicit diffusion term 
     #: (currently only for finite difference mode)
@@ -415,18 +460,6 @@ class SimulationConfig(NamedTuple):
     #: equation (constant conductivity params.thermal_conductivity,
     #: explicit integration). Currently only for finite difference mode.
     thermal_conduction: bool = False
-
-    #: Spatial axis (0-based among the spatial dimensions) along which
-    #: isothermal conductive plates sit (e.g. 1 -> the y / vertical axis
-    #: for a 2D Rayleigh-Benard setup). The perpendicular axes are treated
-    #: as adiabatic (zero conductive flux), which the reflective hydro
-    #: boundary already provides via the mirrored (even) temperature.
-    conduction_wall_axis: int = 1
-
-    #: Whether the two ends of conduction_wall_axis are isothermal
-    #: (Dirichlet T = params.wall_temperature_low / _high). When False all
-    #: conduction boundaries are adiabatic (zero flux).
-    conduction_isothermal_walls: bool = False
 
     #: The size of the simulation box.
     box_size: Union[float, StaticFloatVector] = 1.0
@@ -575,14 +608,22 @@ class SimulationConfig(NamedTuple):
 def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
     """Finalizes the simulation configuration."""
 
-    # Resolve the positivity-mode sentinels from the legacy ``enforce_positivity``
-    # bool so downstream call sites read concrete modes. Legacy True -> HARD_FLOOR
-    # at both the per-stage and per-step sites (the historical behaviour).
-    _legacy = POSITIVITY_HARD_FLOOR if config.enforce_positivity else POSITIVITY_NONE
-    if config.positivity_per_stage_mode == POSITIVITY_FOLLOW_LEGACY:
-        config = config._replace(positivity_per_stage_mode=_legacy)
-    if config.positivity_per_step_mode == POSITIVITY_FOLLOW_LEGACY:
-        config = config._replace(positivity_per_step_mode=_legacy)
+    # default_positivity_protection: casual on/off switch for the STATE floors
+    # only. Default False = clean slate (no per-stage/per-step flooring). When
+    # True, turn the floors on (HARD_FLOOR) unless the user explicitly set a mode.
+    # The read-only clamps (clamp_in_estimates) are DECOUPLED and left untouched
+    # (default ON). The feature toggles (deepvoid_blend, preserving_flux,
+    # conservative redistribution, vacuum_rest, nan_safe) are independent too.
+    pc = config.positivity_config
+    if pc.default_positivity_protection:
+        config = config._replace(positivity_config=pc._replace(
+            per_stage_mode=(POSITIVITY_HARD_FLOOR
+                            if pc.per_stage_mode == POSITIVITY_NONE
+                            else pc.per_stage_mode),
+            per_step_mode=(POSITIVITY_HARD_FLOOR
+                           if pc.per_step_mode == POSITIVITY_NONE
+                           else pc.per_step_mode),
+        ))
 
     # num_cells = state_shape[-1]
     # config = config._replace(num_cells=num_cells)
@@ -663,9 +704,12 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
 
     # master gravity switch: active if self-gravity and/or an external
     # potential is used. This gates the (shared) gravity source-term machinery.
-    config = config._replace(gravity=config.self_gravity or config.external_potential)
+    config = config._replace(gravity_config=config.gravity_config._replace(
+        gravity=config.gravity_config.self_gravity
+        or config.gravity_config.external_potential
+    ))
 
-    if config.gravity and (config.limiter != MINMOD):
+    if config.gravity_config.gravity and (config.limiter != MINMOD):
         print(
             "Curiously, in self-gravitating systems, the VAN_ALBADA limiters seem to cause crashes."
         )
@@ -771,13 +815,6 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
             "For stellar wind simulations, we need source term aware timesteps, turning on."
         )
         config = config._replace(source_term_aware_timestep=True)
-
-    if (
-        config.gravity
-        and (config.riemann_solver == HLLC or config.riemann_solver == HLLC_LM)
-        and config.riemann_solver != RIEMANN_SPLIT
-    ):
-        print("Consider using RIEMANN_SPLIT as the self_gravity_version.")
 
     # disk-snapshot (Orbax) mode requirements
     if config.snapshot_storage_mode == TO_DISK:

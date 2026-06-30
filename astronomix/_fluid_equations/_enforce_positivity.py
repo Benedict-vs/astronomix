@@ -19,6 +19,7 @@ from astronomix._pallas_helpers import diffable_pallas_call_n
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 from astronomix.option_classes.simulation_config import (
     IDEAL_GAS,
+    POSITIVITY_CONSERVATIVE,
     POSITIVITY_HARD_FLOOR,
     POSITIVITY_REDISTRIBUTE,
     STATE_TYPE,
@@ -88,7 +89,7 @@ def _enforce_positivity_native_impl(
     # cell would otherwise survive the floor and propagate. Reset any non-finite
     # entry to zero first; the density/pressure floors below then turn it into a
     # valid floor state (rho -> minimum_density, momentum 0, pressure floored).
-    if config.positivity_nan_safe:
+    if config.positivity_config.nan_safe:
         conserved_state = jnp.nan_to_num(
             conserved_state, nan=0.0, posinf=0.0, neginf=0.0
         )
@@ -99,7 +100,7 @@ def _enforce_positivity_native_impl(
     # their momentum so the recovered velocity is 0 rather than
     # momentum / minimum_density (which spikes and triggers high-Mach blow-up).
     # Done before the floor + energy recovery so the kinetic energy is consistent.
-    if config.positivity_vacuum_rest:
+    if config.positivity_config.vacuum_rest:
         floored = rho < minimum_density
         mom = registered_variables.momentum_index
         if config.dimensionality == 1:
@@ -155,7 +156,7 @@ def _enforce_positivity_native_impl(
         
         pressure = jnp.maximum(pressure, minimum_pressure)
 
-        # Temperature ceiling (config.positivity_temperature_clip): cap P / rho at
+        # Temperature ceiling (config.positivity_config.temperature_clip): cap P / rho at
         # max_pressure_over_density for EVERY cell, the thermal twin of the
         # velocity clip below. rho is already floored, so this bounds
         # T = (P / rho) * T_factor at the requested ceiling and, with it, the
@@ -164,10 +165,10 @@ def _enforce_positivity_native_impl(
         # the CFL timestep. Applied right after the pressure floor so the energy
         # rebuilt below carries the bounded thermal part; dense gas (small P / rho)
         # is untouched.
-        if config.positivity_temperature_clip:
+        if config.positivity_config.temperature_clip:
             pressure = jnp.minimum(pressure, rho * max_pressure_over_density)
 
-        # Global velocity ceiling (config.positivity_velocity_clip): cap |v| at
+        # Global velocity ceiling (config.positivity_config.velocity_clip): cap |v| at
         # max_velocity for EVERY cell, not just sub-floor ones. The v = momentum /
         # rho runaway forms in the near-floor band (rho just ABOVE the floor) where
         # vacuum_rest / REDISTRIBUTE — both keyed to minimum_density — never reach.
@@ -176,7 +177,7 @@ def _enforce_positivity_native_impl(
         # energy below carries only the bounded kinetic part (the unphysical excess
         # is discarded). max_velocity sits well above any physical speed -> a true
         # no-op except on pathological cells.
-        if config.positivity_velocity_clip:
+        if config.positivity_config.velocity_clip:
             v_x = jnp.clip(v_x, -max_velocity, max_velocity)
             if config.dimensionality == 1:
                 conserved_state = conserved_state.at[
@@ -313,9 +314,19 @@ def _redistribute_positivity_native(
     rho_patched = jnp.where(has, rho_sum / count_safe, threshold)
     mom_patched = []
     for m, ms in zip(mom, mom_sum):
-        # mass-weighted neighbour mean velocity = sum(mom) / sum(rho);
-        # isolated cell -> keep momentum at the floored density (v = mom/threshold)
-        v = jnp.where(has, ms / rho_sum_safe, m / threshold)
+        # mass-weighted neighbour mean velocity = sum(mom) / sum(rho); an
+        # isolated cell (no valid neighbour) is a genuine deep-void / vacuum cell.
+        # Without vacuum_rest it keeps v = mom/threshold, which RUNS AWAY in deep
+        # voids: floored density pins rho at the threshold so any residual
+        # momentum gives a large recovered velocity, that velocity is re-injected
+        # every RK substage (the per-substage positivity runs before each flux),
+        # and the high-Mach WENO reconstruction across the void then overshoots
+        # until the step blows up. Resting the isolated cell (v=0) when
+        # vacuum_rest is on removes the run-away while leaving the gentle
+        # neighbour-fill for void *edges* (has=True) untouched. Mirrors the
+        # `_enforce_positivity` vacuum_rest semantics (vacuum -> zero momentum).
+        isolated_v = 0.0 if config.positivity_config.vacuum_rest else (m / threshold)
+        v = jnp.where(has, ms / rho_sum_safe, isolated_v)
         v = jnp.clip(v, -max_velocity, max_velocity)
         mom_patched.append(rho_patched * v)
 
@@ -335,6 +346,117 @@ def _redistribute_positivity_native(
         )
 
     return out
+
+
+def _internal_energy(conserved_state, rho, config, registered_variables):
+    """Internal energy density E - KE - E_mag from a conserved state."""
+    if config.dimensionality == 1:
+        v_x = conserved_state[registered_variables.momentum_index] / rho
+        v2 = v_x ** 2
+    else:
+        v_x = conserved_state[registered_variables.momentum_index.x] / rho
+        v_y = conserved_state[registered_variables.momentum_index.y] / rho
+        if config.dimensionality == 2:
+            v2 = v_x ** 2 + v_y ** 2
+        else:
+            v_z = conserved_state[registered_variables.momentum_index.z] / rho
+            v2 = v_x ** 2 + v_y ** 2 + v_z ** 2
+    e_int = conserved_state[registered_variables.energy_index] - 0.5 * rho * v2
+    if config.mhd:
+        b2 = (conserved_state[registered_variables.magnetic_index.x] ** 2
+              + conserved_state[registered_variables.magnetic_index.y] ** 2
+              + conserved_state[registered_variables.magnetic_index.z] ** 2)
+        e_int = e_int - 0.5 * b2
+    return e_int
+
+
+@partial(jax.jit, static_argnames=["registered_variables", "config"])
+def _conservative_energy_positivity(
+    conserved_state: STATE_TYPE,
+    gamma: Union[float, Float[Array, ""]],
+    minimum_density: Union[float, Float[Array, ""]],
+    minimum_pressure: Union[float, Float[Array, ""]],
+    positivity_max_velocity: Union[float, Float[Array, ""]],
+    config: SimulationConfig,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """Conservative internal-energy positivity enforcement on the full state.
+
+    Where the internal energy is (near) negative — exactly the cells the
+    energy-conserving self-gravity scheme drives unstable on a violent collapse —
+    pull internal energy in from hotter neighbours via an antisymmetric face flux
+        f_{i+1/2} = coeff * A_{i+1/2} * (e_i - e_{i+1}),
+    activated only at faces touching a near-floor cell. Because f is a face flux,
+    total energy is conserved EXACTLY for any activation pattern. A density floor
+    (+ optional vacuum-rest) handles voids, and a final minimal pressure floor
+    guarantees positivity unconditionally — but the prior redistribution makes
+    that residual injection negligible (vs the 100%+ a bare HARD_FLOOR causes on
+    deep collapse). This sees the TRUE post-update internal energy (it runs in the
+    SSPRK stage), unlike the source-level ``gravity_energy_pp_redistribute``.
+    """
+    if config.positivity_config.nan_safe:
+        conserved_state = jnp.nan_to_num(
+            conserved_state, nan=0.0, posinf=0.0, neginf=0.0
+        )
+
+    di = registered_variables.density_index
+    rho = conserved_state[di]
+
+    # vacuum-rest: zero momentum in below-floor (vacuum) cells before recovery
+    if config.positivity_config.vacuum_rest:
+        floored = rho < minimum_density
+        for mi in _momentum_indices(config, registered_variables):
+            conserved_state = conserved_state.at[mi].set(
+                jnp.where(floored, 0.0, conserved_state[mi])
+            )
+
+    rho = jnp.maximum(rho, minimum_density)
+    conserved_state = conserved_state.at[di].set(rho)
+
+    if config.equation_of_state == IDEAL_GAS:
+        e_int = _internal_energy(conserved_state, rho, config, registered_variables)
+        e_floor = minimum_pressure / (gamma - 1.0)
+        activate = config.positivity_config.cons_activate * e_floor
+        w = config.positivity_config.cons_coeff
+
+        corrected = e_int
+        for _ in range(config.positivity_config.cons_passes):
+            transfer = jnp.zeros_like(corrected)
+            for ax in range(config.dimensionality):
+                nbr = jnp.roll(corrected, shift=-1, axis=ax)   # cell i+1 at index i
+                active = (jnp.minimum(corrected, nbr) < activate).astype(
+                    corrected.dtype
+                )
+                f = w * active * (corrected - nbr)             # flux i -> i+1
+                transfer = transfer + jnp.roll(f, shift=1, axis=ax) - f
+            corrected = corrected + transfer
+
+        # conservative correction: shift total energy by the redistribution
+        conserved_state = conserved_state.at[registered_variables.energy_index].add(
+            corrected - e_int
+        )
+
+    # velocity cap: clip each velocity component to +-positivity_max_velocity in
+    # the rare runaway cells (a deep-collapse blow-up is a negative-pressure ->
+    # velocity-spike cascade; capping |v| breaks it). Removes only the excess
+    # kinetic energy of those pathological cells; the matching total-energy term
+    # is updated so the recovered pressure is unchanged. A no-op when
+    # positivity_max_velocity is inf (clip is identity, energy delta is 0).
+    rho_c = conserved_state[registered_variables.density_index]
+    for mi in _momentum_indices(config, registered_variables):
+        v = conserved_state[mi] / rho_c
+        v_cap = jnp.clip(v, -positivity_max_velocity, positivity_max_velocity)
+        # adjust total energy by the kinetic-energy change so e_int is preserved
+        conserved_state = conserved_state.at[registered_variables.energy_index].add(
+            0.5 * rho_c * (v_cap ** 2 - v ** 2)
+        )
+        conserved_state = conserved_state.at[mi].set(rho_c * v_cap)
+
+    # final density + (residual) pressure floor — the unconditional guarantee
+    return _enforce_positivity_native_impl(
+        conserved_state, config, gamma, minimum_density, minimum_pressure,
+        registered_variables,
+    )
 
 
 def _apply_stage_positivity(
@@ -360,6 +482,11 @@ def _apply_stage_positivity(
             conserved_state, minimum_density, positivity_max_velocity, gamma,
             minimum_pressure, positivity_max_pressure_over_density,
             config, registered_variables,
+        )
+    if mode == POSITIVITY_CONSERVATIVE:
+        return _conservative_energy_positivity(
+            conserved_state, gamma, minimum_density, minimum_pressure,
+            positivity_max_velocity, config, registered_variables,
         )
     return conserved_state
 

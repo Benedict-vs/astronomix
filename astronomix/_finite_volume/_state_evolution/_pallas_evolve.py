@@ -128,7 +128,7 @@ def _fv_pallas_evolve_supported(state, config: SimulationConfig) -> bool:
         return False
     if config.limiter not in (MINMOD, VAN_ALBADA, VAN_ALBADA_PP, OSHER):
         return False
-    if config.gravity:
+    if config.gravity_config.gravity:
         # The MUSCL-based reconstruction in the split path is paired with
         # several gravity variants; we keep the native path on for now.
         return False

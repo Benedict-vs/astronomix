@@ -122,7 +122,6 @@ def _base_config(problem: _Problem, solver_mode: int, backend: int = NATIVE_JAX)
         solver_mode=solver_mode,
         geometry=CARTESIAN,
         progress_bar=False,
-        self_gravity=False,
         boundary_handling=PERIODIC_ROLL,
         num_ghost_cells=0,
         mhd=False,

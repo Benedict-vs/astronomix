@@ -39,7 +39,7 @@ from astronomix.initial_condition_generation.construct_primitive_state import co
 from astronomix import get_registered_variables
 from astronomix.option_classes import WindConfig
 
-from astronomix.option_classes.simulation_config import BACKWARDS, DONOR_ACCOUNTING, HLL, HLLC, MINMOD, OSHER, PERIODIC_BOUNDARY, SIMPLE_SOURCE_TERM, VARAXIS, XAXIS, YAXIS, ZAXIS, BoundarySettings, BoundarySettings1D, SnapshotSettings
+from astronomix.option_classes.simulation_config import BACKWARDS, HLL, HLLC, MINMOD, OSHER, PERIODIC_BOUNDARY, SIMPLE_SOURCE, VARAXIS, XAXIS, YAXIS, ZAXIS, BoundarySettings, BoundarySettings1D, SnapshotSettings
 
 from astronomix._modules._cooling._cooling_tables import schure_cooling
 from astronomix._modules._cooling.cooling_options import IMPLICIT_COOLING, PIECEWISE_POWER_LAW, CoolingConfig, CoolingCurveConfig, CoolingParams

@@ -239,7 +239,7 @@ def _evolve_gas_state_split(
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     if config.dimensionality == 1:
-        if config.gravity:
+        if config.gravity_config.gravity:
             gravity_source = _gravity_source_presolve(
                 primitive_state, dt, gamma, config, params, helper_data, registered_variables
             )
@@ -256,13 +256,13 @@ def _evolve_gas_state_split(
             1,
         )
 
-        if config.gravity:
+        if config.gravity_config.gravity:
             primitive_state = _apply_gravity_source(
                 primitive_state, gravity_source, gamma, config, params, registered_variables
             )
 
     elif config.dimensionality == 2:
-        if config.gravity:
+        if config.gravity_config.gravity:
             gravity_source = _gravity_source_presolve(
                 primitive_state, dt, gamma, config, params, helper_data, registered_variables
             )
@@ -301,13 +301,13 @@ def _evolve_gas_state_split(
             1,
         )
 
-        if config.gravity:
+        if config.gravity_config.gravity:
             primitive_state = _apply_gravity_source(
                 primitive_state, gravity_source, gamma, config, params, registered_variables
             )
 
     elif config.dimensionality == 3:
-        if config.gravity:
+        if config.gravity_config.gravity:
             gravity_source = _gravity_source_presolve(
                 primitive_state, dt, gamma, config, params, helper_data, registered_variables
             )
@@ -368,7 +368,7 @@ def _evolve_gas_state_split(
             1,
         )
 
-        if config.gravity:
+        if config.gravity_config.gravity:
             primitive_state = _apply_gravity_source(
                 primitive_state, gravity_source, gamma, config, params, registered_variables
             )
@@ -497,7 +497,7 @@ def _evolve_gas_state_unsplit(
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
 
-    if config.gravity:
+    if config.gravity_config.gravity:
         gravity_source = _gravity_source_presolve(
             primitive_state, dt, gamma, config, params, helper_data, registered_variables
         )
@@ -538,7 +538,7 @@ def _evolve_gas_state_unsplit(
             "Only the RK2 SSP time integrator is currently supported for the unsplit scheme."
         )
 
-    if config.gravity and config.time_integrator:
+    if config.gravity_config.gravity and config.time_integrator:
         primitive_state = _apply_gravity_source(
             primitive_state, gravity_source, gamma, config, params, registered_variables
         )

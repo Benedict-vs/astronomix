@@ -131,7 +131,7 @@ def _time_integrator_sources(
 
     # simplest self-gravity
     # TODO: maybe only one Poisson solve per RK step?
-    if config.gravity and config.solver_mode == FINITE_DIFFERENCE:
+    if config.gravity_config.gravity and config.solver_mode == FINITE_DIFFERENCE:
         S += _fd_gravity_source(
             primitive_state,
             density_fluxes,
@@ -146,7 +146,7 @@ def _time_integrator_sources(
     # state passed in and added operator-split to the post-hydro state by the
     # caller. Matches the former _apply_self_gravity scheme, which likewise
     # evaluated the source on the gas substate with the hydro conversion.
-    if config.gravity and config.solver_mode == FINITE_VOLUME:
+    if config.gravity_config.gravity and config.solver_mode == FINITE_VOLUME:
         fv_primitive_state = primitive_state_from_conserved(
             conserved_state, gamma, config, registered_variables
         )

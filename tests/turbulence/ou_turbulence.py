@@ -51,6 +51,7 @@ from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     BoundarySettings,
     BoundarySettings1D,
+    PositivityConfig,
     SimulationConfig,
     SnapshotSettings,
     finalize_config,
@@ -103,7 +104,7 @@ def main():
         progress_bar=True,
         dimensionality=3,
         num_cells=args.N,
-        enforce_positivity=protect,
+        positivity_config=PositivityConfig(default_positivity_protection=protect),
         box_size=1.0,
         mhd=True,
         boundary_settings=BoundarySettings(

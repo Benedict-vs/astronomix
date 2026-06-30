@@ -21,11 +21,11 @@ from typing import NamedTuple, Optional
 import numpy as np
 
 from astronomix.option_classes.simulation_config import (
-    FD_FLUX_GRAVITY,
+    SECOND_ORDER_CONSERVATIVE,
     FINITE_DIFFERENCE,
     PALLAS,
-    SIMPLE_SOURCE_TERM,
-    WENO_FLUX_GRAVITY,
+    SIMPLE_SOURCE,
+    FOURTH_ORDER_CONSERVATIVE,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -38,9 +38,9 @@ FIG_DIR.mkdir(exist_ok=True)
 # These are the three finite-difference self-gravity source-term schemes
 # compared throughout the self-gravity section of the methods paper.
 SCHEME_LABELS = {
-    SIMPLE_SOURCE_TERM: "FD, simple source",
-    FD_FLUX_GRAVITY: "FD, flux-based source",
-    WENO_FLUX_GRAVITY: "FD, corrected flux-based source",
+    SIMPLE_SOURCE: "FD, simple source",
+    SECOND_ORDER_CONSERVATIVE: "FD, flux-based source",
+    FOURTH_ORDER_CONSERVATIVE: "FD, corrected flux-based source",
 }
 
 
@@ -69,13 +69,13 @@ class Scheme(NamedTuple):
 # Order and styling shared by all figures. Colours/markers are fixed per
 # scheme so a reader can match curves across the four panels.
 SCHEMES = [
-    Scheme(SIMPLE_SOURCE_TERM, marker="o", linestyle=":", color="C0", linewidth=2.5),
-    Scheme(FD_FLUX_GRAVITY, marker="s", linestyle="-.", color="C1", linewidth=2.0),
-    Scheme(WENO_FLUX_GRAVITY, marker="^", linestyle="--", color="C2", linewidth=2.0),
+    Scheme(SIMPLE_SOURCE, marker="o", linestyle=":", color="C0", linewidth=2.5),
+    Scheme(SECOND_ORDER_CONSERVATIVE, marker="s", linestyle="-.", color="C1", linewidth=2.0),
+    Scheme(FOURTH_ORDER_CONSERVATIVE, marker="^", linestyle="--", color="C2", linewidth=2.0),
 ]
 
 # The scheme the convergence-order fit is reported for.
-FIT_SCHEME_VERSION = WENO_FLUX_GRAVITY
+FIT_SCHEME_VERSION = FOURTH_ORDER_CONSERVATIVE
 
 
 # --- Pallas backend --------------------------------------------------------

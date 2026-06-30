@@ -25,7 +25,7 @@ from astronomix.option_classes.simulation_config import (
     BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, NATIVE_JAX, PALLAS,
     PERIODIC_ROLL, SimulationConfig, finalize_config,
     PERIODIC_BOUNDARY, BoundarySettings, BoundarySettings1D,
-    StaticFloatVector, StaticIntVector
+    StaticFloatVector, StaticIntVector, GravityConfig, PositivityConfig
 )
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.plotting_helpers.power_law_indicators import add_power_law_indicators
@@ -142,7 +142,6 @@ def get_config_and_params(dim, N, L, t_end, solver_mode=FINITE_DIFFERENCE):
         solver_mode=solver_mode,
         geometry=CARTESIAN,
         progress_bar=False,
-        self_gravity=False,
         boundary_handling=PERIODIC_ROLL,
         differentiation_mode=BACKWARDS,
         num_ghost_cells=0,

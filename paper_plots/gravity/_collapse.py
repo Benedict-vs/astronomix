@@ -32,7 +32,9 @@ from astronomix.option_classes.simulation_config import (
     FINITE_DIFFERENCE,
     FINITE_VOLUME,
     FORWARDS,
+    GravityConfig,
     PERIODIC_BOUNDARY,
+    PositivityConfig,
     SnapshotSettings,
     finalize_config,
 )
@@ -59,9 +61,11 @@ def collapse_config(
     common = dict(
         runtime_debugging=False,
         progress_bar=False,
-        self_gravity=True,
-        self_gravity_version=self_gravity_version,
-        poisson_manual_open_boundaries=True,
+        gravity_config=GravityConfig(
+            self_gravity=True,
+            self_gravity_version=self_gravity_version,
+            poisson_manual_open_boundaries=True,
+        ),
         mhd=False,
         dimensionality=3,
         box_size=BOX_SIZE,
@@ -101,7 +105,7 @@ def collapse_config(
 
     return SimulationConfig(
         solver_mode=FINITE_DIFFERENCE,
-        enforce_positivity=False,
+        positivity_config=PositivityConfig(default_positivity_protection=False),
         **_backend_kwargs(backend),
         **common,
     )

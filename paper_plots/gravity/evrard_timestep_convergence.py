@@ -48,11 +48,11 @@ from astronomix.initial_condition_generation.construct_primitive_state import (
     construct_primitive_state,
 )
 from astronomix.option_classes.simulation_config import (
-    FD_FLUX_GRAVITY,
+    SECOND_ORDER_CONSERVATIVE,
     NATIVE_JAX,
     PALLAS,
-    SIMPLE_SOURCE_TERM,
-    WENO_FLUX_GRAVITY,
+    SIMPLE_SOURCE,
+    FOURTH_ORDER_CONSERVATIVE,
     finalize_config,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
@@ -122,8 +122,8 @@ def plot():
     apply_paper_style()
     by_version = {s.self_gravity_version: s for s in SCHEMES}
     panels = [
-        ("non-conservative source", [SIMPLE_SOURCE_TERM]),
-        ("flux-based (conservative) sources", [FD_FLUX_GRAVITY, WENO_FLUX_GRAVITY]),
+        ("non-conservative source", [SIMPLE_SOURCE]),
+        ("flux-based (conservative) sources", [SECOND_ORDER_CONSERVATIVE, FOURTH_ORDER_CONSERVATIVE]),
     ]
 
     order = np.argsort(dt)
@@ -146,8 +146,8 @@ def plot():
         # Reference slope, on the conservative panel only. In float64 the error
         # converges at the RK4 order (dt^4) until the round-off floor; in float32
         # it is round-off-limited and grows ~1/dt.
-        if WENO_FLUX_GRAVITY in versions:
-            cons_s = data[f"energy_error_{WENO_FLUX_GRAVITY}"][order]
+        if FOURTH_ORDER_CONSERVATIVE in versions:
+            cons_s = data[f"energy_error_{FOURTH_ORDER_CONSERVATIVE}"][order]
             if DOUBLE:
                 imin = int(np.argmin(cons_s))  # converging branch: dt >= dt_min
                 dt_g = dt_s[imin:]
@@ -163,8 +163,8 @@ def plot():
         ax.set_yscale("log")
         # The simple source is essentially flat in dt; pad its y-range so the
         # near-constant line reads as flat rather than auto-zooming onto round-off.
-        if versions == [SIMPLE_SOURCE_TERM]:
-            e = data[f"energy_error_{SIMPLE_SOURCE_TERM}"]
+        if versions == [SIMPLE_SOURCE]:
+            e = data[f"energy_error_{SIMPLE_SOURCE}"]
             ax.set_ylim(float(e.min()) / 5, float(e.max()) * 5)
         ax.set_xlabel(r"timestep $\Delta t$")
         ax.set_title(subtitle)

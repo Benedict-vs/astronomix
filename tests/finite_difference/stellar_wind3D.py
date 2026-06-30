@@ -55,7 +55,7 @@ from astronomix.option_classes import WindConfig
 
 from astronomix.time_stepping.time_integration import _time_integration
 
-from astronomix.option_classes.simulation_config import BACKWARDS, DONOR_ACCOUNTING, FINITE_DIFFERENCE, FINITE_VOLUME, HLL, HLLC, MINMOD, MUSCL, OSHER, PERIODIC_BOUNDARY, SIMPLE_SOURCE_TERM, SPLIT, VARAXIS, XAXIS, YAXIS, ZAXIS, BoundarySettings, BoundarySettings1D, SnapshotSettings
+from astronomix.option_classes.simulation_config import BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, HLL, HLLC, MINMOD, MUSCL, OSHER, PERIODIC_BOUNDARY, SIMPLE_SOURCE, SPLIT, VARAXIS, XAXIS, YAXIS, ZAXIS, BoundarySettings, BoundarySettings1D, SnapshotSettings
 
 from astronomix._modules._cooling._cooling_tables import schure_cooling
 from astronomix._modules._cooling.cooling_options import PIECEWISE_POWER_LAW, CoolingConfig, CoolingCurveConfig, CoolingParams
@@ -125,7 +125,6 @@ config = SimulationConfig(
         trace_wind_density = False,
     ),
     differentiation_mode = BACKWARDS,
-    self_gravity_version = SIMPLE_SOURCE_TERM,
     num_snapshots = 5,
     cooling_config = CoolingConfig(
         cooling = cooling,

@@ -76,7 +76,7 @@ def _compute_gravitational_potential(
         ):
             non_periodic_boundaries = True
 
-    if config.poisson_manual_open_boundaries:
+    if config.gravity_config.poisson_manual_open_boundaries:
         non_periodic_boundaries = True
 
     # if periodic boundaries

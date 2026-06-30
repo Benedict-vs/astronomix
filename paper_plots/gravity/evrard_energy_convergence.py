@@ -47,11 +47,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from astronomix.option_classes.simulation_config import (
-    FD_FLUX_GRAVITY,
+    SECOND_ORDER_CONSERVATIVE,
     NATIVE_JAX,
     PALLAS,
-    SIMPLE_SOURCE_TERM,
-    WENO_FLUX_GRAVITY,
+    SIMPLE_SOURCE,
+    FOURTH_ORDER_CONSERVATIVE,
 )
 
 from _collapse import run_collapse
@@ -111,11 +111,11 @@ def plot_convergence():
     # only the last three (well-resolved) points; the simple source is a clean
     # power law throughout, so it is fit over all resolutions.
     panels = [
-        ("non-conservative source", [SIMPLE_SOURCE_TERM], SIMPLE_SOURCE_TERM, None),
+        ("non-conservative source", [SIMPLE_SOURCE], SIMPLE_SOURCE, None),
         (
             "flux-based (conservative) sources",
-            [FD_FLUX_GRAVITY, WENO_FLUX_GRAVITY],
-            WENO_FLUX_GRAVITY,
+            [SECOND_ORDER_CONSERVATIVE, FOURTH_ORDER_CONSERVATIVE],
+            FOURTH_ORDER_CONSERVATIVE,
             3,
         ),
     ]

@@ -164,7 +164,6 @@ config = SimulationConfig(
         y = BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
         z = BoundarySettings1D(OPEN_BOUNDARY, FIXED_BOUNDARY_OPEN_MOMENTUM),
     ),
-    enforce_positivity = True,
 	cooling_config = CoolingConfig(
         cooling = True,
         cooling_method = IMPLICIT_COOLING,

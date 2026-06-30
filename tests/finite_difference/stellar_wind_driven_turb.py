@@ -85,7 +85,6 @@ config = SimulationConfig(
     solver_mode = FINITE_DIFFERENCE,
     mhd = True,
     progress_bar = True,
-    enforce_positivity = True,
     dimensionality = 3,
     box_size = box_size, 
     num_cells = num_cells,

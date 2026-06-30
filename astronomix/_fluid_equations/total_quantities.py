@@ -99,13 +99,13 @@ def calculate_gravitational_energy(
     # self-gravity uses the factor 1/2 to avoid double counting the mutual
     # interaction, while a fixed external potential contributes its full
     # potential energy rho * phi_ext.
-    if config.self_gravity:
+    if config.gravity_config.self_gravity:
         self_potential = _compute_gravitational_potential(
             rho, config.grid_spacing, config, gravitational_constant
         )
         gravitational_energy = gravitational_energy + 0.5 * rho * self_potential
 
-    if config.external_potential:
+    if config.gravity_config.external_potential:
         external_potential = _pad_external_potential(
             params.gravitational_potential, rho, config, registered_variables, params
         )
@@ -159,13 +159,13 @@ def calculate_total_energy(
 
     # self-gravity carries the factor 1/2 (mutual interaction); a fixed
     # external potential contributes its full potential energy rho * phi_ext.
-    if config.self_gravity:
+    if config.gravity_config.self_gravity:
         self_potential = _compute_gravitational_potential(
             rho, config.grid_spacing, config, gravitational_constant
         )
         energy += 0.5 * rho * self_potential
 
-    if config.external_potential:
+    if config.gravity_config.external_potential:
         external_potential = _pad_external_potential(
             params.gravitational_potential, rho, config, registered_variables, params
         )
@@ -200,4 +200,6 @@ def calculate_total_mass(
     if config.dimensionality == 1:
         return jnp.sum(primitive_state[0] * helper_data.cell_volumes)
     else:
-        return jnp.sum(primitive_state[0]) * config.box_size**config.dimensionality
+        # cell-volume-weighted sum (matches the energy/momentum diagnostics):
+        # grid_spacing is a scalar, unlike box_size which is a 3-vector in 3D.
+        return jnp.sum(primitive_state[0] * config.grid_spacing**config.dimensionality)

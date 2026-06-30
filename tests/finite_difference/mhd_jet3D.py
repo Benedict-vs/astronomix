@@ -44,7 +44,6 @@ config = SimulationConfig(
     solver_mode = FINITE_DIFFERENCE,
     grid_spacing = grid_spacing,
     mhd = True,
-    enforce_positivity = True,
     progress_bar = True,
     dimensionality = 3,
     box_size = box_size,

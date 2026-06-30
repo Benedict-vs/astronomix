@@ -141,7 +141,7 @@ def _euler_flux_isothermal_x(
 
     rho = conserved_state[registered_variables.density_index]
 
-    if config.enforce_positivity:
+    if config.positivity_config.clamp_in_estimates:
         rho = jnp.maximum(rho, minimum_density)
 
     p = isothermal_sound_speed**2 * rho

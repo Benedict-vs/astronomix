@@ -242,7 +242,7 @@ SNAPSHOT_QUANTITIES = (
     SnapshotQuantity(
         field="gravitational_energy",
         is_enabled=lambda config: (
-            config.snapshot_settings.return_gravitational_energy and config.gravity
+            config.snapshot_settings.return_gravitational_energy and config.gravity_config.gravity
         ),
         per_snapshot_shape=lambda config, state_shape: (),
         compute=_compute_gravitational_energy,

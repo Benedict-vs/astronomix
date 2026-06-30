@@ -490,6 +490,7 @@ from astronomix._finite_difference._interface_fluxes._weno_pallas import (  # no
     _weno_flux_hydro_pallas_vjp_local,
     _weno_flux_mhd_iso_pallas,
     _weno_flux_mhd_pallas,
+    _weno_flux_mhd_pallas_vjp_local,
 )
 
 
@@ -553,6 +554,21 @@ def _weno_flux_axis_dispatch(
                 conserved_state, params, pallas_branch=pallas, native_branch=native,
             )
     if _mhd_pallas_flux_supported(conserved_state, config):
+        if config.differentiation_mode == BACKWARDS:
+            # Reverse mode: keep the backward on the GPU via the explicit Pallas
+            # adjoint (in-kernel jax.vjp of the shared MHD window), exactly like
+            # the hydro path, instead of transposing the native tangent.  3D,
+            # all axes; state-only; single-device — the inverse-problem regime.
+            return pallas_vjp_call(
+                conserved_state,
+                params,
+                pallas_forward=lambda s, p: _weno_flux_mhd_pallas(
+                    s, p, config, registered_variables, axis=axis
+                ),
+                pallas_backward=lambda s, p, ct: _weno_flux_mhd_pallas_vjp_local(
+                    s, ct, p, config, registered_variables, axis=axis
+                ),
+            )
         pallas = lambda s, p: _weno_flux_mhd_pallas(  # noqa: E731
             s, p, config, registered_variables, axis=axis
         )

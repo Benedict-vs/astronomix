@@ -36,6 +36,7 @@ from astronomix.initial_condition_generation.construct_primitive_state import (
 from astronomix.option_classes.simulation_config import (
     OPEN_BOUNDARY,
     BoundarySettings1D,
+    GravityConfig,
     SimulationConfig,
     finalize_config,
 )
@@ -63,8 +64,7 @@ config = SimulationConfig(
     geometry=CARTESIAN,
     box_size=BOX_SIZE,
     num_cells=NUM_CELLS,
-    self_gravity=False,
-    external_potential=True,
+    gravity_config=GravityConfig(external_potential=True),
     boundary_settings=BoundarySettings1D(
         left_boundary=OPEN_BOUNDARY,
         right_boundary=OPEN_BOUNDARY,

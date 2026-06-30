@@ -34,10 +34,11 @@ import jax
 jax.config.update("jax_enable_x64", True)
 
 from astronomix.option_classes.simulation_config import (
-    FD_FLUX_GRAVITY,
+    GravityConfig,
+    SECOND_ORDER_CONSERVATIVE,
     FINITE_DIFFERENCE,
-    SIMPLE_SOURCE_TERM,
-    WENO_FLUX_GRAVITY,
+    SIMPLE_SOURCE,
+    FOURTH_ORDER_CONSERVATIVE,
     SimulationConfig,
     SnapshotSettings,
 )
@@ -63,7 +64,6 @@ FIG_DIR = os.path.join(_HERE, "figures")
 _common_kwargs = dict(
     solver_mode=FINITE_DIFFERENCE,
     mhd=False,
-    self_gravity=True,
     dimensionality=3,
     progress_bar=False,
     memory_analysis=True,
@@ -76,7 +76,7 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, simple source",
         base_config=SimulationConfig(
-            self_gravity_version=SIMPLE_SOURCE_TERM,
+            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=SIMPLE_SOURCE),
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -84,7 +84,7 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, flux-based source",
         base_config=SimulationConfig(
-            self_gravity_version=FD_FLUX_GRAVITY,
+            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=SECOND_ORDER_CONSERVATIVE),
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -92,7 +92,7 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, corrected flux-based source",
         base_config=SimulationConfig(
-            self_gravity_version=WENO_FLUX_GRAVITY,
+            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=FOURTH_ORDER_CONSERVATIVE),
             **_common_kwargs,
         ),
         cfl=1.5,

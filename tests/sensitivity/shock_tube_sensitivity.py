@@ -59,7 +59,7 @@ from astronomix.initial_condition_generation.construct_primitive_state import co
 from astronomix.option_classes.simulation_config import (
     BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, NATIVE_JAX, PALLAS,
     OPEN_BOUNDARY, SimulationConfig, finalize_config,
-    BoundarySettings1D,
+    BoundarySettings1D, GravityConfig, PositivityConfig,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
 
@@ -91,7 +91,6 @@ def make_config_and_params(N, L, t_end, num_timesteps, solver_mode, backend=NATI
         solver_mode=solver_mode,
         geometry=CARTESIAN,
         progress_bar=False,
-        self_gravity=False,
         differentiation_mode=BACKWARDS,
         backend=backend,
         pallas_block_shape=(4, 1, 1),

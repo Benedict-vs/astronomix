@@ -1,4 +1,5 @@
 # general
+import os
 from contextlib import nullcontext
 from types import NoneType
 import jax
@@ -540,6 +541,37 @@ def _integrate_core(
                 primitive_state, dt, params.gamma, config, params,
                 helper_data_pad, registered_variables, time,
             )
+
+        # Read-only per-step deep-void probe (env-gated; no graph impact when
+        # off, bit-identical trajectory when on — it only reads the new state).
+        # Prints (t, dt, min_rho, max|v|, NaN) when |v| crosses a threshold or a
+        # non-finite appears, to observe the velocity run-up into the blow-up
+        # without perturbing the dt sequence the way a dense snapshot grid does.
+        if os.environ.get("DEEPVOID_PROBE"):
+            _thr = float(os.environ.get("DEEPVOID_PROBE_VTHR", "3.0"))
+            _di = registered_variables.density_index
+            _vx = registered_variables.velocity_index.x
+            _vy = registered_variables.velocity_index.y
+            _vz = registered_variables.velocity_index.z
+            _rho = primitive_state[_di]
+            _vmag = jnp.sqrt(
+                primitive_state[_vx] ** 2
+                + primitive_state[_vy] ** 2
+                + primitive_state[_vz] ** 2
+            )
+            _stats = jnp.stack([
+                time + dt, dt, jnp.min(_rho), jnp.max(_vmag),
+                jnp.any(~jnp.isfinite(primitive_state)).astype(jnp.float32),
+            ])
+
+            def _probe(s, thr=_thr):
+                import numpy as _np
+                t_, dt_, rmin_, vmax_, nan_ = [float(x) for x in _np.asarray(s)]
+                if vmax_ > thr or nan_ > 0 or not _np.isfinite(vmax_):
+                    print(f"[probe] t={t_:.5f} dt={dt_:.3e} min_rho={rmin_:.3e} "
+                          f"max|v|={vmax_:.4g} NaN={int(nan_)}", flush=True)
+
+            jax.debug.callback(_probe, _stats)
 
         return dt, LoopState(primitive_state, key, forcing)
 

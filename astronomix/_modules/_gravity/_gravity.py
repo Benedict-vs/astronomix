@@ -14,53 +14,26 @@ from beartype import beartype as typechecker
 from typing import Tuple, Union
 
 # astronomix data classes
-from astronomix._modules._cosmic_rays.cr_fluid_equations import speed_of_sound_crs
 from astronomix._modules._gravity._poisson_solver import (
     _compute_gravitational_potential,
 )
 from astronomix._modules._gravity._utils import _pad_external_potential
-from astronomix._finite_volume._riemann_solver._riemann_solver import _riemann_solver
 from astronomix._stencil_operations._stencil_operations import _shift, _stencil_add
 from astronomix.data_classes.simulation_helper_data import HelperData
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 from astronomix.option_classes.simulation_config import (
-    DONOR_ACCOUNTING,
-    FD_FLUX_GRAVITY,
-    GHOST_CELLS,
-    HALF_SPLIT,
-    HLLC_LM,
-    LAX_FRIEDRICHS,
-    RIEMANN_SPLIT,
-    RIEMANN_SPLIT_UNSTABLE,
-    SIMPLE_SOURCE_TERM,
-    SPLIT,
-    STATE_TYPE_ALTERED,
-    WENO_FLUX_GRAVITY,
+    SECOND_ORDER_CONSERVATIVE,
+    SIMPLE_SOURCE,
+    FOURTH_ORDER_CONSERVATIVE,
     SimulationConfig,
 )
 
 # astronomix constants
 from astronomix.option_classes.simulation_config import (
     FIELD_TYPE,
-    HLL,
-    HLLC,
-    OPEN_BOUNDARY,
     STATE_TYPE,
 )
 
-# astronomix functions
-from astronomix._geometry.boundaries import _boundary_handler
-from astronomix._finite_volume._riemann_solver.hll import _hll_solver, _hllc_solver
-from astronomix._finite_volume._state_evolution.reconstruction import (
-    _reconstruct_at_interface_split,
-    _reconstruct_at_interface_unsplit,
-)
-from astronomix._fluid_equations._fluxes import _euler_flux
-from astronomix._fluid_equations._equations import (
-    conserved_state_from_primitive,
-    primitive_state_from_conserved,
-    speed_of_sound,
-)
 from astronomix.option_classes.simulation_params import SimulationParams
 
 @partial(jax.jit, static_argnames=["grid_spacing", "config", "registered_variables"])
@@ -89,13 +62,13 @@ def _compute_total_potential(
     total_potential = jnp.zeros_like(gas_density)
 
     # self-gravity contribution from the Poisson solve
-    if config.self_gravity:
+    if config.gravity_config.self_gravity:
         total_potential = total_potential + _compute_gravitational_potential(
             gas_density, grid_spacing, config, G
         )
 
     # external potential contribution
-    if config.external_potential:
+    if config.gravity_config.external_potential:
         # the external potential is provided on the bare grid cells, so it gets
         # ghost cells matching the (here padded) density field, filled per BC
         external_potential = _pad_external_potential(
@@ -126,7 +99,7 @@ def _fd_gravity_source(
         params.gravitational_constant
     )
 
-    if config.self_gravity_version == SIMPLE_SOURCE_TERM:
+    if config.gravity_config.self_gravity_version == SIMPLE_SOURCE:
 
         for axis in range(1, config.dimensionality + 1):
             rho = primitive_state[registered_variables.density_index]
@@ -161,7 +134,7 @@ def _fd_gravity_source(
             )
 
             S += S_axis * dt
-    elif config.self_gravity_version == FD_FLUX_GRAVITY:
+    elif config.gravity_config.self_gravity_version == SECOND_ORDER_CONSERVATIVE:
 
         for axis in range(1, config.dimensionality + 1):
             rho = primitive_state[registered_variables.density_index]
@@ -240,58 +213,7 @@ def _fd_gravity_source(
         # S = S.at[registered_variables.energy_index].add(
         #     -drho * gravitational_potential
         # )
-    elif config.self_gravity_version == DONOR_ACCOUNTING:
-
-        for axis in range(1, config.dimensionality + 1):
-
-            S_axis = jnp.zeros_like(primitive_state)
-
-            # momentum source
-
-            # TODO: use higher-order
-            acceleration = -_stencil_add(
-                gravitational_potential, indices=(1, -1), factors=(1.0, -1.0), axis=axis - 1
-            ) / (2 * config. grid_spacing)
-
-            S_axis = S_axis.at[axis].set(
-                primitive_state[registered_variables.density_index] * acceleration
-            )
-
-            # energy source
-
-            # different from the FV scheme at index i in the FD scheme
-            # we have the flux from cell i to cell i+1
-            fluxes_i_to_ip1 = jnp.maximum(density_fluxes[axis - 1], 0)
-            fluxes_i_to_im1 = jnp.minimum(jnp.roll(density_fluxes[axis - 1], shift=1, axis=axis - 1), 0)
-
-            # TODO: replace with higher-order finite difference for the potential gradient
-            acc_backward = (
-                -_stencil_add(
-                    gravitational_potential,
-                    indices=(0, -1),
-                    factors=(1.0, -1.0),
-                    axis=axis - 1,
-                )
-                / config.grid_spacing
-            )
-            acc_forward = (
-                -_stencil_add(
-                    gravitational_potential,
-                    indices=(1, 0),
-                    factors=(1.0, -1.0),
-                    axis=axis - 1,
-                )
-                / config.grid_spacing
-            )
-
-            fluxes_acc = fluxes_i_to_im1 * acc_backward + fluxes_i_to_ip1 * acc_forward
-
-            S_axis = S_axis.at[registered_variables.energy_index].set(
-                fluxes_acc
-            )
-
-            S += S_axis * dt
-    elif config.self_gravity_version == WENO_FLUX_GRAVITY:
+    elif config.gravity_config.self_gravity_version == FOURTH_ORDER_CONSERVATIVE:
         for axis in range(1, config.dimensionality + 1):
             ax = axis - 1
 
@@ -411,227 +333,10 @@ def _gravitational_source_term_along_axis(
     # set momentum source
     source_term = source_term.at[axis].set(rho * acceleration)
 
-    if config.self_gravity_version == SIMPLE_SOURCE_TERM:
-        # set energy source
-        source_term = source_term.at[registered_variables.pressure_index].set(
-            rho * v_axis * acceleration
-        )
-
-    else:
-        # the other schemes are based on the reconstructed states
-        if config.first_order_fallback:
-            primitive_state_left = jnp.roll(primitive_state, shift=1, axis=axis)
-            primitive_state_right = primitive_state
-        else:
-            if config.split == SPLIT:
-                primitive_state_left, primitive_state_right = (
-                    _reconstruct_at_interface_split(
-                        primitive_state,
-                        dt,
-                        gamma,
-                        config,
-                        helper_data,
-                        registered_variables,
-                        axis,
-                    )
-                )
-            else:
-                # TODO: improve efficiency
-                # this is currently suboptimal, the reconstruction is done for all axes
-                # but we only need it for the current axis
-                primitives_left_interface, primitives_right_interface = (
-                    _reconstruct_at_interface_unsplit(
-                        primitive_state,
-                        dt,
-                        gamma,
-                        config,
-                        params,
-                        helper_data,
-                        registered_variables,
-                    )
-                )
-                primitive_state_left = primitives_left_interface[axis - 1]
-                primitive_state_right = primitives_right_interface[axis - 1]
-
-        if (
-            config.self_gravity_version == RIEMANN_SPLIT
-            or config.self_gravity_version == RIEMANN_SPLIT_UNSTABLE
-        ):
-            # improve code reuse, instead of this copied
-            # Riemann solver
-
-            if not (config.riemann_solver == HLLC or config.riemann_solver == HLLC_LM):
-                raise NotImplementedError(
-                    "The RIEMANN_SPLIT gravity scheme is currently only implemented for HLLC and HLLC_LM."
-                )
-
-            rho_L = primitive_state_left[registered_variables.density_index]
-            u_L = primitive_state_left[axis]
-
-            rho_R = primitive_state_right[registered_variables.density_index]
-            u_R = primitive_state_right[axis]
-
-            p_L = primitive_state_left[registered_variables.pressure_index]
-            p_R = primitive_state_right[registered_variables.pressure_index]
-
-            # calculate the sound speeds
-            c_L = speed_of_sound(rho_L, p_L, gamma)
-            c_R = speed_of_sound(rho_R, p_R, gamma)
-
-            # get the left and right states and fluxes
-            F_L = _euler_flux(
-                primitive_state_left, gamma, config, registered_variables, axis
-            )
-            F_R = _euler_flux(
-                primitive_state_right, gamma, config, registered_variables, axis
-            )
-
-            # Roe average of the velocity
-            u_hat = (jnp.sqrt(rho_L) * u_L + jnp.sqrt(rho_R) * u_R) / (
-                jnp.sqrt(rho_L) + jnp.sqrt(rho_R)
-            )
-
-            # Roe average of the sound speed
-            c_hat_squared = (c_L**2 * jnp.sqrt(rho_L) + c_R**2 * jnp.sqrt(rho_R)) / (
-                jnp.sqrt(rho_L) + jnp.sqrt(rho_R)
-            ) + 0.5 * (
-                jnp.sqrt(rho_L)
-                * jnp.sqrt(rho_R)
-                / (jnp.sqrt(rho_L) + jnp.sqrt(rho_R)) ** 2
-            ) * (u_R - u_L) ** 2
-            c_hat = jnp.sqrt(c_hat_squared)
-
-            # Einfeldt estimates of maximum left and right signal speeds
-            S_L = jnp.minimum(u_L - c_L, u_hat - c_hat)
-            S_R = jnp.maximum(u_R + c_R, u_hat + c_hat)
-
-            # contact wave signal speed
-            S_star = (
-                p_R - p_L + rho_L * u_L * (S_L - u_L) - rho_R * u_R * (S_R - u_R)
-            ) / (rho_L * (S_L - u_L) - rho_R * (S_R - u_R))
-
-            # intermediate states
-            U_L = conserved_state_from_primitive(
-                primitive_state_left, gamma, config, registered_variables
-            )
-            U_R = conserved_state_from_primitive(
-                primitive_state_right, gamma, config, registered_variables
-            )
-
-            U_star_L = U_L.at[axis].set(rho_L * S_star)
-            U_star_L = U_star_L.at[registered_variables.pressure_index].add(
-                (S_star - u_L) * (rho_L * S_star + p_L / (S_L - u_L))
-            )
-            U_star_L = U_star_L * (S_L - u_L) / (S_L - S_star)
-
-            U_star_R = U_R.at[axis].set(rho_R * S_star)
-            U_star_R = U_star_R.at[registered_variables.pressure_index].add(
-                (S_star - u_R) * (rho_R * S_star + p_R / (S_R - u_R))
-            )
-            U_star_R = U_star_R * (S_R - u_R) / (S_R - S_star)
-
-            # HLLC-LM adaptation
-            # following
-            # https://doi.org/10.1016/j.jcp.2020.109762
-            if config.riemann_solver == HLLC_LM:
-                Ma_limit = 0.1
-                Ma_local = jnp.maximum(jnp.abs(u_L / c_L), jnp.abs(u_R / c_R))
-                phi = jnp.sin(jnp.minimum(1, Ma_local / Ma_limit) * jnp.pi / 2)
-                S_Llm = S_L * phi
-                S_Rlm = S_R * phi
-
-            if config.riemann_solver == HLLC_LM:
-                S_Lstar = S_Llm
-                S_Rstar = S_Rlm
-            else:
-                S_Lstar = S_L
-                S_Rstar = S_R
-
-            bulk_flux_star = 0.5 * (F_L + F_R)
-            dissipation_term_star = 0.5 * (
-                S_Lstar * (U_star_L - U_L)
-                + jnp.abs(S_star) * (U_star_L - U_star_R)
-                + S_Rstar * (U_star_R - U_R)
-            )
-
-            F_star = bulk_flux_star + dissipation_term_star
-
-            fluxes = jnp.where(S_L >= 0, F_L, F_star)
-            fluxes = jnp.where(S_R <= 0, F_R, fluxes)
-
-            # what cell i accounts for regarding the flux between i-1 and i
-            fluxes_i_to_im1 = 0.5 * F_R + jnp.minimum(dissipation_term_star, 0)
-
-            # what cell i-1 accounts for regarding the flux between i-1 and i
-            fluxes_im1 = 0.5 * F_L + jnp.maximum(dissipation_term_star, 0)
-
-            if config.self_gravity_version == RIEMANN_SPLIT_UNSTABLE:
-                # stable but big spread in specific entropy
-                # fluxes_i_to_im1 = jnp.where(S_R <= 0, F_R, fluxes_i_to_im1)
-                # fluxes_i_to_im1 = jnp.where(S_L >= 0, 0, fluxes_i_to_im1)
-                # fluxes_im1 = jnp.where(S_L >= 0, F_L, fluxes_im1)
-                # fluxes_im1 = jnp.where(S_R <= 0, 0, fluxes_im1)
-
-                # less stable but reduced spread
-
-                fluxes_i_to_im1 = jnp.where(S_R <= 0, F_R / 2, fluxes_i_to_im1)
-                fluxes_i_to_im1 = jnp.where(S_L >= 0, F_L / 2, fluxes_i_to_im1)
-                fluxes_im1 = jnp.where(S_L >= 0, F_L / 2, fluxes_im1)
-                fluxes_im1 = jnp.where(S_R <= 0, F_R / 2, fluxes_im1)
-
-            fluxes_i_to_ip1 = jnp.roll(fluxes_im1, shift=-1, axis=axis)
-
-        elif config.self_gravity_version == DONOR_ACCOUNTING:
-            # at index i, the fluxes array contains the flux from i-1 to i
-            fluxes = _riemann_solver(
-                primitive_state_left,
-                primitive_state_right,
-                primitive_state,
-                gamma,
-                config,
-                registered_variables,
-                axis,
-            )
-            fluxes_i_to_ip1 = jnp.maximum(jnp.roll(fluxes, shift=-1, axis=axis), 0)
-            fluxes_i_to_im1 = jnp.minimum(fluxes, 0)
-
-        elif config.self_gravity_version == HALF_SPLIT:
-            # at index i, the fluxes array contains the flux from i-1 to i
-            fluxes = _riemann_solver(
-                primitive_state_left,
-                primitive_state_right,
-                primitive_state,
-                gamma,
-                config,
-                registered_variables,
-                axis,
-            )
-            fluxes_i_to_ip1 = 0.5 * jnp.roll(fluxes, shift=-1, axis=axis)
-            fluxes_i_to_im1 = 0.5 * fluxes
-
-        acc_backward = (
-            -_stencil_add(
-                gravitational_potential,
-                indices=(0, -1),
-                factors=(1.0, -1.0),
-                axis=axis - 1,
-            )
-            / grid_spacing
-        )
-        acc_forward = (
-            -_stencil_add(
-                gravitational_potential,
-                indices=(1, 0),
-                factors=(1.0, -1.0),
-                axis=axis - 1,
-            )
-            / grid_spacing
-        )
-
-        fluxes_acc = fluxes_i_to_im1 * acc_backward + fluxes_i_to_ip1 * acc_forward
-
-        source_term = source_term.at[registered_variables.pressure_index].set(
-            fluxes_acc[0]
-        )
+    # finite-volume self-gravity supports only the SIMPLE_SOURCE coupling
+    # (the FD-only conservative flux schemes live in _fd_gravity_source).
+    source_term = source_term.at[registered_variables.pressure_index].set(
+        rho * v_axis * acceleration
+    )
 
     return source_term

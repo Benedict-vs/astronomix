@@ -85,13 +85,15 @@ from astronomix.option_classes.simulation_config import (
     PALLAS,
     BoundarySettings,
     BoundarySettings1D,
-    FD_FLUX_GRAVITY,
+    SECOND_ORDER_CONSERVATIVE,
     FINITE_DIFFERENCE,
     FORWARDS,
     PERIODIC_BOUNDARY,
-    SIMPLE_SOURCE_TERM,
+    SIMPLE_SOURCE,
     SnapshotSettings,
-    WENO_FLUX_GRAVITY,
+    FOURTH_ORDER_CONSERVATIVE,
+    GravityConfig,
+    PositivityConfig,
     finalize_config,
 )
 from astronomix._modules._turbulent_forcing._turbulent_forcing_options import (
@@ -145,9 +147,9 @@ T_STIR = 3 * T_CROSS             # reach the stationary plateau (settles by ~1.8
 
 # Consistent scheme naming / styling, matching the other gravity figures.
 SCHEME_LABELS = {
-    SIMPLE_SOURCE_TERM: "FD, simple source",
-    FD_FLUX_GRAVITY: "FD, flux-based source",
-    WENO_FLUX_GRAVITY: "FD, corrected flux-based source",
+    SIMPLE_SOURCE: "FD, simple source",
+    SECOND_ORDER_CONSERVATIVE: "FD, flux-based source",
+    FOURTH_ORDER_CONSERVATIVE: "FD, corrected flux-based source",
 }
 
 
@@ -163,11 +165,11 @@ class Scheme(NamedTuple):
 
 
 SCHEMES = [
-    Scheme(SIMPLE_SOURCE_TERM, "o", ":", "C0"),
-    Scheme(FD_FLUX_GRAVITY, "s", "-.", "C1"),
-    Scheme(WENO_FLUX_GRAVITY, "^", "--", "C2"),
+    Scheme(SIMPLE_SOURCE, "o", ":", "C0"),
+    Scheme(SECOND_ORDER_CONSERVATIVE, "s", "-.", "C1"),
+    Scheme(FOURTH_ORDER_CONSERVATIVE, "^", "--", "C2"),
 ]
-STRUCTURE_SCHEME = WENO_FLUX_GRAVITY
+STRUCTURE_SCHEME = FOURTH_ORDER_CONSERVATIVE
 
 
 _PERIODIC = BoundarySettings(
@@ -182,8 +184,7 @@ def make_stir_config(num_cells):
     return SimulationConfig(
         solver_mode=FINITE_DIFFERENCE,
         progress_bar=False,
-        self_gravity=False,
-        enforce_positivity=False,
+        positivity_config=PositivityConfig(default_positivity_protection=False),
         mhd=False,
         dimensionality=3,
         box_size=BOX_SIZE,
@@ -207,9 +208,11 @@ def make_measure_config(num_cells, self_gravity_version, want_states):
     return SimulationConfig(
         solver_mode=FINITE_DIFFERENCE,
         progress_bar=False,
-        self_gravity=True,
-        self_gravity_version=self_gravity_version,
-        enforce_positivity=False,
+        gravity_config=GravityConfig(
+            self_gravity=True,
+            self_gravity_version=self_gravity_version,
+        ),
+        positivity_config=PositivityConfig(default_positivity_protection=False),
         mhd=False,
         dimensionality=3,
         box_size=BOX_SIZE,
@@ -386,8 +389,8 @@ def plot_convergence():
     # trends. Split into two panels by conservation class, each free to scale.
     by_version = {s.self_gravity_version: s for s in SCHEMES}
     panels = [
-        ("non-conservative source", [SIMPLE_SOURCE_TERM]),
-        ("flux-based (conservative) sources", [FD_FLUX_GRAVITY, WENO_FLUX_GRAVITY]),
+        ("non-conservative source", [SIMPLE_SOURCE]),
+        ("flux-based (conservative) sources", [SECOND_ORDER_CONSERVATIVE, FOURTH_ORDER_CONSERVATIVE]),
     ]
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharex=True)

@@ -48,6 +48,7 @@ from astronomix.option_classes.simulation_config import (
     BoundarySettings,
     BoundarySettings1D,
     FINITE_DIFFERENCE,
+    GravityConfig,
     PERIODIC_BOUNDARY,
     PERIODIC_ROLL,
     StaticFloatVector,
@@ -102,8 +103,10 @@ def jeans_l1_error(num_cells, self_gravity_version):
 
     config = SimulationConfig(
         solver_mode=FINITE_DIFFERENCE,
-        self_gravity=True,
-        self_gravity_version=self_gravity_version,
+        gravity_config=GravityConfig(
+            self_gravity=True,
+            self_gravity_version=self_gravity_version,
+        ),
         boundary_handling=PERIODIC_ROLL,
         num_ghost_cells=0,
         mhd=False,

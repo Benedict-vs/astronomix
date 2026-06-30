@@ -137,7 +137,7 @@ def primitive_state_from_conserved_mhd(
     primitive_state = primitive_state.at[registered_variables.velocity_index.y].set(uy)
     primitive_state = primitive_state.at[registered_variables.velocity_index.z].set(uz)
 
-    if config.enforce_positivity:
+    if config.positivity_config.clamp_in_estimates:
         # enforce positivity of density and pressure
         primitive_state = primitive_state.at[registered_variables.density_index].set(
             jnp.maximum(
@@ -163,7 +163,7 @@ def primitive_state_from_conserved_isothermal(
 
     rho = conserved_state[registered_variables.density_index]
 
-    if config.enforce_positivity:
+    if config.positivity_config.clamp_in_estimates:
         rho = jnp.maximum(rho, minimum_density)
     
     if config.dimensionality == 1 and not config.mhd:

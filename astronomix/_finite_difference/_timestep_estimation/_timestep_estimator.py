@@ -78,12 +78,12 @@ def _cfl_time_step_fd_mhd_fast(
 
     if config.equation_of_state == IDEAL_GAS:
         pressure = primitive_state[registered_variables.pressure_index]
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho = jnp.maximum(rho, params.minimum_density)
             pressure = jnp.maximum(pressure, params.minimum_pressure)
         cs2 = jnp.maximum(gamma * pressure / rho, 1e-12)
     else:  # ISOTHERMAL
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho = jnp.maximum(rho, params.minimum_density)
         cs2 = jnp.full_like(rho, params.isothermal_sound_speed ** 2)
 
@@ -105,7 +105,7 @@ def _cfl_time_step_fd_mhd_fast(
     dt_cfl = C_CFL * grid_spacing / (lambda_x + lambda_y + lambda_z)
 
     if config.diffusion:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -121,7 +121,7 @@ def _cfl_time_step_fd_mhd_fast(
 
     # conductive (parabolic) time step constraint
     if config.thermal_conduction:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min_c = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -228,7 +228,7 @@ def _cfl_time_step_fd(
 
     # viscous time step constraint
     if config.diffusion:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -246,7 +246,7 @@ def _cfl_time_step_fd(
 
     # conductive (parabolic) time step constraint
     if config.thermal_conduction:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min_c = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -341,7 +341,7 @@ def _cfl_time_step_fd(
 
 #     # viscous time step constraint
 #     if config.diffusion:
-#         if config.enforce_positivity:
+#         if config.positivity_config.clamp_in_estimates:
 #             rho_min = jnp.maximum(
 #                 jnp.min(primitive_state[registered_variables.density_index]),
 #                 params.minimum_density,
@@ -449,7 +449,7 @@ def _cfl_time_step_fd_hydro_native(
     # viscous time step constraint
     if config.diffusion:
         
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -467,7 +467,7 @@ def _cfl_time_step_fd_hydro_native(
 
     # conductive (parabolic) time step constraint
     if config.thermal_conduction:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min_c = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -547,7 +547,7 @@ def _cfl_time_step_fd_hydro_fast(
 
     if config.equation_of_state == IDEAL_GAS:
         pressure = primitive_state[registered_variables.pressure_index]
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho = jnp.maximum(rho, params.minimum_density)
             pressure = jnp.maximum(pressure, params.minimum_pressure)
         sound_speed = jnp.sqrt(jnp.maximum(gamma * pressure / rho, 1e-12))
@@ -568,7 +568,7 @@ def _cfl_time_step_fd_hydro_fast(
     dt_cfl = jnp.minimum(dt_cfl, dt_max)
 
     if config.diffusion:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,
@@ -586,7 +586,7 @@ def _cfl_time_step_fd_hydro_fast(
 
     # conductive (parabolic) time step constraint
     if config.thermal_conduction:
-        if config.enforce_positivity:
+        if config.positivity_config.clamp_in_estimates:
             rho_min_c = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
                 params.minimum_density,

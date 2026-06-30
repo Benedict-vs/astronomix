@@ -108,7 +108,6 @@ for M_A_aim in M_A_aim_list:
             progress_bar = True,
             dimensionality = 3,
             num_cells = 64,
-            enforce_positivity = False, # only necessary for high Mach turbulence
             box_size = 1.0,
             mhd = True,
             boundary_settings=BoundarySettings(
