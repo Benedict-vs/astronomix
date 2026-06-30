@@ -32,12 +32,14 @@ def _enforce_positivity_native(
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
     max_velocity: Union[float, Float[Array, ""]],
+    max_pressure_over_density: Union[float, Float[Array, ""]],
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     return _enforce_positivity_native_impl(
         conserved_state, config, gamma,
-        minimum_density, minimum_pressure, max_velocity, registered_variables,
+        minimum_density, minimum_pressure, max_velocity,
+        max_pressure_over_density, registered_variables,
     )
 
 
@@ -51,22 +53,24 @@ def _enforce_positivity(
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
     max_velocity: Union[float, Float[Array, ""]],
+    max_pressure_over_density: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     if _enforce_positivity_pallas_supported(conserved_state, config):
-        pallas = lambda s, g, mr, mp, mv: _enforce_positivity_pallas(  # noqa: E731
-            s, config, g, mr, mp, mv, registered_variables,
+        pallas = lambda s, g, mr, mp, mv, mpod: _enforce_positivity_pallas(  # noqa: E731
+            s, config, g, mr, mp, mv, mpod, registered_variables,
         )
-        native = lambda s, g, mr, mp, mv: _enforce_positivity_native(  # noqa: E731
-            s, g, mr, mp, mv, config, registered_variables,
+        native = lambda s, g, mr, mp, mv, mpod: _enforce_positivity_native(  # noqa: E731
+            s, g, mr, mp, mv, mpod, config, registered_variables,
         )
         return diffable_pallas_call_n(
-            (conserved_state, gamma, minimum_density, minimum_pressure, max_velocity),
+            (conserved_state, gamma, minimum_density, minimum_pressure, max_velocity,
+             max_pressure_over_density),
             pallas_branch=pallas, native_branch=native,
         )
     return _enforce_positivity_native(
         conserved_state, gamma, minimum_density, minimum_pressure, max_velocity,
-        config, registered_variables,
+        max_pressure_over_density, config, registered_variables,
     )
 
 
@@ -77,6 +81,7 @@ def _enforce_positivity_native_impl(
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
     max_velocity: Union[float, Float[Array, ""]],
+    max_pressure_over_density: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     # Optional NaN/inf backstop: jnp.maximum(NaN, floor) = NaN, so a non-finite
@@ -150,6 +155,18 @@ def _enforce_positivity_native_impl(
         
         pressure = jnp.maximum(pressure, minimum_pressure)
 
+        # Temperature ceiling (config.positivity_temperature_clip): cap P / rho at
+        # max_pressure_over_density for EVERY cell, the thermal twin of the
+        # velocity clip below. rho is already floored, so this bounds
+        # T = (P / rho) * T_factor at the requested ceiling and, with it, the
+        # sound speed c_s = sqrt(gamma P / rho) — preventing a near-floor-density
+        # cell that was handed a reconstruction energy overshoot from collapsing
+        # the CFL timestep. Applied right after the pressure floor so the energy
+        # rebuilt below carries the bounded thermal part; dense gas (small P / rho)
+        # is untouched.
+        if config.positivity_temperature_clip:
+            pressure = jnp.minimum(pressure, rho * max_pressure_over_density)
+
         # Global velocity ceiling (config.positivity_velocity_clip): cap |v| at
         # max_velocity for EVERY cell, not just sub-floor ones. The v = momentum /
         # rho runaway forms in the near-floor band (rho just ABOVE the floor) where
@@ -215,25 +232,27 @@ def _redistribute_positivity(
     max_velocity: Union[float, Float[Array, ""]],
     gamma: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
+    max_pressure_over_density: Union[float, Float[Array, ""]],
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     """Dispatch: Pallas neighbour-redistribution kernel when supported, else the
     native-JAX stencil. AD (jvp/vjp) routes through the native branch."""
     if _redistribute_positivity_pallas_supported(conserved_state, config):
-        pallas = lambda s, thr, vmax, g, pmin: _redistribute_positivity_pallas(  # noqa: E731
-            s, thr, vmax, g, pmin, config, registered_variables,
+        pallas = lambda s, thr, vmax, g, pmin, mpod: _redistribute_positivity_pallas(  # noqa: E731
+            s, thr, vmax, g, pmin, mpod, config, registered_variables,
         )
-        native = lambda s, thr, vmax, g, pmin: _redistribute_positivity_native(  # noqa: E731
-            s, thr, vmax, g, pmin, config, registered_variables,
+        native = lambda s, thr, vmax, g, pmin, mpod: _redistribute_positivity_native(  # noqa: E731
+            s, thr, vmax, g, pmin, mpod, config, registered_variables,
         )
         return diffable_pallas_call_n(
-            (conserved_state, threshold, max_velocity, gamma, minimum_pressure),
+            (conserved_state, threshold, max_velocity, gamma, minimum_pressure,
+             max_pressure_over_density),
             pallas_branch=pallas, native_branch=native,
         )
     return _redistribute_positivity_native(
         conserved_state, threshold, max_velocity, gamma, minimum_pressure,
-        config, registered_variables,
+        max_pressure_over_density, config, registered_variables,
     )
 
 
@@ -243,6 +262,7 @@ def _redistribute_positivity_native(
     max_velocity: Union[float, Float[Array, ""]],
     gamma: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
+    max_pressure_over_density: Union[float, Float[Array, ""]],
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
@@ -311,7 +331,7 @@ def _redistribute_positivity_native(
         out = out.at[ei].set(jnp.where(is_invalid, E_patched, E))
         out = _enforce_positivity_native_impl(
             out, config, gamma, threshold, minimum_pressure, max_velocity,
-            registered_variables,
+            max_pressure_over_density, registered_variables,
         )
 
     return out
@@ -325,6 +345,7 @@ def _apply_stage_positivity(
     minimum_density: Union[float, Float[Array, ""]],
     minimum_pressure: Union[float, Float[Array, ""]],
     positivity_max_velocity: Union[float, Float[Array, ""]],
+    positivity_max_pressure_over_density: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
     """Dispatch a positivity mode onto a conserved state (``mode`` is static)."""
@@ -332,12 +353,13 @@ def _apply_stage_positivity(
         return _enforce_positivity(
             conserved_state, config, gamma,
             minimum_density, minimum_pressure, positivity_max_velocity,
-            registered_variables,
+            positivity_max_pressure_over_density, registered_variables,
         )
     if mode == POSITIVITY_REDISTRIBUTE:
         return _redistribute_positivity(
             conserved_state, minimum_density, positivity_max_velocity, gamma,
-            minimum_pressure, config, registered_variables,
+            minimum_pressure, positivity_max_pressure_over_density,
+            config, registered_variables,
         )
     return conserved_state
 

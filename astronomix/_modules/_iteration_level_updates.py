@@ -176,6 +176,19 @@ def _iteration_level_updates(
                     primitive_state[registered_variables.pressure_index], params.minimum_pressure
                 )
             )
+            # Temperature ceiling (config.positivity_temperature_clip): cap P / rho
+            # at params.positivity_max_pressure_over_density in primitive space too,
+            # the per-step twin of the conserved-state clamp in _enforce_positivity.
+            # rho is the already-floored density set above, so this bounds the
+            # sound speed before the next evolution stage.
+            if config.positivity_temperature_clip:
+                rho = primitive_state[registered_variables.density_index]
+                primitive_state = primitive_state.at[registered_variables.pressure_index].set(
+                    jnp.minimum(
+                        primitive_state[registered_variables.pressure_index],
+                        rho * params.positivity_max_pressure_over_density,
+                    )
+                )
     elif config.positivity_per_step_mode == POSITIVITY_REDISTRIBUTE:
         _forcing_runs_prot = (
             config.turbulent_forcing_config.turbulent_forcing

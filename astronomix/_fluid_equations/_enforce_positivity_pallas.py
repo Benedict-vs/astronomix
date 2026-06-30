@@ -54,6 +54,7 @@ def _enforce_positivity_pallas(
     minimum_density,
     minimum_pressure,
     max_velocity,
+    max_pressure_over_density,
     registered_variables: RegisteredVariables,
 ):
     """In-place Pallas positivity floor.  Same arithmetic as the native
@@ -78,6 +79,7 @@ def _enforce_positivity_pallas(
             minimum_density,
             minimum_pressure,
             max_velocity,
+            max_pressure_over_density,
             registered_variables,
         )
 
@@ -96,6 +98,7 @@ def _enforce_positivity_pallas_local(
     minimum_density,
     minimum_pressure,
     max_velocity,
+    max_pressure_over_density,
     registered_variables: RegisteredVariables,
 ):
     """Single-shard kernel build.  Called either directly (single device)
@@ -132,6 +135,7 @@ def _enforce_positivity_pallas_local(
 
     vacuum_rest = bool(config.positivity_vacuum_rest)
     velocity_clip = bool(config.positivity_velocity_clip)
+    temperature_clip = bool(config.positivity_temperature_clip)
     if ndim == 1:
         MOM_VARS = (MX,)
     elif ndim == 2:
@@ -153,7 +157,7 @@ def _enforce_positivity_pallas_local(
         in_spec = pl.BlockSpec(conserved_state.shape, lambda bi, bj, bk: (0, 0, 0, 0))
     scalar_spec = pl.BlockSpec((), lambda bi, bj, bk: ())
 
-    def kernel(q_in_ref, gamma_ref, rhomin_ref, pmin_ref, vmax_ref, q_out_ref):
+    def kernel(q_in_ref, gamma_ref, rhomin_ref, pmin_ref, vmax_ref, mpod_ref, q_out_ref):
         bi = pl.program_id(0)
         bj = pl.program_id(1)
         bk = pl.program_id(2)
@@ -172,6 +176,7 @@ def _enforce_positivity_pallas_local(
         rhomin = rhomin_ref[()]
         pmin = pmin_ref[()]
         vmax = vmax_ref[()]
+        mpod = mpod_ref[()]
 
         nan_safe = bool(config.positivity_nan_safe)
 
@@ -222,6 +227,15 @@ def _enforce_positivity_pallas_local(
                 pressure = gm1 * (energy - 0.5 * rho_floored * v2)
             pressure_floored = jnp.maximum(pressure, pmin)
 
+            # Temperature ceiling (config.positivity_temperature_clip): mirror the
+            # native clamp — cap P / rho at mpod (= max_pressure_over_density) so
+            # T = (P / rho) * T_factor and the sound speed stay bounded in
+            # near-floor-density cells.  Applied right after the pressure floor and
+            # before the velocity-clip recompute, so the energy rebuilt below
+            # carries the bounded thermal part.  Bit-identical no-op when off.
+            if temperature_clip:
+                pressure_floored = jnp.minimum(pressure_floored, rho_floored * mpod)
+
             # Global velocity ceiling (config.positivity_velocity_clip): mirror the
             # native clip — cap |v| per component, write the capped momentum, and
             # recompute v2 from the clipped velocities so the energy below carries
@@ -268,7 +282,7 @@ def _enforce_positivity_pallas_local(
         kernel,
         out_shape=jax.ShapeDtypeStruct(conserved_state.shape, conserved_state.dtype),
         grid=grid,
-        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec],
+        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec],
         out_specs=out_spec,
         interpret=config.pallas_interpret,
         name="enforce_positivity",
@@ -279,6 +293,7 @@ def _enforce_positivity_pallas_local(
         jnp.asarray(minimum_density, dtype=conserved_state.dtype),
         jnp.asarray(minimum_pressure, dtype=conserved_state.dtype),
         jnp.asarray(max_velocity, dtype=conserved_state.dtype),
+        jnp.asarray(max_pressure_over_density, dtype=conserved_state.dtype),
     )
 
 
@@ -319,6 +334,7 @@ def _redistribute_positivity_pallas(
     max_velocity,
     gamma,
     minimum_pressure,
+    max_pressure_over_density,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ):
@@ -330,7 +346,7 @@ def _redistribute_positivity_pallas(
     def _local(state_local):
         return _redistribute_positivity_pallas_local(
             state_local, threshold, max_velocity, gamma, minimum_pressure,
-            config, registered_variables,
+            max_pressure_over_density, config, registered_variables,
         )
 
     return _pallas_call_sharded(
@@ -347,12 +363,14 @@ def _redistribute_positivity_pallas_local(
     max_velocity,
     gamma,
     minimum_pressure,
+    max_pressure_over_density,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ):
     """Single-shard kernel build; shapes read from ``conserved_state.shape``."""
     is_mhd = config.mhd
     is_ideal = (config.equation_of_state == IDEAL_GAS)
+    temperature_clip = bool(config.positivity_temperature_clip)
     ndim = int(config.dimensionality)
     nvars = int(conserved_state.shape[0])
     spatial_shape = tuple(int(x) for x in conserved_state.shape[1:])
@@ -395,7 +413,7 @@ def _redistribute_positivity_pallas_local(
 
     offsets = list(itertools.product((-1, 0, 1), repeat=ndim))
 
-    def kernel(q_in_ref, thr_ref, vmax_ref, gamma_ref, pmin_ref, q_out_ref):
+    def kernel(q_in_ref, thr_ref, vmax_ref, gamma_ref, pmin_ref, mpod_ref, q_out_ref):
         bi = pl.program_id(0)
         bj = pl.program_id(1)
         bk = pl.program_id(2)
@@ -414,6 +432,7 @@ def _redistribute_positivity_pallas_local(
         gamma = gamma_ref[()]
         gm1 = gamma - 1.0
         pmin = pmin_ref[()]
+        mpod = mpod_ref[()]
 
         def read(var, off):
             if ndim == 1:
@@ -471,10 +490,14 @@ def _redistribute_positivity_pallas_local(
                       + read(BZ, zero_off) ** 2)
                 pressure = gm1 * (E_red - 0.5 * rho_f * v2 - 0.5 * b2)
                 pressure = jnp.maximum(pressure, pmin)
+                if temperature_clip:
+                    pressure = jnp.minimum(pressure, rho_f * mpod)
                 E_new = pressure / gm1 + 0.5 * rho_f * v2 + 0.5 * b2
             else:
                 pressure = gm1 * (E_red - 0.5 * rho_f * v2)
                 pressure = jnp.maximum(pressure, pmin)
+                if temperature_clip:
+                    pressure = jnp.minimum(pressure, rho_f * mpod)
                 E_new = pressure / gm1 + 0.5 * rho_f * v2
             rho_new = rho_f
 
@@ -499,7 +522,7 @@ def _redistribute_positivity_pallas_local(
         kernel,
         out_shape=jax.ShapeDtypeStruct(conserved_state.shape, conserved_state.dtype),
         grid=grid,
-        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec],
+        in_specs=[in_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec, scalar_spec],
         out_specs=out_spec,
         interpret=config.pallas_interpret,
         name="redistribute_positivity",
@@ -510,4 +533,5 @@ def _redistribute_positivity_pallas_local(
         jnp.asarray(max_velocity, dtype=conserved_state.dtype),
         jnp.asarray(gamma, dtype=conserved_state.dtype),
         jnp.asarray(minimum_pressure, dtype=conserved_state.dtype),
+        jnp.asarray(max_pressure_over_density, dtype=conserved_state.dtype),
     )

@@ -370,6 +370,18 @@ class SimulationConfig(NamedTuple):
     #: and only the unphysical kinetic excess is discarded. Off by default.
     positivity_velocity_clip: bool = False
 
+    #: Temperature ceiling in the density-floor enforcement (ideal gas), the
+    #: thermal twin of ``positivity_velocity_clip``. When True, ``P / rho`` is
+    #: capped at ``params.positivity_max_pressure_over_density`` for EVERY cell.
+    #: Without it, a near-floor-density cell handed a reconstruction energy
+    #: overshoot keeps a large ``P`` over a floored ``rho``, so ``c_s = sqrt(gamma
+    #: P / rho)`` blows up and the CFL timestep collapses (the floors and the
+    #: velocity clip are all *lower* bounds / kinetic, and never reach this). The
+    #: cap is applied right after the pressure floor, so only the unphysical
+    #: thermal excess of rarefied cells is removed and dense gas is untouched.
+    #: Off by default.
+    positivity_temperature_clip: bool = False
+
     #: Self gravity switch, currently only
     #: for periodic boundaries.
     self_gravity: bool = False

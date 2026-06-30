@@ -84,6 +84,17 @@ class SimulationParams(NamedTuple):
     #: ``POSITIVITY_REDISTRIBUTE``.
     positivity_max_velocity: float = 50.0
 
+    #: Upper bound on ``P / rho`` (specific internal energy ∝ temperature) in the
+    #: density-floor enforcement (ideal gas). The thermal twin of
+    #: ``positivity_max_velocity``: only used when
+    #: ``config.positivity_temperature_clip`` is True. The solver is unit-agnostic,
+    #: so the cap is on ``P / rho`` in code units rather than an absolute
+    #: temperature; a caller with a code-units-to-Kelvin factor ``T_factor``
+    #: (``T = (P / rho) * T_factor``) sets this to ``T_max / T_factor``. The large
+    #: default is effectively no-op so enabling the flag without setting a ceiling
+    #: does not alter results.
+    positivity_max_pressure_over_density: float = 1e20
+
     #: The maximum time step.
     dt_max: float = jnp.inf
 
