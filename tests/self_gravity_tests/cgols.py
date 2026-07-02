@@ -13,6 +13,8 @@ the paper's cooling curve and notes on the radiative B/C series.
 # TODO: move all cgols related code and artifacts into tests/self_gravity_tests/cgols/
 # with seperate folder for benchmarks etc. everything neatly organised.
 # TODO: cleanup code including removing previous testing and comments related to this
+# (especially long comments which are not relevant to the final code)
+# TODO: check if all implemented floors are physically correct and compare to cgols paper
 
 # ==== GPU selection / multi-GPU domain decomposition ====
 from autocvd import autocvd
@@ -34,8 +36,9 @@ from autocvd import autocvd
 # fixed-step benchmark without editing this file.
 import ast
 import os
+import time
 
-SHARD_SPLIT = ast.literal_eval(os.environ.get("CGOLS_SHARD_SPLIT", "(1, 2, 2, 1)"))
+SHARD_SPLIT = ast.literal_eval(os.environ.get("CGOLS_SHARD_SPLIT", "(1, 1, 1, 1)"))
 NUM_GPUS = SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3]
 
 autocvd(num_gpus=NUM_GPUS)
@@ -148,6 +151,9 @@ TOTAL_TIME = 75 * u.Myr
 END_TIME_FRACTION = 1
 END_TIME = END_TIME_FRACTION * TOTAL_TIME
 
+# Injection radius
+INJ_RAD = 300 # pc
+
 # Number of evenly-spaced intermediate snapshots to offload to the host during the
 # run (for the animation and the wind time-series). These are cheap 2D slices /
 # 1D reductions, not full 3D states (full states would be ~5 GB each and OOM the
@@ -170,6 +176,13 @@ IC_TAG = os.environ.get("CGOLS_IC_TAG", "")
 # snapshot I/O. Used by cgols_scaling.py to measure sec/step and peak memory
 # without a multi-hour run. 0 = normal production run.
 BENCH_STEPS = int(os.environ.get("CGOLS_BENCH_STEPS", "0"))
+
+# Feedback switch-on shape. The paper (Schneider & Robertson 2018) turns the wind
+# on as a step into the low state at 5 Myr; we default to a 1 Myr ramp for
+# explicit-scheme stability (see build_cgols_wind_params). Set CGOLS_STEP_ONSET=1
+# to restore the paper-faithful instantaneous step and test whether the
+# positivity clips make it survivable.
+STEP_ONSET = os.environ.get("CGOLS_STEP_ONSET", "0") == "1"
 
 
 def _ic_state_path():
@@ -259,18 +272,21 @@ def build_cgols_wind_params():
     mdot_low, mdot_high = mdot_to_code(1.5), mdot_to_code(12.0)
     edot_low, edot_high = edot_to_code(1.5e42), edot_to_code(5.4e42)
 
-    # Feedback turns on with a smooth 1 Myr ramp (5 -> 6 Myr) rather than a
-    # near-instantaneous step: the abrupt switch-on is a strong transient for
-    # the explicit scheme. All other transitions are the paper's 5 Myr linear
-    # ramps via interpolation.
-    knot_times_myr = jnp.array([0.0, 5.0, 6.0, 10.0, 40.0, 45.0])
+    # Feedback onset. The paper switches straight into the low state at 5 Myr
+    # (a step); we default to a smooth 1 Myr ramp (5 -> 6 Myr) because the abrupt
+    # switch-on is a strong transient for the explicit WENO scheme. Set
+    # CGOLS_STEP_ONSET=1 to restore the paper-faithful step (duplicate 5 Myr knot,
+    # so jnp.interp jumps 0 -> low at t = 5 Myr). All other transitions are the
+    # paper's 5 Myr linear ramps via interpolation either way.
+    onset_myr = 5.0 if STEP_ONSET else 6.0
+    knot_times_myr = jnp.array([0.0, 5.0, onset_myr, 10.0, 40.0, 45.0])
     return CGOLSWindParams(
         # The paper's 300 pc gain region. The higher injected energy density it
         # implies (same Mdot/Edot over ~4.6x less volume than the old 500 pc
         # workaround) drives a near-floor-density cell into an unbounded-T / sound
         # speed CFL collapse; that is now handled by the positivity_temperature_clip
         # ceiling (see build_config), so the physical radius can be used directly.
-        injection_radius=(300 * u.pc).to(code_units.code_length).value,
+        injection_radius=(INJ_RAD * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
         schedule_mass_rates=jnp.array(
             [0.0, 0.0, mdot_low, mdot_high, mdot_high, mdot_low]
@@ -1281,7 +1297,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_
     n_frames = len(t)
 
     _, _, _, extent_xz, extent_xy = _snapshot_grid(config)
-    r_inj = (500 * u.pc).to(code_length).value  # injection-region radius, kpc
+    r_inj = (INJ_RAD * u.pc).to(code_length).value  # injection-region radius, kpc
 
     # Fixed color ranges (≈6 decades, adapted to the data) so frames are comparable.
     n_max = float(np.nanmax(n_xz))
@@ -1393,6 +1409,9 @@ def plot_paper_slices(
     out="cgols_paper_slices.png",
     n_range=(1e-4, 1e3),
     T_range=(1e3, 10 ** 7.5),
+    x_half=5.0,
+    z_half=10.0,
+    scalebar_kpc=1.0,
 ):
     """Replicate the paper's x-z density & temperature slices at fixed times.
 
@@ -1443,8 +1462,36 @@ def plot_paper_slices(
     else:
         T_norm = LogNorm(vmin=T_range[0], vmax=T_range[1])
 
+    from matplotlib.ticker import MultipleLocator
+
     ncols = len(target_times_myr)
-    fig, axes = plt.subplots(2, ncols, figsize=(3.3 * ncols, 9), squeeze=False)
+    # Frame the FULL domain to match Schneider & Robertson 2018: their Fig. 6 panels
+    # span the whole 10 x 20 kpc box (x in [-5, 5], z in [-10, 10]), exactly our
+    # box_size, so with x_half=5 / z_half=10 the frame is 1:1 with the paper -- no
+    # crop. Panels come out 1:2 (x:z), the paper's aspect. Ticks are drawn like the
+    # paper: unlabelled inward marks, with a scale bar carrying the physical scale
+    # instead of numeric axis labels.
+    fig, axes = plt.subplots(2, ncols, figsize=(2.7 * ncols, 9.5), squeeze=False,
+                             constrained_layout=True)
+
+    def _annotate(ax, label):
+        """Paper-style overlays: time text (top-left) + scale bar (top-right).
+
+        Both are placed in axes-fraction coordinates so they sit consistently
+        regardless of the crop, and share one height so they read as a single
+        row. The scale-bar length is converted to a fraction from the physical
+        x-range (2*x_half kpc across the panel); the "1 kpc" label sits to the
+        right of the bar, matched in size to the time label.
+        """
+        y = 0.95
+        ax.text(0.09, y, label, transform=ax.transAxes, color="white",
+                fontsize=8.5, ha="left", va="center")
+        bar_frac = scalebar_kpc / (2 * x_half)  # 1 kpc as a fraction of panel width
+        x0 = 0.695  # scale-bar cluster nudged ~0.75 kpc right of its previous 0.62
+        x1 = x0 + bar_frac  # bar sits to the LEFT of its "1 kpc" label
+        ax.plot([x0, x1], [y, y], "-", color="white", lw=0.8, transform=ax.transAxes)
+        ax.text(x1 + 0.02, y, f"{scalebar_kpc:.0f} kpc", transform=ax.transAxes,
+                color="white", fontsize=8.5, ha="left", va="center")
 
     for col, (tt, i) in enumerate(zip(target_times_myr, idxs)):
         axn, axT = axes[0, col], axes[1, col]
@@ -1453,24 +1500,27 @@ def plot_paper_slices(
         im_T = axT.imshow(T_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
                           cmap="inferno", norm=T_norm)
 
-        # Honest title: if the requested time is past the (capped) run, say so.
-        # Two lines so the note fits the narrow column without overlapping.
+        # Paper-style in-panel time label (actual frame time). If the requested
+        # target is past the (capped) run, note it on a smaller second line so the
+        # comparison stays honest.
+        label = f"{t[i]:.0f} Myr"
         if tt > t_max + 1e-6:
-            header = f"{tt:.0f} Myr requested\n(capped: t = {t[i]:.1f} Myr)"
-        else:
-            header = f"t = {t[i]:.1f} Myr"
-        axn.set_title(header, fontsize=10)
+            label += f"\n(req. {tt:.0f})"
 
         for ax in (axn, axT):
-            ax.set_xlabel("x [kpc]")
-        if col == 0:
-            axn.set_ylabel("z [kpc]\nhydrogen number density")
-            axT.set_ylabel("z [kpc]\ntemperature")
+            ax.set_xlim(-x_half, x_half)
+            ax.set_ylim(-z_half, z_half)
+            # Paper look: unlabelled inward tick marks on all four edges, no titles.
+            ax.xaxis.set_major_locator(MultipleLocator(1.0))
+            ax.yaxis.set_major_locator(MultipleLocator(1.0))
+            ax.tick_params(which="both", direction="in", length=3, color="black",
+                           top=True, right=True, labelbottom=False, labelleft=False)
+            _annotate(ax, label)
 
     fig.colorbar(im_n, ax=axes[0, :].tolist(), label=r"$n_{\rm H}$ [cm$^{-3}$]", shrink=0.85)
     fig.colorbar(im_T, ax=axes[1, :].tolist(), label="T [K]", shrink=0.85)
-    fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)", y=0.98)
-    plt.savefig(out, dpi=200, bbox_inches="tight")
+    fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)")
+    plt.savefig(out, dpi=200)
     plt.close(fig)
     used = ", ".join(f"{tt:.0f}->{t[i]:.1f}" for tt, i in zip(target_times_myr, idxs))
     print(f"Wrote {out} (requested->frame Myr: {used})")
@@ -1566,9 +1616,21 @@ if __name__ == "__main__":
             None if BENCH_STEPS else make_snapshot_callable(config, registered_variables)
         )
 
+        # Wall-clock timing of the full run (includes JAX compile time). JAX
+        # dispatches asynchronously, so block_until_ready forces the device to
+        # finish before we stop the timer - otherwise we'd only time dispatch.
+        # Pure host-side timing: no extra device memory.
+        _t0 = time.perf_counter()
         final_state = time_integration(
             initial_state, config, params, registered_variables, snapshot_callable,
             sharding=sharding,
+        )
+        jax.block_until_ready(final_state)
+        _elapsed = time.perf_counter() - _t0
+        print(
+            f"time_integration wall time: {_elapsed:.1f} s "
+            f"({_elapsed / 60:.1f} min, {_elapsed / 3600:.2f} h) "
+            f"on {NUM_GPUS} GPU(s), split {SHARD_SPLIT}"
         )
         if not BENCH_STEPS:
             jnp.save(_here("cgols_final_state.npy"), final_state)
