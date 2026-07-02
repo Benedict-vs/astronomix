@@ -34,9 +34,9 @@ def primitive_state_from_conserved(
     Args:
         conserved_state: The conserved state.
         gamma: The adiabatic index of the fluid.
-        minimum_density: If given (and ``config.enforce_positivity``), floor the
-            recovered density at this value.
-        minimum_pressure: If given (and ``config.enforce_positivity``), floor the
+        minimum_density: If given (and ``config.positivity_config.clamp_in_estimates``),
+            floor the recovered density at this value.
+        minimum_pressure: If given (and ``config.positivity_config.clamp_in_estimates``), floor the
             recovered pressure at this value. This mirrors the positivity
             enforcement already done in ``primitive_state_from_conserved_mhd`` /
             ``..._isothermal``; the ideal-gas hydro path historically skipped it,
@@ -109,7 +109,7 @@ def primitive_state_from_conserved(
     # leave a negative pressure in the state and NaN the next sound speed. Opt-in
     # (floors default to None) so the reconstruction call sites that must match
     # the Pallas mirror bit-for-bit are unaffected.
-    if config.enforce_positivity:
+    if config.positivity_config.clamp_in_estimates:
         if minimum_density is not None:
             primitive_state = primitive_state.at[registered_variables.density_index].set(
                 jnp.maximum(primitive_state[registered_variables.density_index], minimum_density)
