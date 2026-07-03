@@ -681,6 +681,15 @@ def _integrate_core(
         prim = state.primitive_state
         rho = prim[registered_variables.density_index]
         min_density = jnp.min(rho)
+        # Density has a floor but no ceiling, so a runaway can only be seen from
+        # above; report the max and where it lives. The loop state carries ghost
+        # cells (in GHOST_CELLS mode), so shift the argmax to interior indices —
+        # slightly negative / past-the-end values mean the max sits in a ghost slab.
+        max_density = jnp.max(rho)
+        max_density_index = (
+            jnp.stack(jnp.unravel_index(jnp.argmax(rho), rho.shape))
+            - config.num_ghost_cells
+        )
 
         if hasattr(registered_variables, "pressure_index"):
             pressure = prim[registered_variables.pressure_index]
@@ -709,12 +718,14 @@ def _integrate_core(
             fraction = t / params.t_end
             jax.debug.callback(
                 _show_diagnostics, t, min_density, min_pressure,
-                max_speed, max_temperature, has_nan, fraction,
+                max_speed, max_temperature, has_nan,
+                max_density, max_density_index, fraction,
             )
         else:
             jax.debug.callback(
                 _show_diagnostics, t, min_density, min_pressure,
                 max_speed, max_temperature, has_nan,
+                max_density, max_density_index,
             )
 
     t_final, loop_state, snapshot_store, num_iterations = integrate(

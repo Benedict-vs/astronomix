@@ -12,6 +12,7 @@ from astronomix.option_classes.simulation_config import (
     HLLC,
     HLLC_LM,
     OPEN_BOUNDARY,
+    OPEN_BOUNDARY_DIODE,
     REFLECTIVE_BOUNDARY,
     PERIODIC_BOUNDARY,
     CARTESIAN,

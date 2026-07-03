@@ -25,7 +25,9 @@ import jax.numpy as jnp
 # Importing cgols runs autocvd + the module-level constants/functions (cheap), but
 # not the simulation itself (guarded behind `if __name__ == "__main__"`).
 from cgols import (
-    _here,
+    RUN_TAG,
+    _data_final,
+    _ic_state_path,
     analyse_results,
     animate_wind_snapshots,
     build_config,
@@ -35,18 +37,21 @@ from cgols import (
 
 config, registered_variables = build_config()
 
-# Read the states from the script directory (where cgols.py wrote them), not the
-# current working directory, so analysis works regardless of where it is launched.
-final_state = jnp.asarray(np.load(_here("cgols_final_state.npy")))
+# Read the states from the bulk-data directory (where cgols.py wrote them), not
+# the current working directory, so analysis works regardless of where it is
+# launched. CGOLS_RUN_TAG selects which run to analyse (same knob as cgols.py:
+# it suffixes the final state and the snapshots dir; the IC is untagged).
+print(f"Analysing run tag {RUN_TAG!r}: cgols_final_state{RUN_TAG}.npy")
+final_state = jnp.asarray(np.load(_data_final(f"cgols_final_state{RUN_TAG}.npy")))
 
 try:
-    initial_state = jnp.asarray(np.load(_here("cgols_initial_state.npy")))
+    initial_state = jnp.asarray(np.load(_ic_state_path()))
 except FileNotFoundError:
-    print("cgols_initial_state.npy not found - showing final-state diagnostics only.")
+    print(f"{_ic_state_path()} not found - showing final-state diagnostics only.")
     initial_state = None
 
 analyse_results(final_state, config, registered_variables, initial_state=initial_state)
-print("Wrote cgols_static_check.png, cgols_vz_diagnostic.png, cgols_extras.png")
+print("Wrote figures/cgols/{cgols_static_check,cgols_vz_diagnostic,cgols_extras}.png")
 
 # Intermediate-snapshot products (the wind animation + the outflow time-series).
 # These read the per-frame .npz files streamed to SNAPSHOTS_DIR/ during the run,

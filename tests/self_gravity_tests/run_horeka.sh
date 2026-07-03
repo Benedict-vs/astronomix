@@ -94,8 +94,9 @@ cd "$SLURM_SUBMIT_DIR"   # the tests/self_gravity_tests dir you sbatch from; cgo
 # GPUs"), add the CGOLS_NO_AUTOCVD guard described in cgols-horeka-setup.md.
 
 # Step 1: build + save the initial conditions if not already present (single GPU;
-# CGOLS_CREATE_IC=1 builds, saves the IC .npy, and EXITS without integrating).
-IC_FILE="cgols_initial_state${CGOLS_IC_TAG}.npy"
+# CGOLS_CREATE_IC=1 builds, saves the IC .npy to data/initial/, and EXITS without
+# integrating).
+IC_FILE="data/initial/cgols_initial_state${CGOLS_IC_TAG}.npy"
 if [ ! -f "$IC_FILE" ]; then
     echo "Building initial conditions ($IC_FILE)..."
     CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py

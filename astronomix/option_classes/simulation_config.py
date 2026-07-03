@@ -88,6 +88,9 @@ PERIODIC_BOUNDARY = 2
 FIXED_BOUNDARY = 3
 MHD_JET_BOUNDARY = 4
 FIXED_BOUNDARY_OPEN_MOMENTUM = 5
+# open boundary with a "diode" condition: gas may flow out but never in
+# (the ghost cells' boundary-normal velocity is clamped against inflow)
+OPEN_BOUNDARY_DIODE = 6
 
 PRIMITIVE_GAS_STATE = 0
 CONSERVATIVE_GAS_STATE = 1

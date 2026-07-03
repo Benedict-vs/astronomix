@@ -3,18 +3,52 @@ CGOLS replication.
 
 Sets up the initial conditions for a Cholla-Galactic-OutfLow-Simulations-style
 disk + hot-halo galaxy (Schneider & Robertson 2018, arXiv:1803.01008) and runs
-a short adiabatic hydro integration with astronomix.
+the full 75 Myr adiabatic nuclear-outflow simulation with astronomix. A bare
+``python cgols.py`` reproduces the validated production configuration; the
+CGOLS_* environment knobs below only exist for experiments and scaling.
 
 This reproduces the *adiabatic* A-series setup of that paper, which by design
 uses NO radiative cooling. See the cooling section at the end of the file for
 the paper's cooling curve and notes on the radiative B/C series.
+
+Fidelity vs Schneider & Robertson 2018
+--------------------------------------
+Everything the paper specifies about the *problem* is matched: the static
+Miyamoto-Nagai + NFW potential (verified numerically against paper Fig. 4),
+the isothermal exponential gas disk + adiabatic hot-halo ICs, adiabatic EOS
+with gamma = 5/3 and mu = 0.6 throughout (including the plotted n), the CC85
+feedback rates and 300 pc injection radius, the schedule with its hard step
+onset at 5 Myr, diode boundaries on all six faces, the 10x10x20 kpc box and
+the 75 Myr duration.
+
+Four deliberate deviations remain:
+  1. Injection momentum: the paper adds mass momentum-free (new mass at rest);
+     astronomix (astronomix/_modules/_cgols_wind/) rescales momentum by
+     sqrt(rho_new/rho_old) so exactly Edot enters as thermal energy. Only
+     matters inside the 300 pc sphere; the emergent CC85 wind is the same.
+  2. Outer disk truncation beyond 4.5 kpc: a Gaussian ramp (see the ``cutoff``
+     expression in build_initial_conditions) vs the paper's "exponential"
+     truncation - affects only the sparse disk edge.
+  3. IC smoothing (CGOLS_SMOOTHING_SIGMA, default 1.5 cells + vertical-HSE
+     pressure rebuild; the paper's ICs are sharp): central disk n_c ~ 115 vs
+     ~200 cm^-3, T_c ~ 3e4 vs 1e4 K, disk-halo transition ~ 147 vs ~80 pc.
+     Forced by resolution - the disk scale height is 0.96 cells at dz = 19.5 pc.
+  4. Positivity backstops (rho >= 1e-4, P >= 1e-5 code, |v| <= 5000 km/s,
+     T <= 5e9 K; see the params blocks) that DO engage in extreme cells (~5% of
+     production steps peg the T ceiling). The paper does not document Cholla's
+     equivalents.
+
+Structurally different numerics (equivalent physics, never bit-identical):
+WENO5 finite-difference + RK4_LSRK at CFL 0.9 in float32 on the PALLAS backend
+vs Cholla's VL + PLMC + HLLC finite-volume (2nd order) at CFL 0.3 in double.
+CGOLS_CFL=0.3 gives the closer CFL match at ~3x cost. At this resolution the
+right comparison target is the paper's own A-512 run (Fig. 11), not the A-2048
+flagship (Fig. 6): expect smoother late-time panels (less resolved contact
+turbulence/mixing) and a slightly warmer, puffier central disk.
 """
 
 # TODO: move all cgols related code and artifacts into tests/self_gravity_tests/cgols/
 # with seperate folder for benchmarks etc. everything neatly organised.
-# TODO: cleanup code including removing previous testing and comments related to this
-# (especially long comments which are not relevant to the final code)
-# TODO: check if all implemented floors are physically correct and compare to cgols paper
 
 # ==== GPU selection / multi-GPU domain decomposition ====
 from autocvd import autocvd
@@ -41,7 +75,15 @@ import time
 SHARD_SPLIT = ast.literal_eval(os.environ.get("CGOLS_SHARD_SPLIT", "(1, 1, 1, 1)"))
 NUM_GPUS = SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3]
 
-autocvd(num_gpus=NUM_GPUS)
+# By default autocvd waits (indefinitely) for completely free GPUs. On a busy
+# shared node that can block forever; CGOLS_GPU_LEAST_USED=1 instead takes the
+# least-used GPU(s) right away. Meant for small runs (e.g. the 256^2x512 A/B
+# experiments, ~4 GB) that comfortably fit next to other jobs - don't use it to
+# squeeze the 512 production run (~28.5 GB) onto a partially occupied card.
+autocvd(
+    num_gpus=NUM_GPUS,
+    least_used=os.environ.get("CGOLS_GPU_LEAST_USED", "0") == "1",
+)
 # ruff: noqa: E402
 # =========================================================
 
@@ -85,8 +127,9 @@ from astronomix import (
     time_integration,
 )
 from astronomix.option_classes.simulation_config import (
-    FINITE_DIFFERENCE,
     OPEN_BOUNDARY,
+    FINITE_DIFFERENCE,
+    OPEN_BOUNDARY_DIODE,
     PALLAS,
     RK4_LSRK,
     SIMPLE_SOURCE,
@@ -113,10 +156,14 @@ jax.config.update("jax_enable_x64", False)
 # ---------------------------------------------------------------------------
 # Output location
 # ---------------------------------------------------------------------------
-# Anchor every input/output file to the directory THIS script lives in, so the
-# .npy states, figures and the cgols_snapshots/ frame directory always land next
-# to cgols.py / cgols_analyse.py regardless of the working directory the run was
-# launched from. (Relative paths would otherwise scatter outputs into the cwd.)
+# Anchor every input/output file to the directory THIS script lives in,
+# regardless of the working directory the run was launched from (relative paths
+# would otherwise scatter outputs into the cwd). Outputs are sorted by kind:
+#   data/initial/, data/final/  - multi-GB .npy states (data/ is a scratch symlink)
+#   data/cgols_checkpoints*/    - rolling full-state checkpoints (also scratch)
+#   figures/cgols/              - all rendered figures / animations
+#   cgols_logs/                 - per-step diag logs (and driver console logs)
+#   cgols_snapshots<RUN_TAG>/   - streamed per-frame .npz (small, stays here)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -125,30 +172,77 @@ def _here(name):
     return os.path.join(SCRIPT_DIR, name)
 
 
+def _in_dir(subdir, name):
+    """Resolve ``name`` against ``SCRIPT_DIR/subdir`` (created on demand);
+    pass-through if ``name`` is absolute."""
+    out_dir = _here(subdir)
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, name)
+
+
+def _data(name):
+    """Resolve ``name`` against the bulk-data directory (multi-GB files).
+
+    ``data/`` next to this script is a symlink to scratch storage
+    (/export/scratch/...), keeping the 5 GB state files off the 100 GB home
+    quota - a full 512 replay campaign overran it on 2026-07-03. Figures,
+    frames and logs are small and stay in the script directory.
+    """
+    return _in_dir("data", name)
+
+
+def _data_initial(name):
+    """Bulk-data path for initial conditions (data/initial/ on scratch)."""
+    return _in_dir(os.path.join("data", "initial"), name)
+
+
+def _data_final(name):
+    """Bulk-data path for final states (data/final/ on scratch)."""
+    return _in_dir(os.path.join("data", "final"), name)
+
+
+def _fig(name):
+    """Resolve ``name`` against the cgols figures directory (figures/cgols/)."""
+    return _in_dir(os.path.join("figures", "cgols"), name)
+
+
+def _log(name):
+    """Resolve ``name`` against the cgols log directory (cgols_logs/)."""
+    return _in_dir("cgols_logs", name)
+
+
 # ---------------------------------------------------------------------------
 # Tunable knobs
 # ---------------------------------------------------------------------------
 # Optional HSE-preserving smoothing of the initial conditions, in units of cells.
-# 0.0 disables it (the run then matches the reference setup exactly). A value of
-# ~1-2 smooths the sharp disk-halo contact so the grid can hold it: the density
-# is Gaussian-smoothed and the pressure is then REBUILT from vertical hydrostatic
+# 0.0 disables it (the run then matches the reference setup exactly). It smooths
+# the sharp disk-halo contact so the grid can hold it: the density is
+# Gaussian-smoothed and the pressure is then REBUILT from vertical hydrostatic
 # equilibrium (so dP/dz = -rho dPhi/dz is satisfied and the disk does not "ring").
-# This is a mitigation for the under-resolved vertical disk, not a substitute for
-# resolving it.
-SMOOTHING_SIGMA_CELLS = 3.0
+# This is a mitigation for the under-resolved vertical disk (intrinsic scale
+# height H = 18.8 pc = 0.96 cells at 512^2x1024), not a substitute for resolving it.
+#
+# Sigma trades IC fidelity against contact sharpness (1D central-column study,
+# dz = 19.5 pc; paper Fig. 4 targets: n_c ~ 200 cm^-3, T_disk = 1e4 K,
+# disk-halo transition ~80 pc):
+#   sigma = 0.0: n_c = 196, T_c = 1.0e4, transition  88 pc  (exact but ~1-cell peak)
+#   sigma = 1.5: n_c = 115, T_c = 3.0e4, transition 147 pc  (peak FWHM ~4 cells)
+#   sigma = 3.0: n_c =  67, T_c = 8.3e4, transition 225 pc  (previous default)
+# 1.5 is the default: half the central-disk distortion of 3.0 while keeping the
+# contact wide enough for the WENO5 stencil. Changing sigma requires an IC
+# rebuild (CGOLS_CREATE_IC=1); watch cgols_vz_diagnostic.png / the static check
+# on the next run for disk ringing.
+SMOOTHING_SIGMA_CELLS = float(os.environ.get("CGOLS_SMOOTHING_SIGMA", "1.5"))
 
 # Total integration time. The paper runs 75 Myr total; bump this up for a real
 # stability test.
 TOTAL_TIME = 75 * u.Myr
 
-# TEMPORARY safety cap on the integrated time. The wind run develops a numerical
-# blow-up at ~63% of TOTAL_TIME (a flux overshoot evacuates a cell to the density
-# floor, the unfloored momentum then manufactures a runaway velocity -> NaN), and
-# running to the crash overwrites the saved state with all-NaN. Integrating only
-# to 60% stops safely before that wall, so both the intermediate snapshots and the
-# final state stay clean and analysable. Set back to 1.0 once the blow-up is fixed.
-# TODO:This has been fixed and needs removing at some point later in time.
-END_TIME_FRACTION = 1
+# Fraction of TOTAL_TIME to actually integrate. 1 is the full production run;
+# smaller values give cheap partial runs for stability/A-B experiments. The
+# wind schedule uses absolute time, so a partial run is simply a truncation,
+# not a rescaling.
+END_TIME_FRACTION = float(os.environ.get("CGOLS_END_FRACTION", "1"))
 END_TIME = END_TIME_FRACTION * TOTAL_TIME
 
 # Injection radius
@@ -157,8 +251,10 @@ INJ_RAD = 300 # pc
 # Number of evenly-spaced intermediate snapshots to offload to the host during the
 # run (for the animation and the wind time-series). These are cheap 2D slices /
 # 1D reductions, not full 3D states (full states would be ~5 GB each and OOM the
-# device), so this can be fairly large without a memory cost.
-NUM_SNAPSHOTS = 60
+# device), so this can be fairly large without a memory cost. The snapshot grid
+# spans [t_start, t_end], so a restarted run (CGOLS_RESTART_FROM) distributes the
+# same count over just the replayed window - crank it up for dense forensic frames.
+NUM_SNAPSHOTS = int(os.environ.get("CGOLS_NUM_SNAPSHOTS", "60"))
 
 CREATE_IC = os.environ.get("CGOLS_CREATE_IC", "0") == "1"  # build the initial conditions and save them to .npy files
 # if set to False, the run will load the .npy files and run simulation from them
@@ -166,9 +262,11 @@ CREATE_IC = os.environ.get("CGOLS_CREATE_IC", "0") == "1"  # build the initial c
 # Resolution
 RESOLUTION = int(os.environ.get("CGOLS_DIM", "512"))  # cells along the x/y axes; z is always 2x this
 
-# Optional suffix for the IC .npy filenames so runs at different resolutions
-# (or the scaling benchmark) don't overwrite the production initial state.
-IC_TAG = os.environ.get("CGOLS_IC_TAG", "")
+# Suffix for the IC .npy filenames. Defaults to the resolution (_d512, _d1024,
+# ...), so runs at different resolutions never overwrite each other's initial
+# state: changing CGOLS_DIM automatically selects (or, with CGOLS_CREATE_IC=1,
+# builds) the matching IC files. Override only for special IC variants.
+IC_TAG = os.environ.get("CGOLS_IC_TAG", f"_d{RESOLUTION}")
 
 # Benchmark mode: when CGOLS_BENCH_STEPS > 0 the run does exactly that many
 # fixed-size timesteps (no CFL — physically meaningless, but the per-step compute
@@ -177,22 +275,60 @@ IC_TAG = os.environ.get("CGOLS_IC_TAG", "")
 # without a multi-hour run. 0 = normal production run.
 BENCH_STEPS = int(os.environ.get("CGOLS_BENCH_STEPS", "0"))
 
-# Feedback switch-on shape. The paper (Schneider & Robertson 2018) turns the wind
-# on as a step into the low state at 5 Myr; we default to a 1 Myr ramp for
-# explicit-scheme stability (see build_cgols_wind_params). Set CGOLS_STEP_ONSET=1
-# to restore the paper-faithful instantaneous step and test whether the
-# positivity clips make it survivable.
-STEP_ONSET = os.environ.get("CGOLS_STEP_ONSET", "0") == "1"
+# Feedback switch-on shape. The paper turns the wind on as a step into the low
+# state at 5 Myr; that is the default and is production-proven with the
+# positivity clips. CGOLS_STEP_ONSET=0 softens it to a 1 Myr linear ramp
+# (5 -> 6 Myr) for experiments (see build_cgols_wind_params).
+STEP_ONSET = os.environ.get("CGOLS_STEP_ONSET", "1") == "1"
+
+# Outer boundary condition: "diode" (outflow-only, the paper's choice and the
+# default) or "open" (plain zero-gradient copy, which lets the static potential
+# pull ghost-reservoir gas back into the box - slow artificial accretion off
+# every face). Switchable per run for A/B experiments.
+BOUNDARY = os.environ.get("CGOLS_BOUNDARY", "diode")
+if BOUNDARY not in ("diode", "open"):
+    raise ValueError(f"CGOLS_BOUNDARY must be 'diode' or 'open', got {BOUNDARY!r}")
+_BOUNDARY_TYPE = OPEN_BOUNDARY_DIODE if BOUNDARY == "diode" else OPEN_BOUNDARY
+
+# Optional suffix for per-run outputs (the snapshots directory and the final
+# state .npy) so several experiment runs can coexist without clobbering each
+# other or the production outputs. Empty = the production filenames.
+RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "")
+
+# Full-state checkpointing: every Nth snapshot frame the full interior
+# primitive state (~5.4 GB at 512, uncompressed) is written to
+# data/cgols_checkpoints<RUN_TAG>/checkpoint_NNNN.npz (bulk-data dir on
+# scratch), keeping only the newest CGOLS_CHECKPOINT_KEEP - a bounded, rolling
+# safety net that always brackets a potential crash. 0 = off. A run can be
+# RESUMED/REPLAYED from a checkpoint with CGOLS_RESTART_FROM=<checkpoint file>
+# (sets params.t_start to the stored time; the wind schedule uses absolute
+# time, so nothing else shifts) instead of re-paying the ramp-up from t=0 -
+# use a fresh CGOLS_RUN_TAG per replay.
+CHECKPOINT_EVERY = int(os.environ.get("CGOLS_CHECKPOINT_EVERY", "3"))
+CHECKPOINT_KEEP = int(os.environ.get("CGOLS_CHECKPOINT_KEEP", "4"))
+RESTART_FROM = os.environ.get("CGOLS_RESTART_FROM", "")
+
+# Runtime numerics knobs (defaults are the production values).
+# CGOLS_CFL: 0.9 is production-proven; the paper's Cholla setup ran 0.3, which
+# is the closer numerics match at ~3x the step count.
+# CGOLS_TMAX_K: the positivity temperature ceiling in Kelvin (becomes
+# positivity_max_pressure_over_density). It must sit WELL above the hottest
+# physical phase: at 5e8 K the box's hottest cell exceeded it on 27% of steps,
+# and that continuous thermal-energy deletion at sharp contacts fed a density
+# runaway at 43.8 Myr under CFL 0.9. 5e9 K (default) leaves real transients
+# untouched while still catching the 1e21+ K near-vacuum spikes.
+CFL = float(os.environ.get("CGOLS_CFL", "0.9"))
+TMAX_K = float(os.environ.get("CGOLS_TMAX_K", "5e9"))
 
 
 def _ic_state_path():
     """Path to the saved initial primitive state (IC_TAG-suffixed)."""
-    return _here(f"cgols_initial_state{IC_TAG}.npy")
+    return _data_initial(f"cgols_initial_state{IC_TAG}.npy")
 
 
 def _ic_potential_path():
     """Path to the saved external gravitational potential (IC_TAG-suffixed)."""
-    return _here(f"cgols_initial_potential{IC_TAG}.npy")
+    return _data_initial(f"cgols_initial_potential{IC_TAG}.npy")
 
 
 # ---------------------------------------------------------------------------
@@ -234,11 +370,6 @@ T_halo = 1e6 * u.Kelvin  # at r = 100 kpc
 mu = 0.6
 gamma = 5 / 3
 
-# Hydrogen mass fraction (solar). Used only to convert the simulation's total
-# number density n = rho/(mu m_p) to the hydrogen number density n_H = X_H rho/m_p
-# that Schneider & Robertson 2018 plot:  n_H = X_H * mu * n  (= 0.44 n here).
-X_H = 0.74
-
 # Code-units-to-Kelvin factor for temperature: T = (P / rho) * T_factor, where
 # P / rho is in code_velocity^2. Computing it as a single well-scaled constant
 # (~7e5 K) avoids single precision: the individual code-unit constants k_B_code
@@ -272,20 +403,17 @@ def build_cgols_wind_params():
     mdot_low, mdot_high = mdot_to_code(1.5), mdot_to_code(12.0)
     edot_low, edot_high = edot_to_code(1.5e42), edot_to_code(5.4e42)
 
-    # Feedback onset. The paper switches straight into the low state at 5 Myr
-    # (a step); we default to a smooth 1 Myr ramp (5 -> 6 Myr) because the abrupt
-    # switch-on is a strong transient for the explicit WENO scheme. Set
-    # CGOLS_STEP_ONSET=1 to restore the paper-faithful step (duplicate 5 Myr knot,
-    # so jnp.interp jumps 0 -> low at t = 5 Myr). All other transitions are the
-    # paper's 5 Myr linear ramps via interpolation either way.
+    # Feedback onset. Default is the paper-faithful step into the low state at
+    # 5 Myr (duplicate 5 Myr knot, so jnp.interp jumps 0 -> low there);
+    # CGOLS_STEP_ONSET=0 softens it to a 1 Myr linear ramp (5 -> 6 Myr). All
+    # other transitions are the paper's 5 Myr linear ramps via interpolation
+    # either way.
     onset_myr = 5.0 if STEP_ONSET else 6.0
     knot_times_myr = jnp.array([0.0, 5.0, onset_myr, 10.0, 40.0, 45.0])
     return CGOLSWindParams(
-        # The paper's 300 pc gain region. The higher injected energy density it
-        # implies (same Mdot/Edot over ~4.6x less volume than the old 500 pc
-        # workaround) drives a near-floor-density cell into an unbounded-T / sound
-        # speed CFL collapse; that is now handled by the positivity_temperature_clip
-        # ceiling (see build_config), so the physical radius can be used directly.
+        # The paper's 300 pc gain region. Near-vacuum cells at the hot contacts
+        # it drives are handled by the positivity_temperature_clip ceiling (see
+        # build_config), so the physical radius is used directly.
         injection_radius=(INJ_RAD * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
         schedule_mass_rates=jnp.array(
@@ -416,8 +544,8 @@ def build_config():
         solver_mode=FINITE_DIFFERENCE,
         # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven shocks,
         # but it carries one more full-state register and OOMs at 512x512x1024.
-        # Staying on the memory-lean 2N-storage RK4_LSRK and relying on the
-        # tighter CFL / larger injection radius / smoother onset for stability.
+        # Staying on the memory-lean 2N-storage RK4_LSRK; stability at the sharp
+        # wind/disk contacts is handled by the positivity backstops below.
         time_integrator=RK4_LSRK,
         backend=PALLAS,
         pallas_block_shape=(4, 4, 8),
@@ -426,29 +554,19 @@ def build_config():
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
-        # Positivity backstops. default_positivity_protection turns the per-stage
-        # AND per-step HARD_FLOOR state floors on (the old enforce_positivity=True
-        # default). vacuum_rest zeros a floored cell's momentum (recovered v=0
-        # instead of momentum/rho_floor) and nan_safe resets non-finite cells to a
-        # valid floor state; both honoured by the PALLAS kernels. At 256x256x512
-        # these sufficed, but at 512x512x1024 the crash only MOVED (vacuum_rest 73%;
-        # +stage REDISTRIBUTE 66%, earlier): both safeguards key off minimum_density,
-        # but the v=m/rho runaway forms in the near-floor BAND (rho just ABOVE the
-        # floor — observed min_rho=1.559e-4) in the outer-halo polar funnel, where no
-        # density-threshold safeguard reaches. velocity_clip is the global fix: it
-        # caps |v| at params.positivity_max_velocity for EVERY cell (not just
-        # sub-floor ones), inside the per-stage HARD_FLOOR enforcement, density-
-        # independent. Applied after the pressure inversion so thermal energy is
-        # preserved and only the unphysical kinetic excess is dropped. (Native +
-        # PALLAS, validated bit-identical; see cgols_512_precrash.png.)
-        # temperature_clip is the thermal twin of velocity_clip. With the paper's
-        # 300 pc injection radius the same Edot over ~4.6x less volume drives
-        # sharper, hotter contacts; a WENO energy overshoot into a near-floor-density
-        # cell otherwise gives T = (P/rho)*T_factor ~ 1e21-1e25 K, an unbounded sound
-        # speed, and a collapsed CFL timestep. This caps P/rho (see
-        # positivity_max_pressure_over_density below) so c_s stays finite. It
-        # replaces the larger-injection-radius CFL cushion the 500 pc workaround
-        # relied on.
+        # Positivity backstops, all required for this setup (values in the
+        # params blocks):
+        #   default_positivity_protection - per-stage + per-step HARD_FLOOR
+        #     density/pressure floors.
+        #   vacuum_rest - zeros a floored cell's momentum so the recovered
+        #     velocity is 0 rather than momentum/rho_floor.
+        #   nan_safe - resets any non-finite cell to a valid floor state.
+        #   velocity_clip - caps |v| in EVERY cell (density-independent): the
+        #     v = m/rho runaway forms in the near-floor band just ABOVE the
+        #     density floor, out of reach of the density-keyed safeguards.
+        #   temperature_clip - caps P/rho so c_s (and the CFL timestep) stays
+        #     finite when a WENO energy overshoot lands in a near-vacuum cell.
+        # All honoured bit-identically by the PALLAS kernels.
         positivity_config=PositivityConfig(
             default_positivity_protection=True,
             vacuum_rest=True,
@@ -464,10 +582,16 @@ def build_config():
         print_elapsed_time=bool(BENCH_STEPS),
         progress_bar=(not BENCH_STEPS),
         monitor_diagnostics=(not BENCH_STEPS),
+        # Outflow-only ("diode") boundaries on all six faces, as in the paper:
+        # "transmissive boundaries with a 'diode' condition applied to the
+        # velocities". A plain OPEN_BOUNDARY lets the static potential pull the
+        # ghost-cell gas back into the box (slow artificial accretion off every
+        # face, re-entrant recompression where the wind crosses +/-z). The
+        # CGOLS_BOUNDARY knob switches back to "open" for A/B experiments.
         boundary_settings=BoundarySettings(
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
-            BoundarySettings1D(left_boundary=OPEN_BOUNDARY, right_boundary=OPEN_BOUNDARY),
+            BoundarySettings1D(left_boundary=_BOUNDARY_TYPE, right_boundary=_BOUNDARY_TYPE),
+            BoundarySettings1D(left_boundary=_BOUNDARY_TYPE, right_boundary=_BOUNDARY_TYPE),
+            BoundarySettings1D(left_boundary=_BOUNDARY_TYPE, right_boundary=_BOUNDARY_TYPE),
         ),
         gravity_config=GravityConfig(
             self_gravity=False,
@@ -708,7 +832,7 @@ def build_initial_conditions():
     ax.legend()
     ax.set_title("Rotation curve (midplane)")
     plt.tight_layout()
-    plt.savefig(_here("cgols_rotation_curve.png"), dpi=300)
+    plt.savefig(_fig(f"cgols_rotation_curve{IC_TAG}.png"), dpi=300)
     plt.close(fig)
     del r_line, z_zero, Phi_disk_line, Phi_halo_line
     del dPhi_disk_dx, dPhi_halo_dx, dPhi_total_dx
@@ -750,35 +874,34 @@ def build_initial_conditions():
     ax2.set_title("Temperature profiles")
 
     plt.tight_layout()
-    plt.savefig(_here("cgols_initial_profiles.png"), dpi=300)
+    plt.savefig(_fig(f"cgols_initial_profiles{IC_TAG}.png"), dpi=300)
     plt.close(fig)
     del R_kpc, z_kpc, n_midplane, n_zaxis, T_midplane, T_zaxis
     del X_c, Y_c, Z_c
 
     # ---- Simulation setup ----
-    # END_TIME rather than the full TOTAL_TIME: the
-    # run blows up at ~63%, so we stop before it to keep the output clean.
     t_end = END_TIME.to(code_units.code_time).value
 
     params = SimulationParams(
         t_end=t_end,
-        C_cfl=0.9,
+        C_cfl=CFL,
         gamma=gamma,
         # See load_initial_conditions() for the rationale: floors ~2 orders below
         # the ambient minimums, not the dynamically-zero 1e-14 default.
         minimum_density=1e-4,
         minimum_pressure=1e-5,
         # Global velocity ceiling for positivity_velocity_clip (50 code = 5000
-        # km/s: well above any physical galactic wind, far below the ~1e5-code-unit
-        # runaway that NaN'd the 512^3 run). Caps |v| in EVERY cell, not just
+        # km/s: well above any physical galactic wind, far below the near-floor
+        # v = m/rho runaway it exists to stop). Caps |v| in EVERY cell, not just
         # sub-floor ones.
         positivity_max_velocity=50.0,
         # Temperature ceiling for positivity_temperature_clip. The solver caps
         # P/rho in code units, so convert the physical T_max via T_factor
-        # (T = (P/rho)*T_factor). 5e8 K is ~25x the ~2e7 K CC85 hot wind: high
-        # enough to leave real wind/shock-heated gas untouched, far below the
-        # 1e21-1e25 K near-vacuum runaway that collapses the timestep at 300 pc.
-        positivity_max_pressure_over_density=5e8 / T_factor,
+        # (T = (P/rho)*T_factor). Default 5e9 K: far above the ~2e7 K CC85 hot
+        # wind and its transient shock heating, far below the 1e21+ K
+        # near-vacuum spikes that collapse the timestep. Do NOT tighten it
+        # toward the physical temperatures - see the CGOLS_TMAX_K knob comment.
+        positivity_max_pressure_over_density=TMAX_K / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
@@ -814,13 +937,24 @@ def build_initial_conditions():
 def load_initial_conditions():
     """Load the initial state and config from disk, for post-processing without re-running the IC build."""
     config, registered_variables = build_config()
-    initial_state = jnp.load(_ic_state_path())
+    try:
+        initial_state = jnp.load(_ic_state_path())
+        Phi_total = jnp.load(_ic_potential_path())
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"No initial conditions for CGOLS_DIM={RESOLUTION} (missing {e.filename}). "
+            f"Build them once with: CGOLS_CREATE_IC=1 CGOLS_DIM={RESOLUTION} python cgols.py"
+        ) from e
+    expected = (RESOLUTION, RESOLUTION, 2 * RESOLUTION)
+    if initial_state.shape[1:] != expected:
+        raise ValueError(
+            f"IC file {_ic_state_path()} has grid {initial_state.shape[1:]} but "
+            f"CGOLS_DIM={RESOLUTION} expects {expected} - wrong CGOLS_IC_TAG?"
+        )
     config = finalize_config(config, initial_state.shape)
-    Phi_total = jnp.load(_ic_potential_path())
     params = SimulationParams(
-        # END_TIME (60% of TOTAL_TIME) - stop before the ~63% blow-up.
         t_end=END_TIME.to(code_units.code_time).value,
-        C_cfl=0.9,
+        C_cfl=CFL,
         gamma=gamma,
         # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
         # min_P~3e-3). The 1e-14 default is dynamically zero: a wind-cavity cell
@@ -832,12 +966,9 @@ def load_initial_conditions():
         # See build_initial_conditions(): global velocity ceiling for
         # positivity_velocity_clip (50 code = 5000 km/s).
         positivity_max_velocity=50.0,
-        # Temperature ceiling for positivity_temperature_clip. The solver caps
-        # P/rho in code units, so convert the physical T_max via T_factor
-        # (T = (P/rho)*T_factor). 5e8 K is ~25x the ~2e7 K CC85 hot wind: high
-        # enough to leave real wind/shock-heated gas untouched, far below the
-        # 1e21-1e25 K near-vacuum runaway that collapses the timestep at 300 pc.
-        positivity_max_pressure_over_density=5e8 / T_factor,
+        # Temperature ceiling for positivity_temperature_clip; see the
+        # CGOLS_TMAX_K knob comment and build_initial_conditions().
+        positivity_max_pressure_over_density=TMAX_K / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
     )
@@ -847,7 +978,7 @@ def load_initial_conditions():
 # ---------------------------------------------------------------------------
 # Intermediate snapshots (host-offloaded, for the animation / wind time-series)
 # ---------------------------------------------------------------------------
-SNAPSHOTS_DIR = _here("cgols_snapshots")
+SNAPSHOTS_DIR = _here(f"cgols_snapshots{RUN_TAG}")
 
 
 def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
@@ -860,10 +991,10 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
       1. Memory: an end-of-run flush would hold all ``num_snapshots`` frames in
          host RAM until the run finishes (~5 MB/frame). Streaming keeps only one
          frame alive at a time.
-      2. Crash-robustness: this run is expected to blow up if pushed past ~63%.
-         An end-of-run flush would lose every snapshot when the process dies;
-         streaming means each frame already on disk survives the crash, so we can
-         still animate the clean pre-crash evolution.
+      2. Crash-robustness: if a run dies (blow-up, OOM, node failure), an
+         end-of-run flush would lose every snapshot; streaming means each frame
+         already on disk survives, so the evolution up to the crash can still
+         be analysed and animated.
 
     What crosses to the host is only thin 2D planes (edge-on / face-on density and
     temperature) and a 1D vertical mass-flux profile - never the full 3D state
@@ -892,11 +1023,19 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     dy = config.box_size.y / dim_y
     code_mdot_to_msun_per_yr = (code_mass / code_units.code_time).to(u.M_sun / u.yr).value
 
-    # Fresh output directory: drop any frames from a previous run so they cannot
-    # be mixed into this run's animation.
+    # Full-state checkpoints are multi-GB, so they go to the bulk-data dir
+    # (scratch), separate from the small frame files.
+    ckpt_dir = _data(f"cgols_checkpoints{RUN_TAG}")
+
+    # Fresh output directories: drop any frames (and checkpoints) from a
+    # previous run so they cannot be mixed into this run's animation / forensics.
     os.makedirs(out_dir, exist_ok=True)
-    for stale in glob.glob(os.path.join(out_dir, "frame_*.npz")):
-        os.remove(stale)
+    stale = glob.glob(os.path.join(out_dir, "frame_*.npz"))
+    if CHECKPOINT_EVERY:
+        os.makedirs(ckpt_dir, exist_ok=True)
+        stale += glob.glob(os.path.join(ckpt_dir, "checkpoint_*.npz"))
+    for f in stale:
+        os.remove(f)
 
     # Host-side frame counter for the filename. The callback may fire unordered, so
     # filenames are not assumed to be time-ordered; each file stores its own time
@@ -917,10 +1056,34 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
             mdot_z=np.asarray(mdot_z, dtype=np.float32),
         )
 
+    # Full-state checkpoints (CGOLS_CHECKPOINT_EVERY > 0). The interior state is
+    # sliced on-device and crosses to the host on EVERY frame (~0.5 s at 512,
+    # trivial next to the minutes between frames); the host counter then decides
+    # whether to write, since the traced callable itself cannot carry state.
+    ckpt_counter = {"i": 0}
+
+    def _save_checkpoint(time, interior_state):
+        i = ckpt_counter["i"]
+        ckpt_counter["i"] += 1
+        if i % CHECKPOINT_EVERY != 0:
+            return
+        np.savez(
+            os.path.join(ckpt_dir, f"checkpoint_{i:04d}.npz"),
+            time_code=np.float64(float(time)),
+            state=np.asarray(interior_state, dtype=np.float32),
+        )
+        # Rolling window: keep only the newest CHECKPOINT_KEEP checkpoints.
+        ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "checkpoint_*.npz")))
+        for old in ckpts[:-CHECKPOINT_KEEP]:
+            os.remove(old)
+
     def snapshot_callable(time, state, registered_variables):
         rho = state[registered_variables.density_index]
         P = state[registered_variables.pressure_index]
         vz = state[registered_variables.velocity_index.z]
+
+        if CHECKPOINT_EVERY:
+            jax.debug.callback(_save_checkpoint, time, state[:, g:hi, g:hi, g:hi])
 
         # Edge-on (x-z, y=0) and face-on (x-y, z=0) physical slices.
         rho_xz = rho[g:hi, my, g:hi]   # (dim_x, dim_z)
@@ -1082,7 +1245,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     )
     fig.suptitle(suptitle)
     plt.tight_layout()
-    plt.savefig(_here("cgols_static_check.png"), dpi=300)
+    plt.savefig(_fig("cgols_static_check.png"), dpi=300)
     plt.close(fig)
     del n_mid_f, n_z_f, T_mid_f, T_z_f
     if have_initial:
@@ -1135,7 +1298,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     plt.colorbar(im, ax=axb, label=r"$v_z$ [km s$^{-1}$]")
 
     plt.tight_layout()
-    plt.savefig(_here("cgols_vz_diagnostic.png"), dpi=300)
+    plt.savefig(_fig("cgols_vz_diagnostic.png"), dpi=300)
     plt.close(fig)
 
     # ---- Final-state morphology, phase diagram, vertical mass flux ----
@@ -1249,7 +1412,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     axD.legend()
 
     plt.tight_layout()
-    plt.savefig(_here("cgols_extras.png"), dpi=300)
+    plt.savefig(_fig("cgols_extras.png"), dpi=300)
     plt.close(fig)
 
 
@@ -1286,7 +1449,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_
     from matplotlib.animation import FuncAnimation, PillowWriter
     from matplotlib.colors import LogNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
@@ -1357,7 +1520,7 @@ def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_ti
     """
     from matplotlib.colors import TwoSlopeNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
@@ -1420,9 +1583,13 @@ def plot_paper_slices(
     times. This builds the same layout from the streamed snapshots: a 2-row (n_H on
     top, T on bottom) by N-column (one per requested time) grid.
 
-    The snapshots store the *total* number density n = rho/(mu m_p); here it is
-    converted to the hydrogen number density n_H = X_H * mu * n that the paper
-    plots (see X_H above). T is already in K.
+    The snapshots store the number density n = rho/(mu m_p), which is exactly
+    the quantity the paper maps: despite the "n_h" colorbar label, Schneider &
+    Robertson state "when converting between mass density rho and number density
+    n, we take mu = 0.6 throughout" (their quoted rho_0,h = 3e3 Msun/kpc^3 <->
+    n ~ 1e-3.5 cm^-3 confirms it). No hydrogen-fraction factor is applied - an
+    earlier X_H * mu = 0.44 conversion here made every density panel 0.35 dex
+    darker than the paper's. T is already in K.
 
     Defaults match the paper's colorbars exactly: log10(n_H [cm^-3]) in [-4, 3] and
     log10(T [K]) in [3.0, 7.5]. Pass ``n_range`` / ``T_range`` = (vmin, vmax) in
@@ -1435,14 +1602,14 @@ def plot_paper_slices(
     """
     from matplotlib.colors import LogNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _here(out)
+    snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
         return
 
     t = data["time_myr"]
-    nH_xz = data["n_xz"] * (X_H * mu)  # total n -> hydrogen number density n_H
+    n_xz = data["n_xz"]  # already n = rho/(mu m_p), the paper's plotted quantity
     T_xz = data["T_xz"]
     _, _, _, extent_xz, _ = _snapshot_grid(config)
     t_max = float(t[-1])
@@ -1452,7 +1619,7 @@ def plot_paper_slices(
 
     # Shared per-row color scales (paper colorbars by default; adapt if None).
     if n_range is None:
-        n_max = max(float(np.nanmax(nH_xz[i])) for i in idxs)
+        n_max = max(float(np.nanmax(n_xz[i])) for i in idxs)
         n_norm = LogNorm(vmin=max(n_max * 1e-7, 1e-7), vmax=n_max)
     else:
         n_norm = LogNorm(vmin=n_range[0], vmax=n_range[1])
@@ -1495,7 +1662,7 @@ def plot_paper_slices(
 
     for col, (tt, i) in enumerate(zip(target_times_myr, idxs)):
         axn, axT = axes[0, col], axes[1, col]
-        im_n = axn.imshow(nH_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
+        im_n = axn.imshow(n_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
                           cmap="viridis", norm=n_norm)
         im_T = axT.imshow(T_xz[i].T, origin="lower", extent=extent_xz, aspect="equal",
                           cmap="inferno", norm=T_norm)
@@ -1517,7 +1684,7 @@ def plot_paper_slices(
                            top=True, right=True, labelbottom=False, labelleft=False)
             _annotate(ax, label)
 
-    fig.colorbar(im_n, ax=axes[0, :].tolist(), label=r"$n_{\rm H}$ [cm$^{-3}$]", shrink=0.85)
+    fig.colorbar(im_n, ax=axes[0, :].tolist(), label=r"$n$ [cm$^{-3}$]", shrink=0.85)
     fig.colorbar(im_T, ax=axes[1, :].tolist(), label="T [K]", shrink=0.85)
     fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)")
     plt.savefig(out, dpi=200)
@@ -1532,8 +1699,10 @@ def plot_paper_slices(
 # The run above reproduces the paper's ADIABATIC A-series, which uses no cooling;
 # the paper reports those initial conditions are stable for >1 Gyr AT THEIR
 # RESOLUTION (dx ~ 5 pc, i.e. ~30 cells per 0.15 kpc disk scale height). At the
-# 128^3 / 256 resolution here (dx ~ 78 pc) the scale height spans ~2 cells, which
-# is why the disk puffs - that is a resolution issue, not a missing-cooling one.
+# default 512^2x1024 (dx ~ 19.5 pc) the central gas scale height is ~1 cell,
+# which is why the ICs are smoothed (CGOLS_SMOOTHING_SIGMA) and the central
+# disk sits slightly warmer/puffier than Fig. 4 - a resolution issue, not a
+# missing-cooling one.
 #
 # Cooling is used only in the radiative B/C series (companion paper). For those,
 # the paper applies an operator-split CIE cooling source term with the analytic
@@ -1564,7 +1733,7 @@ def cooling_lambda_cgs(T):
 # Run
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    
+
     if CREATE_IC:
         initial_state, config, params, registered_variables = build_initial_conditions()
 
@@ -1572,7 +1741,36 @@ if __name__ == "__main__":
         # so this device->host copy must happen while the buffer is still valid.
         jnp.save(_ic_state_path(), initial_state)
     else:
+        # Per-step diagnostics history (the in-place [diag] status line keeps no
+        # scrollback): default to cgols_logs/cgols_diag<RUN_TAG>.log, fresh per
+        # run. Set ASTRONOMIX_DIAG_LOG to override the path, or to the empty
+        # string to disable logging.
+        _default_diag_log = _log(f"cgols_diag{RUN_TAG}.log")
+        if os.environ.setdefault("ASTRONOMIX_DIAG_LOG", _default_diag_log) == _default_diag_log:
+            if os.path.exists(_default_diag_log):
+                os.remove(_default_diag_log)
+
         initial_state, config, params, registered_variables = load_initial_conditions()
+
+        # Resume from a full-state checkpoint (crash forensics): replace the t=0
+        # initial state with the checkpointed one and start the clock at its time.
+        # The wind schedule and the snapshot grid both use absolute time, so the
+        # replayed window continues exactly where the checkpointing run was -
+        # only the external potential and params are still taken from the IC files.
+        if RESTART_FROM:
+            _ckpt_path = RESTART_FROM if os.path.isabs(RESTART_FROM) else _here(RESTART_FROM)
+            _ckpt = np.load(_ckpt_path)
+            _t0 = float(_ckpt["time_code"])
+            _restart_state = jnp.asarray(_ckpt["state"])
+            if _restart_state.shape != initial_state.shape:
+                raise ValueError(
+                    f"checkpoint state {_restart_state.shape} does not match the "
+                    f"configured grid {initial_state.shape} - check CGOLS_DIM / CGOLS_IC_TAG"
+                )
+            initial_state = _restart_state
+            params = params._replace(t_start=_t0)
+            _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
+            print(f"Restarting from {_ckpt_path} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
 
         # ---- Multi-GPU domain decomposition ----
         # When SHARD_SPLIT asks for more than one GPU, distribute the state over a
@@ -1633,7 +1831,7 @@ if __name__ == "__main__":
             f"on {NUM_GPUS} GPU(s), split {SHARD_SPLIT}"
         )
         if not BENCH_STEPS:
-            jnp.save(_here("cgols_final_state.npy"), final_state)
+            jnp.save(_data_final(f"cgols_final_state{RUN_TAG}.npy"), final_state)
 
         # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
         # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.

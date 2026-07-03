@@ -1,9 +1,11 @@
 import math
+import os
 import shutil
 
 
 def _show_diagnostics(
     t, min_density, min_pressure, max_speed, max_temperature, has_nan,
+    max_density=None, max_density_index=None,
     fraction=None,
 ) -> None:
     """Host-side per-step diagnostic line.
@@ -11,6 +13,16 @@ def _show_diagnostics(
     Prints reduction scalars so a diverging run can be localised in time and by
     variable: which of density / pressure / speed / temperature degrades first,
     and when ``has_nan`` first trips.
+
+    ``max_density`` (with its interior grid location ``max_density_index``)
+    watches the one direction no positivity clip bounds: a density runaway is
+    invisible in the min/max floors and ceilings above (they all saturate at
+    their clip values), so it is reported explicitly.
+
+    When the environment variable ``ASTRONOMIX_DIAG_LOG`` names a file, every
+    diagnostics line is also appended there. The in-place status line keeps no
+    history (each step overwrites the last), so the log is the only record of
+    *when* a quantity first degraded after the run has moved on.
 
     When ``fraction`` (completion fraction in ``[0, 1]``) is given, a percentage
     is prepended to the line. This is used when ``progress_bar`` and
@@ -37,11 +49,24 @@ def _show_diagnostics(
         frac = 1.0 if not math.isfinite(frac) else min(max(frac, 0.0), 1.0)
         pct = f"[{100 * frac:5.1f}%] "
 
+    max_rho = ""
+    if max_density is not None:
+        at = ""
+        if max_density_index is not None:
+            at = "@(" + ",".join(str(int(i)) for i in max_density_index) + ")"
+        max_rho = f"  max_rho={float(max_density):.3e}{at}"
+
     msg = (
         f"{pct}[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
         f"min_P={float(min_pressure):.3e}  max|v|={float(max_speed):.3e}  "
-        f"max_T(code)={float(max_temperature):.3e}{flag}"
+        f"max_T(code)={float(max_temperature):.3e}{max_rho}{flag}"
     )
+
+    log_path = os.environ.get("ASTRONOMIX_DIAG_LOG")
+    if log_path:
+        with open(log_path, "a") as fh:
+            fh.write(msg + "\n")
+
     width = shutil.get_terminal_size((80, 20)).columns
     if nan:
         # Commit the divergence line permanently (may wrap; that is fine).

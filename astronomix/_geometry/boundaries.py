@@ -12,6 +12,7 @@ from astronomix.option_classes.simulation_config import (
     MAGNETIC_FIELD_ONLY,
     MHD_JET_BOUNDARY,
     OPEN_BOUNDARY,
+    OPEN_BOUNDARY_DIODE,
     PERIODIC_BOUNDARY,
     REFLECTIVE_BOUNDARY,
     STATE_TYPE,
@@ -63,8 +64,39 @@ def _open_right_boundary(
     src = _axis_slice(axis, -num_ghost_cells - 1, -num_ghost_cells, ndim)
     dst = _axis_slice(axis, -num_ghost_cells, None, ndim)
     return primitive_state.at[dst].set(primitive_state[src])
- 
- 
+
+
+# -----------------------------------------------------------------------------
+# Diode boundaries — open copy, then forbid inflow through the boundary
+# -----------------------------------------------------------------------------
+
+@partial(jax.jit, static_argnames=["axis", "num_ghost_cells", "normal_index"])
+def _diode_left_boundary(
+    primitive_state: STATE_TYPE, num_ghost_cells: int, axis: int, normal_index: int
+) -> STATE_TYPE:
+    """Open boundary with a "diode" condition (outflow only, cf. Schneider &
+    Robertson 2018): ghost cells copy the first interior cell, but the
+    boundary-normal velocity at ``normal_index`` is clamped to ≤ 0 so the ghost
+    region can never feed gas into the domain. The same clamp is valid on the
+    conserved state (momentum has the sign of velocity). An out-of-bounds
+    ``normal_index`` (e.g. the scalar potential's dummy variable axis) makes
+    the clamp a dropped scatter, leaving the plain open copy."""
+    primitive_state = _open_left_boundary(primitive_state, num_ghost_cells, axis)
+    dst = _axis_slice(axis, 0, num_ghost_cells, primitive_state.ndim)
+    return primitive_state.at[(normal_index,) + dst[1:]].min(0.0)
+
+
+@partial(jax.jit, static_argnames=["axis", "num_ghost_cells", "normal_index"])
+def _diode_right_boundary(
+    primitive_state: STATE_TYPE, num_ghost_cells: int, axis: int, normal_index: int
+) -> STATE_TYPE:
+    """Mirror image of ``_diode_left_boundary``: the right ghost cells' normal
+    velocity is clamped to ≥ 0 (outflow through the right face only)."""
+    primitive_state = _open_right_boundary(primitive_state, num_ghost_cells, axis)
+    dst = _axis_slice(axis, -num_ghost_cells, None, primitive_state.ndim)
+    return primitive_state.at[(normal_index,) + dst[1:]].max(0.0)
+
+
 # -----------------------------------------------------------------------------
 # Periodic boundaries — wrap interior cells to the opposite ghost region
 # -----------------------------------------------------------------------------
@@ -194,15 +226,36 @@ def _apply_axis_bcs(
 ) -> STATE_TYPE:
     """Apply left/right/periodic BCs along a single spatial axis. All branches
     are on static (``SimulationConfig``) fields and resolve at trace time."""
+    # Boundary-normal velocity variable for the diode clamp: var_index == axis
+    # for full primitive/conservative states (the same convention the reflective
+    # BC uses; momentum clamps identically to velocity), axis - 1 for a bare
+    # (vx, vy, vz) stack. Magnetic fields carry no inflow, so a diode boundary
+    # degenerates to the plain open copy for them.
+    diode_normal_index = axis - 1 if type_handled == VELOCITY_ONLY else axis
+
     if bs.left_boundary == OPEN_BOUNDARY:
         primitive_state = _open_left_boundary(primitive_state, num_ghost_cells, axis=axis)
     elif bs.left_boundary == REFLECTIVE_BOUNDARY:
         primitive_state = _reflective_left_boundary(primitive_state, num_ghost_cells, axis=axis)
- 
+    elif bs.left_boundary == OPEN_BOUNDARY_DIODE:
+        if type_handled == MAGNETIC_FIELD_ONLY:
+            primitive_state = _open_left_boundary(primitive_state, num_ghost_cells, axis=axis)
+        else:
+            primitive_state = _diode_left_boundary(
+                primitive_state, num_ghost_cells, axis=axis, normal_index=diode_normal_index
+            )
+
     if bs.right_boundary == OPEN_BOUNDARY:
         primitive_state = _open_right_boundary(primitive_state, num_ghost_cells, axis=axis)
     elif bs.right_boundary == REFLECTIVE_BOUNDARY:
         primitive_state = _reflective_right_boundary(primitive_state, num_ghost_cells, axis=axis)
+    elif bs.right_boundary == OPEN_BOUNDARY_DIODE:
+        if type_handled == MAGNETIC_FIELD_ONLY:
+            primitive_state = _open_right_boundary(primitive_state, num_ghost_cells, axis=axis)
+        else:
+            primitive_state = _diode_right_boundary(
+                primitive_state, num_ghost_cells, axis=axis, normal_index=diode_normal_index
+            )
  
     if (
         bs.left_boundary == PERIODIC_BOUNDARY
@@ -286,11 +339,15 @@ def _apply_axis_bcs_1d(
         primitive_state = _open_left_boundary(primitive_state, num_ghost_cells, axis=1)
     elif bs.left_boundary == REFLECTIVE_BOUNDARY:
         primitive_state = _reflective_left_boundary(primitive_state, num_ghost_cells, axis=1)
- 
+    elif bs.left_boundary == OPEN_BOUNDARY_DIODE:
+        primitive_state = _diode_left_boundary(primitive_state, num_ghost_cells, axis=1, normal_index=1)
+
     if bs.right_boundary == OPEN_BOUNDARY:
         primitive_state = _open_right_boundary(primitive_state, num_ghost_cells, axis=1)
     elif bs.right_boundary == REFLECTIVE_BOUNDARY:
         primitive_state = _reflective_right_boundary(primitive_state, num_ghost_cells, axis=1)
+    elif bs.right_boundary == OPEN_BOUNDARY_DIODE:
+        primitive_state = _diode_right_boundary(primitive_state, num_ghost_cells, axis=1, normal_index=1)
  
     if (
         bs.left_boundary == PERIODIC_BOUNDARY

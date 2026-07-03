@@ -44,8 +44,12 @@ import sys
 import time
 from datetime import datetime
 
+# This driver lives in cgols_scaling/ one level below cgols.py; its own
+# artifacts (results json, plot, csv) stay in this folder, while cgols.py and
+# the shared IC data live in the parent test directory.
 HERE = os.path.dirname(os.path.abspath(__file__))
-CGOLS = os.path.join(HERE, "cgols.py")
+PARENT = os.path.dirname(HERE)
+CGOLS = os.path.join(PARENT, "cgols.py")
 RESULTS_JSON = os.path.join(HERE, "cgols_scaling_results.json")
 PLOT_PNG = os.path.join(HERE, "cgols_scaling.png")
 TABLE_CSV = os.path.join(HERE, "cgols_scaling_estimates.csv")
@@ -90,7 +94,7 @@ def _run_cgols(env_overrides, timeout=PER_RUN_TIMEOUT_S):
     try:
         p = subprocess.run(
             [sys.executable, CGOLS],
-            cwd=HERE, env=env, capture_output=True, text=True, timeout=timeout,
+            cwd=PARENT, env=env, capture_output=True, text=True, timeout=timeout,
         )
         return p.returncode, p.stdout, p.stderr
     except subprocess.TimeoutExpired as e:
@@ -98,8 +102,8 @@ def _run_cgols(env_overrides, timeout=PER_RUN_TIMEOUT_S):
 
 
 def _ic_files(dim, tag):
-    s = os.path.join(HERE, f"cgols_initial_state{tag}.npy")
-    p = os.path.join(HERE, f"cgols_initial_potential{tag}.npy")
+    s = os.path.join(PARENT, "data", "initial", f"cgols_initial_state{tag}.npy")
+    p = os.path.join(PARENT, "data", "initial", f"cgols_initial_potential{tag}.npy")
     return s, p
 
 
