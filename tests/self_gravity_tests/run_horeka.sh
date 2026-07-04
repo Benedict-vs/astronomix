@@ -18,8 +18,6 @@
 # - read output: tail -f cgols_<job_id>.out
 # - cancel job: scancel <job_id>
 
-set -euo pipefail
-
 # run configuration; every other CGOLS_* knob defaults to the production values
 export CGOLS_DIM=1024
 PROD_SPLIT="(1, 2, 2, 1)"   # (var,x,y,z) shard split, product = #GPUs

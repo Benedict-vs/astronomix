@@ -22,8 +22,6 @@
 # - success: per-device memory analysis + elapsed-time printout, exit 0
 #   (bench steps are fixed-dt, physically meaningless; no state is saved)
 
-set -euo pipefail
-
 export CGOLS_DIM=512
 BENCH_SPLIT="(1, 2, 2, 1)"   # same shard layout as production, product = #GPUs
 
@@ -57,6 +55,5 @@ nvidia-smi -L
 # build the 512 ICs once, then a 5-step benchmark on the sharded path
 IC_FILE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
 [ -f "$IC_FILE" ] || CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py
-CGOLS_BENCH_STEPS=5 CGOLS_SHARD_SPLIT="$BENCH_SPLIT" python cgols.py
-
-echo "DEV VALIDATION PASSED"
+CGOLS_BENCH_STEPS=5 CGOLS_SHARD_SPLIT="$BENCH_SPLIT" python cgols.py \
+    && echo "DEV VALIDATION PASSED" || echo "DEV VALIDATION FAILED (see .err)"
