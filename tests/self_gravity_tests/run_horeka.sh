@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=cgols_1024
 #SBATCH --account=hk-project-pai00101
-#SBATCH --partition=accelerated-h100,accelerated-h200 
-#SBATCH --time=30:00:00
+#SBATCH --partition=accelerated-h200,acccelerated-h200-8
+#SBATCH --time=24:00:00
 
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
