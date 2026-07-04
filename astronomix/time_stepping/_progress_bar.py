@@ -1,6 +1,32 @@
 import math
 import os
 import shutil
+import sys
+
+# Percent-bucket throttle for non-interactive stdout (slurm/batch log files).
+# The in-place "\r" status line only works on a terminal; in a redirected log
+# nothing is overwritten, so every step would append a full line and a long
+# run floods the log with thousands of lines. When stdout is not a TTY, a
+# plain newline-terminated line is emitted only when the completion fraction
+# advances by ASTRONOMIX_STATUS_EVERY_PCT percent (default 1.0, i.e. at most
+# ~100 status lines per run; <= 0 restores a line every step). Keyed per
+# stream so the diagnostics line and the plain progress bar throttle
+# independently.
+_last_bucket = {}
+
+
+def _advanced_a_bucket(fraction, key):
+    """True when ``fraction`` entered a new percent bucket (or throttling is off)."""
+    step = float(os.environ.get("ASTRONOMIX_STATUS_EVERY_PCT", "1"))
+    if step <= 0:
+        return True
+    frac = float(fraction)
+    frac = 1.0 if not math.isfinite(frac) else min(max(frac, 0.0), 1.0)
+    bucket = int(100.0 * frac / step)
+    if _last_bucket.get(key) == bucket:
+        return False
+    _last_bucket[key] = bucket
+    return True
 
 
 def _show_diagnostics(
@@ -31,11 +57,18 @@ def _show_diagnostics(
     diagnostics, printed last each step, win and hide the bar), so instead of an
     animated bar the completion percentage rides along on the diagnostics line.
 
-    The line is rewritten in place (carriage return, padded to the terminal width)
-    so successive steps update one status line instead of scrolling. The one
-    exception is divergence: when ``has_nan`` trips the line is committed with a
-    trailing newline so the crash point is preserved in the scrollback rather than
-    overwritten by the next step.
+    On a terminal the line is rewritten in place (carriage return, padded to the
+    terminal width) so successive steps update one status line instead of
+    scrolling. The one exception is divergence: when ``has_nan`` trips the line
+    is committed with a trailing newline so the crash point is preserved in the
+    scrollback rather than overwritten by the next step.
+
+    When stdout is NOT a terminal (e.g. an sbatch log file) the in-place
+    rewrite is pointless and would append one line per step, so instead a
+    normal line is printed only every ``ASTRONOMIX_STATUS_EVERY_PCT`` percent
+    of completion (see ``_advanced_a_bucket``; needs ``fraction``, i.e. the
+    ``progress_bar`` config flag — without it every step still prints). NaN
+    lines and the per-step ``ASTRONOMIX_DIAG_LOG`` file are never throttled.
     """
     nan = bool(has_nan)
     flag = "  <-- NaN/inf!" if nan else ""
@@ -67,14 +100,18 @@ def _show_diagnostics(
         with open(log_path, "a") as fh:
             fh.write(msg + "\n")
 
-    width = shutil.get_terminal_size((80, 20)).columns
+    interactive = sys.stdout.isatty()
     if nan:
         # Commit the divergence line permanently (may wrap; that is fine).
-        print(f"\r{msg}", flush=True)
-    else:
+        print(f"\r{msg}" if interactive else msg, flush=True)
+    elif interactive:
         # Rewrite one status line in place, clipped/padded to the terminal width so
         # a previous, longer line is fully cleared and the line does not wrap.
+        width = shutil.get_terminal_size((80, 20)).columns
         print(f"\r{msg[:width].ljust(width)}", end="", flush=True)
+    elif fraction is None or _advanced_a_bucket(fraction, "diag"):
+        # Batch log: plain scrolling lines, at most one per percent bucket.
+        print(msg, flush=True)
 
 
 def _show_progress(
@@ -107,6 +144,14 @@ def _show_progress(
 
     # Format percentage string
     percent = ("{0:." + str(decimals) + "f}").format(100 * fraction)
+
+    # Batch log (stdout not a terminal): the animated in-place bar would append
+    # one full line per step. Emit a plain percentage line per percent bucket
+    # instead (see _advanced_a_bucket / ASTRONOMIX_STATUS_EVERY_PCT).
+    if not sys.stdout.isatty():
+        if _advanced_a_bucket(fraction, "bar"):
+            print(f"{prefix} {percent}% {suffix}".strip(), flush=True)
+        return
 
     # Fixed parts (prefix + suffix + percent + " |" + "| " + spaces)
     fixed_part = f"{prefix} | | {percent}% {suffix}"
