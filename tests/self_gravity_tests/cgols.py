@@ -540,6 +540,12 @@ def build_config():
 
     config = SimulationConfig(
         memory_analysis=True,
+        # Build the padded helper data (geometric_centers and friends) in host
+        # RAM and transfer it sharded. Built eagerly on GPU 0 instead, the
+        # (3, 1032, 1032, 2056) meshgrid + its moveaxis copy are 2 x 24.5 GiB
+        # on ONE device before the solver even starts - that OOM'd the 1024
+        # production run on a 141 GB H200 (job 4635570).
+        host_helper_data=True,
         geometry=CARTESIAN,
         solver_mode=FINITE_DIFFERENCE,
         # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven shocks,

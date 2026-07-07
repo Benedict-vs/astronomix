@@ -485,16 +485,31 @@ def _move_helper_data_to_device(
     """
 
     moved = {}
+    transferred = {}  # id(host array) -> device array, so aliased fields
+    # (geometric_centers / volumetric_centers point at the same array in
+    # Cartesian) are transferred once and stay aliased on device.
     for name, value in helper_data._asdict().items():
         if value is None:
             continue
-        if sharding is not None and name in (
-            "geometric_centers",
-            "volumetric_centers",
+        if id(value) in transferred:
+            moved[name] = transferred[id(value)]
+            continue
+        if (
+            sharding is not None
+            and name in ("geometric_centers", "volumetric_centers")
+            and value.ndim == 4
         ):
-            moved[name] = jax.device_put(value, sharding)
+            # Same axis correction as _apply_sharding: the supplied sharding
+            # is for the (vars, X, Y, Z) primitive state, while the centers
+            # are (X, Y, Z, vec); drop the vars entry and keep the vector
+            # axis unsplit so the spatial shards co-locate with the state.
+            spatial_spec = PartitionSpec(*sharding.spec[1:4], None)
+            moved[name] = jax.device_put(
+                value, NamedSharding(sharding.mesh, spatial_spec)
+            )
         else:
             moved[name] = jax.device_put(value)
+        transferred[id(value)] = moved[name]
     return HelperData(**moved)
 
 
