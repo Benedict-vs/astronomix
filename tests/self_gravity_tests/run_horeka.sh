@@ -35,9 +35,14 @@ micromamba activate astro
 PYSITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 for d in "$PYSITE"/nvidia/*/lib; do export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"; done
 
-# jax-specific
+# jax-specific. cuda_async instead of the default BFC allocator: at 1024 the
+# compiled step needs a ~112 GB CONTIGUOUS temp arena, which BFC could not
+# place next to the resident arguments (job 4675223 OOM'd with the memory
+# nominally free); cuda_async has no contiguity requirement. 0.98 because the
+# program totals ~134 GB of the H200's ~151 GB.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.95
+export XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.98
 
 # bulk data (ICs/final/checkpoints, ~300 GB at 1024) must live on a workspace:
 #   ws_allocate cgols 60 && ln -s "$(ws_find cgols)" data
