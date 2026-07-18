@@ -590,7 +590,9 @@ class SimulationConfig(NamedTuple):
     #: snapshot times, and the loop carry (primitive state, PRNG key, OU
     #: forcing field) plus the time is written to ``snapshot_storage_path``
     #: after each segment. Each device writes its own shard, so this scales
-    #: to multiple devices / nodes. TO_DISK is forward-mode only.
+    #: to multiple devices / nodes. ``activate_snapshot_callback`` still works
+    #: in this mode (the callable runs host-side at each segment end), and
+    #: ``donate_state`` is honored per segment. TO_DISK is forward-mode only.
     snapshot_storage_mode: int = ON_DEVICE
 
     #: Directory the Orbax checkpoints are written to / read from when

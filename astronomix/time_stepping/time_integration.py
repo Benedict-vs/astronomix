@@ -10,6 +10,8 @@ available options see the simulation configuration and the simulation parameters
 """
 
 # general
+import gc
+
 from contextlib import nullcontext
 
 # typing
@@ -1010,6 +1012,11 @@ def _time_integration_to_disk(
 
     Returns the final (unpadded) primitive state, like the no-snapshot path of
     :func:`_time_integration`; the per-snapshot data lives on disk.
+
+    ``activate_snapshot_callback`` is honored: the user callable is invoked
+    host-side after every segment (and once at ``t_start`` on a cold start)
+    with the re-padded carry, at exactly the snapshot times — so the callback
+    frames keep being produced alongside the disk checkpoints.
     """
     # local import keeps the (optional) orbax dependency out of the import path
     # for runs that never touch disk checkpointing.
@@ -1049,6 +1056,12 @@ def _time_integration_to_disk(
     run_segment_jit = jax.jit(
         _run_segment,
         static_argnames=["config", "registered_variables"],
+        # Honor donate_state in the segmented driver too: without donation every
+        # segment holds its input carry alive next to the solver workspace (one
+        # extra state buffer per device at peak). The buffer saved to disk is
+        # the segment *output*, written synchronously before the next segment
+        # donates it, so donation never invalidates a buffer Orbax still needs.
+        donate_argnums=(0,) if config.donate_state else (),
     )
 
     mesh_ctx = sharding.mesh if sharding is not None else nullcontext()
@@ -1063,6 +1076,26 @@ def _time_integration_to_disk(
     # directory, so resuming into the same path extends one run history
     # (fresh directory -> starts at step 1).
     start_step = latest_step(config.snapshot_storage_path) or 0
+
+    # Segment ends land exactly on the snapshot grid, so the user snapshot
+    # callback keeps working in TO_DISK mode: between segments, re-pad the
+    # carry (ghost cells are a deterministic function of the interior, so this
+    # reproduces the padded state the ON_DEVICE loop would have passed) and
+    # invoke the callable host-side. This adds no peak memory — the transient
+    # padded copy exists only while the (much larger) solver workspace is free.
+    emit_frames = config.activate_snapshot_callback and snapshot_callable is not None
+
+    def _emit_frame(time, state, frame_params):
+        with mesh_ctx, pallas_mesh_context(pallas_mesh):
+            padded = _prepare_padded_state(
+                state, config, frame_params, registered_variables
+            )
+            snapshot_callable(time, padded, registered_variables)
+
+    # The frame at t_start is only emitted on a cold start — a resumed run's
+    # predecessor already recorded it.
+    if emit_frames and restart_state is None and start_step == 0:
+        _emit_frame(times[0], primitive_state, params)
 
     cumulative_iterations = 0
     with loop_checkpointer(config.snapshot_storage_path) as checkpointer:
@@ -1102,23 +1135,33 @@ def _time_integration_to_disk(
             # carry coming out of a jit under an active mesh can carry an
             # abstract-mesh sharding, which trips Orbax's shard-transfer path;
             # device_put onto the explicit NamedSharding makes it concrete (and
-            # is a no-op data-movement-wise when already so placed).
-            store_state = primitive_state
-            store_forcing = forcing
+            # is a no-op data-movement-wise when already so placed). Rebind the
+            # carry itself rather than aliasing a second variable, so the
+            # donation of the next segment's input never leaves a dangling
+            # reference to an already-donated buffer.
             if sharding is not None:
-                store_state = jax.device_put(primitive_state, sharding)
+                primitive_state = jax.device_put(primitive_state, sharding)
                 if forcing is not None:
-                    store_forcing = jax.device_put(forcing, sharding)
+                    forcing = jax.device_put(forcing, sharding)
 
             save_loop_checkpoint(
                 checkpointer,
                 step=start_step + i + 1,
                 time=t_final,
-                primitive_state=store_state,
+                primitive_state=primitive_state,
                 key=key,
-                forcing=store_forcing,
+                forcing=forcing,
                 num_iterations=cumulative_iterations,
             )
+
+            if emit_frames:
+                _emit_frame(t_final, primitive_state, segment_params)
+
+            # Release Orbax's save-staging references promptly: the synchronous
+            # save leaves device-buffer references behind that Python's GC
+            # otherwise collects several segments late, accumulating to a
+            # multiple of the state size in peak device memory.
+            gc.collect()
 
     if config.state_struct:
         return StateStruct(primitive_state=primitive_state)
