@@ -24,10 +24,32 @@ x64 falls back to native (same Triton-on-MHD caveat documented in
 ``pallas_backend_implementation_guide.md`` §4).
 """
 
+# general
 from functools import partial
+
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix constants
+from astronomix.option_classes.simulation_config import (
+    GHOST_CELLS,
+    HLL,
+    IDEAL_GAS,
+    LAX_FRIEDRICHS,
+    MINMOD,
+    OSHER,
+    PALLAS,
+    VAN_ALBADA,
+    VAN_ALBADA_PP,
+)
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
 from astronomix._pallas_helpers import (
     _as_3tuple_block_shape,
     _backend_is_pallas,
@@ -44,20 +66,6 @@ from astronomix._finite_volume._state_evolution.reconstruction import (
     _reconstruct_at_interface_unsplit_single,
 )
 from astronomix._stencil_operations._stencil_operations import _stencil_add
-from astronomix.option_classes.simulation_config import (
-    GHOST_CELLS,
-    HLL,
-    IDEAL_GAS,
-    LAX_FRIEDRICHS,
-    MINMOD,
-    OSHER,
-    PALLAS,
-    VAN_ALBADA,
-    VAN_ALBADA_PP,
-    SimulationConfig,
-)
-from astronomix.option_classes.simulation_params import SimulationParams
-from astronomix.variable_registry.registered_variables import RegisteredVariables
 
 
 # -----------------------------------------------------------------------------

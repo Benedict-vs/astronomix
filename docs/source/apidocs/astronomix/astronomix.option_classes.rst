@@ -13,5 +13,5 @@ Submodules
    :titlesonly:
    :maxdepth: 1
 
-   astronomix.option_classes.simulation_params
    astronomix.option_classes.simulation_config
+   astronomix.option_classes.simulation_params

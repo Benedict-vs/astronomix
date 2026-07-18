@@ -26,14 +26,41 @@ uint32 array tensorstore can serialise) and rebuilt with
 present; its absence on load is reported as ``forcing = None``.
 """
 
+# general
 from contextlib import contextmanager
 from pathlib import Path
+
+# typing
 from typing import Any, NamedTuple, Optional
 
+# jax
 import jax
 from jax.sharding import NamedSharding, PartitionSpec
 
-import orbax.checkpoint as ocp
+# checkpointing (optional dependency — only needed for the TO_DISK snapshot and
+# restart path). The import is guarded so that ``import astronomix`` keeps
+# working when orbax-checkpoint is either absent OR installed at a version that
+# is incompatible with the installed JAX. The latter is a real failure mode: an
+# older orbax evaluates ``jax.experimental.layout.DeviceLocalLayout`` at import
+# time, which JAX 0.10 removed, raising ``AttributeError`` from inside orbax. We
+# therefore catch any import-time error here, not just ModuleNotFoundError, and
+# defer the requirement to the point where the feature is actually used.
+try:
+    import orbax.checkpoint as ocp
+except Exception:  # pragma: no cover - exercised only when orbax can't import
+    ocp = None
+
+
+def _require_orbax():
+    """Raise a clear error if orbax-checkpoint is needed but unavailable."""
+    if ocp is None:
+        raise ModuleNotFoundError(
+            "orbax-checkpoint is required for TO_DISK snapshotting and restart, "
+            "but it could not be imported — it is either not installed or its "
+            "version is incompatible with the installed JAX (e.g. an older "
+            "orbax under JAX >= 0.10). Install/upgrade it, e.g. "
+            "`pip install -U orbax-checkpoint`."
+        )
 
 
 class LoopCheckpoint(NamedTuple):
@@ -61,6 +88,12 @@ class _LoopCheckpointWriter:
         self._directory = Path(directory).resolve()
 
     def save(self, step, *, time, primitive_state, key, forcing, num_iterations):
+        """Serialise one loop carry into the ``<root>/<step>`` sub-directory.
+
+        The PRNG key is stored as raw key data (a plain uint32 array
+        tensorstore can serialise) and the OU forcing field is only written
+        when present, so its absence is unambiguous on load.
+        """
         tree = {
             "time": time,
             "primitive_state": primitive_state,
@@ -82,6 +115,7 @@ def loop_checkpointer(directory):
         with loop_checkpointer(path) as writer:
             save_loop_checkpoint(writer, step, time=t, primitive_state=ps, ...)
     """
+    _require_orbax()
     checkpointer = ocp.Checkpointer(ocp.StandardCheckpointHandler())
     try:
         yield _LoopCheckpointWriter(checkpointer, directory)
@@ -178,6 +212,7 @@ def load_loop_checkpoint(
     Returns:
         A :class:`LoopCheckpoint`.
     """
+    _require_orbax()
     if step is None:
         step = latest_step(directory)
         if step is None:

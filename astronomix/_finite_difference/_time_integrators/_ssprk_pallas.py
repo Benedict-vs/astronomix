@@ -13,11 +13,17 @@ Sharing it lets all FD integrators converge on a single buffer (via
 ``input_output_aliases``).
 """
 
+# typing
 from typing import Union
 
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+
+# astronomix functions
 from astronomix._pallas_helpers import (
     _as_3tuple_block_shape,
     _pallas_call_sharded,
@@ -27,7 +33,6 @@ from astronomix._pallas_helpers import (
     pl,
 )
 from astronomix._stencil_operations._stencil_operations import _shift
-from astronomix.option_classes.simulation_config import SimulationConfig
 
 
 def _hydro_flux_div_axis_native(

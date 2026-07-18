@@ -1,4 +1,14 @@
+"""
+Configuration and parameter containers for the cosmic-ray module.
+
+``CosmicRayConfig`` holds the static (compile-time) switches that turn the
+cosmic-ray physics on and off, while ``CosmicRayParams`` holds the runtime
+numerical values controlling diffusive shock acceleration.
+"""
+
+# typing
 from typing import NamedTuple
+
 
 class CosmicRayConfig(NamedTuple):
 
@@ -7,6 +17,7 @@ class CosmicRayConfig(NamedTuple):
 
     #: turn on injection of CRs at shocks
     diffusive_shock_acceleration: bool = False
+
 
 class CosmicRayParams(NamedTuple):
 

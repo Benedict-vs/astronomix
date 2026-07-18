@@ -22,19 +22,34 @@ test is typically evaluated at t = 0.2 with gamma = 5/3.
   3rd ed., Springer.
 """
 
+# typing
 from typing import NamedTuple
 
+# jax
 import jax.numpy as jnp
 
+# astronomix constants
 from astronomix import CARTESIAN
+from astronomix.option_classes.simulation_config import (
+    OPEN_BOUNDARY,
+    STATE_TYPE,
+)
+
+# astronomix containers
 from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import (
+    BoundarySettings1D,
+    SimulationConfig,
+)
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
 from astronomix.initial_condition_generation.construct_primitive_state import (
     construct_primitive_state,
 )
-from astronomix.option_classes.simulation_config import OPEN_BOUNDARY, STATE_TYPE, BoundarySettings1D, SimulationConfig, finalize_config
-from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.option_classes.simulation_config import finalize_config
 from astronomix.test_setups.reference_solutions.riemann_solver import _exact_riemann_ideal_gas
-from astronomix.variable_registry.registered_variables import RegisteredVariables
 
 
 class ShockTube1DSettings(NamedTuple):
@@ -154,8 +169,12 @@ def sod_shock_tube_solution(
     """
 
     rho, u, p = _exact_riemann_ideal_gas(
-        rho_L = settings.rho_L, u_L = settings.u_L, p_L = settings.p_L,
-        rho_R = settings.rho_R, u_R = settings.u_R, p_R = settings.p_R,
+        rho_L = settings.rho_L,
+        u_L = settings.u_L,
+        p_L = settings.p_L,
+        rho_R = settings.rho_R,
+        u_R = settings.u_R,
+        p_R = settings.p_R,
         gamma = params.gamma,
         x = helper_data.geometric_centers,
         t = params.t_end,

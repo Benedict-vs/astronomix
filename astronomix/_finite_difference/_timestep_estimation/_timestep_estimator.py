@@ -1,23 +1,26 @@
-# general imports
-import jax.numpy as jnp
-import jax
+"""
+CFL time-step estimators for the finite-difference solver.
+
+Provides the advective (and, when active, viscous and conductive) CFL time-step
+limits for hydrodynamics and MHD. Each equation set has a full
+characteristic-eigenvalue estimator plus a lower-storage "fast" estimator used
+by the Pallas backend that reaches the same advective limit directly from the
+primitive variables, avoiding the materialisation of the full eigenvalue stack.
+"""
+
+# general
 from functools import partial
 
-
-# type checking imports
+# typing
+from typing import Union
 from jaxtyping import Array, Float
 from beartype import beartype as typechecker
-from typing import Union
 
-# general astronomix imports
-from astronomix._fluid_equations._eigen_hydro import _eigen_all_lambdas_hydro
-from astronomix._fluid_equations._eigen_hydro_iso import _eigen_all_lambdas_hydro_iso
-from astronomix._fluid_equations._eigen_mhd import _eigen_all_lambdas
-from astronomix._fluid_equations._eigen_mhd_iso import _eigen_all_lambdas_iso
-from astronomix._fluid_equations._equations_mhd import conserved_state_from_primitive_isothermal, conserved_state_from_primitive_mhd, primitive_state_from_conserved_mhd
-from astronomix._fluid_equations._equations import conserved_state_from_primitive
-from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.variable_registry.registered_variables import RegisteredVariables
+# jax
+import jax
+import jax.numpy as jnp
+
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
     DYNAMIC_VISCOSITY,
     IDEAL_GAS,
@@ -25,10 +28,25 @@ from astronomix.option_classes.simulation_config import (
     KINEMATIC_VISCOSITY,
     PALLAS,
     STATE_TYPE,
-    SimulationConfig,
 )
 
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix._fluid_equations._eigen_hydro import _eigen_all_lambdas_hydro
+from astronomix._fluid_equations._eigen_hydro_iso import _eigen_all_lambdas_hydro_iso
+from astronomix._fluid_equations._eigen_mhd import _eigen_all_lambdas
+from astronomix._fluid_equations._eigen_mhd_iso import _eigen_all_lambdas_iso
+from astronomix._fluid_equations._equations import conserved_state_from_primitive
+from astronomix._fluid_equations._equations_mhd import (
+    conserved_state_from_primitive_isothermal,
+    conserved_state_from_primitive_mhd,
+    primitive_state_from_conserved_mhd,
+)
 
 
 def _mhd_fast_cfl_supported(config: SimulationConfig, registered_variables: RegisteredVariables) -> bool:
@@ -147,6 +165,29 @@ def _cfl_time_step_fd(
     registered_variables: RegisteredVariables,
     C_CFL: Union[float, Float[Array, ""]] = 0.8,
 ) -> Float[Array, ""]:
+    """
+    Compute the MHD CFL time step from the full characteristic eigenvalues.
+
+    For each axis the conserved state is permuted so that axis becomes the
+    sweep direction, the full eigenvalue stack is evaluated, and the largest
+    absolute eigenvalue is taken as the local signal speed; the advective limit
+    is then combined with the optional viscous and conductive limits. When the
+    Pallas fast path is available, the equivalent lower-storage estimator is
+    used instead.
+
+    Args:
+        primitive_state: The primitive state array.
+        grid_spacing: The grid spacing.
+        dt_max: The maximum allowed time step.
+        gamma: The adiabatic index.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        registered_variables: The registered variables.
+        C_CFL: The CFL safety factor.
+
+    Returns:
+        The CFL-limited time step.
+    """
     if _mhd_fast_cfl_supported(config, registered_variables):
         return _cfl_time_step_fd_mhd_fast(
             primitive_state, grid_spacing, dt_max, gamma,
@@ -170,7 +211,7 @@ def _cfl_time_step_fd(
         lambda_x = _eigen_all_lambdas_iso(
             conserved_state, params.minimum_density, params.isothermal_sound_speed, registered_variables
         )
-    
+
     lambda_x = jnp.max(jnp.abs(lambda_x))
 
     if config.dimensionality >= 2:
@@ -178,7 +219,7 @@ def _cfl_time_step_fd(
             qy = jnp.transpose(conserved_state, (0, 2, 1))
         else:
             qy = jnp.transpose(conserved_state, (0, 2, 1, 3))
-        
+
         momentum_x = qy[registered_variables.momentum_index.x]
         momentum_y = qy[registered_variables.momentum_index.y]
         B_x = qy[registered_variables.magnetic_index.x]
@@ -202,7 +243,7 @@ def _cfl_time_step_fd(
 
     if config.dimensionality == 3:
         qz = jnp.transpose(conserved_state, (0, 3, 2, 1))
-        
+
         momentum_x = qz[registered_variables.momentum_index.x]
         momentum_z = qz[registered_variables.momentum_index.z]
         B_x = qz[registered_variables.magnetic_index.x]
@@ -235,12 +276,12 @@ def _cfl_time_step_fd(
             )
         else:
             rho_min = jnp.min(primitive_state[registered_variables.density_index])
-       
+
         if config.viscosity_type == DYNAMIC_VISCOSITY:
             nu_max = params.viscosity / rho_min
         elif config.viscosity_type == KINEMATIC_VISCOSITY:
             nu_max = params.viscosity
-        
+
         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
 
@@ -263,101 +304,6 @@ def _cfl_time_step_fd(
     return dt_cfl
 
 
-# @partial(jax.jit, static_argnames=["config", "registered_variables"])
-# def _cfl_time_step_fd(
-#     primitive_state: STATE_TYPE,
-#     grid_spacing: Union[float, Float[Array, ""]],
-#     dt_max: Union[float, Float[Array, ""]],
-#     gamma: Union[float, Float[Array, ""]],
-#     config: SimulationConfig,
-#     params: SimulationParams,
-#     registered_variables: RegisteredVariables,
-#     C_CFL: Union[float, Float[Array, ""]] = 0.8,
-# ) -> Float[Array, ""]:
-    
-#     # TODO: use specific lambda function
-
-#     conserved_state = conserved_state_from_primitive_mhd(
-#         primitive_state, gamma, registered_variables
-#     )
-
-#     lambda_x = _eigen_all_lambdas(
-#         conserved_state, params.minimum_density, params.minimum_pressure, gamma, registered_variables
-#     )
-
-#     lambda_x = jnp.max(jnp.abs(lambda_x))
-
-#     if config.dimensionality == 1:
-#         qy = conserved_state
-#     elif config.dimensionality == 2:
-#         qy = jnp.transpose(conserved_state, (0, 2, 1))
-#     elif config.dimensionality == 3:
-#         qy = jnp.transpose(conserved_state, (0, 2, 1, 3))
-    
-#     momentum_x = qy[registered_variables.momentum_index.x]
-#     momentum_y = qy[registered_variables.momentum_index.y]
-#     B_x = qy[registered_variables.magnetic_index.x]
-#     B_y = qy[registered_variables.magnetic_index.y]
-#     qy = qy.at[registered_variables.momentum_index.x].set(momentum_y)
-#     qy = qy.at[registered_variables.momentum_index.y].set(momentum_x)
-#     qy = qy.at[registered_variables.magnetic_index.x].set(B_y)
-#     qy = qy.at[registered_variables.magnetic_index.y].set(B_x)
-
-#     # lambda_y, _, _ = _eigen_x(
-#     #     qy, gamma, registered_variables
-#     # )
-
-#     lambda_y = _eigen_all_lambdas(
-#         qy, params.minimum_density, params.minimum_pressure, gamma, registered_variables
-#     )
-
-#     lambda_y = jnp.max(jnp.abs(lambda_y))
-
-#     if config.dimensionality < 3:
-#         qz = conserved_state
-#     else:
-#         qz = jnp.transpose(conserved_state, (0, 3, 2, 1))
-    
-#     momentum_x = qz[registered_variables.momentum_index.x]
-#     momentum_z = qz[registered_variables.momentum_index.z]
-#     B_x = qz[registered_variables.magnetic_index.x]
-#     B_z = qz[registered_variables.magnetic_index.z]
-#     qz = qz.at[registered_variables.momentum_index.x].set(momentum_z)
-#     qz = qz.at[registered_variables.momentum_index.z].set(momentum_x)
-#     qz = qz.at[registered_variables.magnetic_index.x].set(B_z)
-#     qz = qz.at[registered_variables.magnetic_index.z].set(B_x)
-
-#     # lambda_z, _, _ = _eigen_x(
-#     #     qz, gamma, registered_variables
-#     # )
-
-#     lambda_z = _eigen_all_lambdas(
-#         qz, params.minimum_density, params.minimum_pressure, gamma, registered_variables
-#     )
-
-#     lambda_z = jnp.max(jnp.abs(lambda_z))
-
-#     dt_cfl = C_CFL * grid_spacing / (lambda_x + lambda_y + lambda_z)
-
-#     # viscous time step constraint
-#     if config.diffusion:
-#         if config.positivity_config.clamp_in_estimates:
-#             rho_min = jnp.maximum(
-#                 jnp.min(primitive_state[registered_variables.density_index]),
-#                 params.minimum_density,
-#             )
-#         else:
-#             rho_min = jnp.min(primitive_state[registered_variables.density_index])
-#         nu_max = params.viscosity / rho_min
-#         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
-#         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
-
-
-#     dt_cfl = jnp.minimum(dt_cfl, dt_max)
-
-#     return dt_cfl
-
-
 @partial(jax.jit, static_argnames=["config", "registered_variables"])
 def _cfl_time_step_fd_hydro_native(
     primitive_state: STATE_TYPE,
@@ -369,9 +315,30 @@ def _cfl_time_step_fd_hydro_native(
     registered_variables: RegisteredVariables,
     C_CFL: Union[float, Float[Array, ""]] = 0.8,
 ) -> Float[Array, ""]:
-    
-    # TODO: use specific lambda function
+    """
+    Compute the hydrodynamic CFL time step from the full characteristic
+    eigenvalues.
 
+    Mirrors the MHD estimator: for each axis the conserved state is permuted so
+    that axis becomes the sweep direction, the hydro eigenvalue stack is
+    evaluated, and the largest absolute eigenvalue gives the local signal speed.
+    The advective limit is combined with the optional viscous and conductive
+    limits. This is the native fallback used when the Pallas fast path is not
+    available.
+
+    Args:
+        primitive_state: The primitive state array.
+        grid_spacing: The grid spacing.
+        dt_max: The maximum allowed time step.
+        gamma: The adiabatic index.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        registered_variables: The registered variables.
+        C_CFL: The CFL safety factor.
+
+    Returns:
+        The CFL-limited time step.
+    """
     if config.equation_of_state == IDEAL_GAS:
         conserved_state = conserved_state_from_primitive(
             primitive_state, gamma, config, registered_variables
@@ -402,10 +369,6 @@ def _cfl_time_step_fd_hydro_native(
         qy = qy.at[registered_variables.momentum_index.x].set(momentum_y)
         qy = qy.at[registered_variables.momentum_index.y].set(momentum_x)
 
-        # lambda_y, _, _ = _eigen_x(
-        #     qy, gamma, registered_variables
-        # )
-
         if config.equation_of_state == IDEAL_GAS:
             lambda_y = _eigen_all_lambdas_hydro(
                 qy, params.minimum_density, params.minimum_pressure, gamma, config, registered_variables
@@ -426,10 +389,6 @@ def _cfl_time_step_fd_hydro_native(
         qz = qz.at[registered_variables.momentum_index.x].set(momentum_z)
         qz = qz.at[registered_variables.momentum_index.z].set(momentum_x)
 
-        # lambda_z, _, _ = _eigen_x(
-        #     qz, gamma, registered_variables
-        # )
-
         if config.equation_of_state == IDEAL_GAS:
             lambda_z = _eigen_all_lambdas_hydro(
                 qz, params.minimum_density, params.minimum_pressure, gamma, config, registered_variables
@@ -448,7 +407,7 @@ def _cfl_time_step_fd_hydro_native(
 
     # viscous time step constraint
     if config.diffusion:
-        
+
         if config.positivity_config.clamp_in_estimates:
             rho_min = jnp.maximum(
                 jnp.min(primitive_state[registered_variables.density_index]),
@@ -456,12 +415,12 @@ def _cfl_time_step_fd_hydro_native(
             )
         else:
             rho_min = jnp.min(primitive_state[registered_variables.density_index])
-        
+
         if config.viscosity_type == DYNAMIC_VISCOSITY:
             nu_max = params.viscosity / rho_min
         elif config.viscosity_type == KINEMATIC_VISCOSITY:
             nu_max = params.viscosity
-        
+
         dt_visc = C_CFL * grid_spacing**2 / (2.0 * config.dimensionality * nu_max)
         dt_cfl = jnp.minimum(dt_cfl, dt_visc)
 
@@ -481,12 +440,15 @@ def _cfl_time_step_fd_hydro_native(
 
     return dt_cfl
 
+
 # -----------------------------------------------------------------------------
 # Backend-aware hydrodynamic CFL wrapper.
 # -----------------------------------------------------------------------------
 
 
 def _backend_name(config: SimulationConfig) -> str:
+    """Return the configured backend name as an upper-case string, tolerating
+    both enum-like (``.name`` / ``.value``) and plain values."""
     backend = config.backend
     name = getattr(backend, "name", None)
     if name is not None:
@@ -498,10 +460,14 @@ def _backend_name(config: SimulationConfig) -> str:
 
 
 def _backend_is_pallas(config: SimulationConfig) -> bool:
+    """Whether the Pallas backend is selected."""
     return config.backend == PALLAS
 
 
 def _hydro_fast_cfl_supported(config: SimulationConfig, registered_variables: RegisteredVariables) -> bool:
+    """Whether the lower-storage hydro fast-CFL estimator can be used: the
+    Pallas backend must be on and the registry must expose the velocity index
+    (plus the pressure index for an ideal gas)."""
     if not _backend_is_pallas(config):
         return False
     if not hasattr(registered_variables, "velocity_index"):
@@ -612,6 +578,26 @@ def _cfl_time_step_fd_hydro(
     registered_variables: RegisteredVariables,
     C_CFL: Union[float, Float[Array, ""]] = 0.8,
 ) -> Float[Array, ""]:
+    """
+    Backend-aware hydrodynamic CFL time step.
+
+    Dispatches to the lower-storage Pallas fast estimator when it is supported
+    and otherwise to the full eigenvalue-based native estimator; both return the
+    same advective limit.
+
+    Args:
+        primitive_state: The primitive state array.
+        grid_spacing: The grid spacing.
+        dt_max: The maximum allowed time step.
+        gamma: The adiabatic index.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        registered_variables: The registered variables.
+        C_CFL: The CFL safety factor.
+
+    Returns:
+        The CFL-limited time step.
+    """
     if _hydro_fast_cfl_supported(config, registered_variables):
         return _cfl_time_step_fd_hydro_fast(
             primitive_state,

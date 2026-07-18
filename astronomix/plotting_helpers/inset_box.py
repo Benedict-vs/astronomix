@@ -1,6 +1,23 @@
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
-from matplotlib.collections import PathCollection
+"""
+Add a zoomed-in inset axes to an existing matplotlib axes.
+
+Replicates the line and scatter artists of a parent axes inside a magnified
+inset box (preserving styling such as colors, markers, sizes and colormaps)
+and draws connector lines between the inset and the highlighted region. Useful
+for emphasizing a small feature of a plot without a second figure.
+"""
+
+# numerics
 import numpy as np
+
+# plotting (optional dependency — this helper only runs when matplotlib is
+# installed, so guard the import to keep the module importable without it)
+try:
+    from matplotlib.collections import PathCollection
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
+except ModuleNotFoundError:  # pragma: no cover - exercised only without matplotlib
+    PathCollection = None
+    inset_axes = mark_inset = None
 
 
 def add_inset_box(
@@ -15,6 +32,29 @@ def add_inset_box(
     width="40%",
     height="40%",
 ):
+    """Add a magnified inset axes mirroring the artists of ``ax``.
+
+    Args:
+        ax: The parent axes whose line and scatter artists are replicated.
+        x1: The left edge of the zoomed-in x-range.
+        x2: The right edge of the zoomed-in x-range.
+        y1: The lower edge of the zoomed-in y-range.
+        y2: The upper edge of the zoomed-in y-range.
+        loc: The location of the inset within the parent axes.
+        connect_loc1: The first corner used for the inset connector lines.
+        connect_loc2: The second corner used for the inset connector lines.
+        width: The inset width (as a fraction string or absolute size).
+        height: The inset height (as a fraction string or absolute size).
+
+    Returns:
+        The created inset axes.
+    """
+    if inset_axes is None:
+        raise ModuleNotFoundError(
+            "matplotlib is required for add_inset_box but is not installed. "
+            "Install it with `pip install matplotlib`."
+        )
+
     axins = inset_axes(ax, width=width, height=height, loc=loc)
 
     for line in ax.get_lines():

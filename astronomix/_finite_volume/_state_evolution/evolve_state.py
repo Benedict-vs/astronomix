@@ -1,23 +1,25 @@
-# general imports
-import jax.numpy as jnp
-import jax
+"""
+Finite-volume state evolution.
+
+Drives one finite-volume hydro step: the dimensionally split (Strang) and the
+unsplit (SSP-RK2, optionally Pallas-fused) gas updates, the operator-split
+self-gravity source, and the top-level :func:`_evolve_state_fv` that couples
+the gas update to the magnetic-field update for MHD runs.
+"""
+
+# general
 from functools import partial
 
-# runtime debugging
+# typing
+from typing import Union
+from jaxtyping import Array, Float
+
+# jax
+import jax
+import jax.numpy as jnp
 from jax.experimental import checkify
 
-# type checking imports
-from jaxtyping import Array, Float
-from typing import Union
-
-# general astronomix imports
-from astronomix._finite_volume._riemann_solver._riemann_solver import _riemann_solver
-from astronomix._finite_volume._magnetic_update._magnetic_field_update import magnetic_update
-from astronomix._integrators._explicit_rk import rk2_ssp
-from astronomix._modules._time_integrator_sources import _time_integrator_sources
-from astronomix._stencil_operations._stencil_operations import _stencil_add
-from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.variable_registry.registered_variables import RegisteredVariables
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
     CARTESIAN,
     GHOST_CELLS,
@@ -26,9 +28,20 @@ from astronomix.option_classes.simulation_config import (
     STATE_TYPE,
     UNSPLIT,
     VAN_ALBADA_PP,
-    SimulationConfig,
 )
 
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.option_classes.simulation_params import SimulationParams
+
+# astronomix functions
+from astronomix._finite_volume._riemann_solver._riemann_solver import _riemann_solver
+from astronomix._finite_volume._magnetic_update._magnetic_field_update import magnetic_update
+from astronomix._integrators._explicit_rk import rk2_ssp
+from astronomix._modules._time_integrator_sources import _time_integrator_sources
+from astronomix._stencil_operations._stencil_operations import _stencil_add
 from astronomix._geometry.geometric_terms import _pressure_nozzling_source
 from astronomix._finite_volume._state_evolution.reconstruction import (
     _reconstruct_at_interface_split,
@@ -44,7 +57,6 @@ from astronomix._fluid_equations._equations import (
     primitive_state_from_conserved,
     conserved_state_from_primitive,
 )
-from astronomix.option_classes.simulation_params import SimulationParams
 
 # -------------------------------------------------------------
 # ====================== ↓ Self-gravity ↓ =====================
@@ -564,8 +576,9 @@ def _evolve_state_fv(
     if config.mhd:
         if config.dimensionality > 1:
 
-            # HERE WE EXPLICITLY ASSUME THAT THE LAST 3 INDICES 
-            # ARE THE MAGNETIC FIELD COMPONENTS
+            # WARNING: this relies on the last three state indices being the
+            # magnetic-field components, so that stripping them off yields the
+            # pure gas sub-state and a matching gas variable registry.
             registered_variables_gas = registered_variables._replace(
                 num_vars=registered_variables.num_vars - 3
             )

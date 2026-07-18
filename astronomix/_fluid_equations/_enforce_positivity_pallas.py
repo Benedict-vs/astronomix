@@ -9,11 +9,21 @@ file by hand.  See ``pallas_backend_implementation_guide.md`` §4.4 for
 the pallasify recipe.
 """
 
+# general
 import itertools
 
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix constants
+from astronomix.option_classes.simulation_config import IDEAL_GAS, ISOTHERMAL
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
 from astronomix._pallas_helpers import (
     _as_3tuple_block_shape,
     _backend_is_pallas,
@@ -21,8 +31,6 @@ from astronomix._pallas_helpers import (
     _pallas_compiler_params,
     pl,
 )
-from astronomix.option_classes.simulation_config import IDEAL_GAS, ISOTHERMAL, SimulationConfig
-from astronomix.variable_registry.registered_variables import RegisteredVariables
 
 
 def _enforce_positivity_pallas_supported(state, config: SimulationConfig) -> bool:

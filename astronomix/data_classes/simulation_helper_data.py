@@ -1,24 +1,44 @@
+"""
+Geometric helper data for the simulation.
+
+Bundles the precomputed per-cell geometry (cell centers, radii, volumes, cell
+boundaries) used throughout the solver and the snapshot diagnostics, together
+with the machinery to build only the fields the active subsystems actually need
+(see :class:`HelperDataRequirements`), optionally on the host, and to pad /
+shard / unpad them for the time integrator.
+"""
+
+# general
 from contextlib import nullcontext
 import math
+
+# typing
 from types import NoneType
 from typing import NamedTuple, Union
+
+# jax
+import jax
 from jax import NamedSharding
 from jax.sharding import PartitionSpec
 import jax.numpy as jnp
-from astronomix._geometry.geometry import _center_of_volume, _r_hat_alpha
+
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
     CARTESIAN,
     CYLINDRICAL,
     FINITE_VOLUME,
     SPHERICAL,
+)
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import (
     SimulationConfig,
     StaticFloatVector,
     StaticIntVector,
 )
-import jax
 
-# Helper data like the radii and cell volumes
-# in the simulation or cooling tables etc.
+# astronomix functions
+from astronomix._geometry.geometry import _center_of_volume, _r_hat_alpha
 
 
 class HelperData(NamedTuple):
@@ -87,25 +107,33 @@ class HelperDataRequirements(NamedTuple):
 
 def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirements:
     """Derive which :class:`HelperData` fields the configuration needs.
+
+    Args:
+        config: The simulation configuration.
+
+    Returns:
+        A :class:`HelperDataRequirements` whose flags are ``True`` only for the
+        helper-data fields consumed by some currently active subsystem, so the
+        builder can leave the rest unmaterialised.
     """
 
-    dim = config.dimensionality
+    dimensionality = config.dimensionality
     curvilinear = config.geometry != CARTESIAN
-    is_fv = config.solver_mode == FINITE_VOLUME
+    finite_volume = config.solver_mode == FINITE_VOLUME
 
-    needs_geom_centers = False
-    needs_vol_centers = False
+    needs_geometric_centers = False
+    needs_volumetric_centers = False
     needs_r_hat_alpha = False
     needs_cell_volumes = False
-    needs_inner_cbs = False
-    needs_outer_cbs = False
+    needs_inner_cell_boundaries = False
+    needs_outer_cell_boundaries = False
     needs_r = False
 
     # Finite-volume geometric source / reconstruction terms in
     # curvilinear geometry (1D spherical / cylindrical).
-    if is_fv and curvilinear:
-        needs_geom_centers = True
-        needs_vol_centers = True
+    if finite_volume and curvilinear:
+        needs_geometric_centers = True
+        needs_volumetric_centers = True
         needs_r_hat_alpha = True
         # 1D curvilinear get_helper_data also produces cell_volumes
         # and inner/outer boundaries; downstream code reads them in
@@ -114,10 +142,10 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
     # Stellar wind injection.
     if config.wind_config.stellar_wind:
         needs_cell_volumes = True
-        needs_inner_cbs = True
-        needs_outer_cbs = True
-        if dim > 1:
-            needs_geom_centers = True
+        needs_inner_cell_boundaries = True
+        needs_outer_cell_boundaries = True
+        if dimensionality > 1:
+            needs_geometric_centers = True
             needs_r = True
 
     # CGOLS central starburst wind: needs the distance to the box center.
@@ -126,49 +154,49 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
 
     # Cosmic-ray diffusive shock acceleration.
     if config.cosmic_ray_config.diffusive_shock_acceleration:
-        needs_geom_centers = True
+        needs_geometric_centers = True
         needs_cell_volumes = True
 
     # Neural-network body force / cnn corrector positions.
     if config.neural_net_force_config.neural_net_force:
-        needs_geom_centers = True
+        needs_geometric_centers = True
 
     # Frame tracking (3D Cartesian) only needs the z-axis array.
-    needs_cc_x = False
-    needs_cc_y = False
-    needs_cc_z = False
+    needs_cell_centers_x = False
+    needs_cell_centers_y = False
+    needs_cell_centers_z = False
     if config.frame_tracking:
-        needs_cc_z = True
+        needs_cell_centers_z = True
 
     # Snapshot diagnostics.
     if config.return_snapshots:
-        s = config.snapshot_settings
+        snapshot_settings = config.snapshot_settings
         volume_consumers = (
-            s.return_total_mass
-            or s.return_total_energy
-            or s.return_internal_energy
-            or s.return_kinetic_energy
-            or s.return_gravitational_energy
+            snapshot_settings.return_total_mass
+            or snapshot_settings.return_total_energy
+            or snapshot_settings.return_internal_energy
+            or snapshot_settings.return_kinetic_energy
+            or snapshot_settings.return_gravitational_energy
         )
-        if dim == 1 and volume_consumers:
+        if dimensionality == 1 and volume_consumers:
             needs_cell_volumes = True
-        if s.return_radial_momentum:
-            if dim == 1:
+        if snapshot_settings.return_radial_momentum:
+            if dimensionality == 1:
                 needs_cell_volumes = True
             else:
-                needs_geom_centers = True
+                needs_geometric_centers = True
 
     return HelperDataRequirements(
-        needs_geometric_centers=needs_geom_centers,
-        needs_volumetric_centers=needs_vol_centers,
-        needs_cell_centers_x=needs_cc_x,
-        needs_cell_centers_y=needs_cc_y,
-        needs_cell_centers_z=needs_cc_z,
+        needs_geometric_centers=needs_geometric_centers,
+        needs_volumetric_centers=needs_volumetric_centers,
+        needs_cell_centers_x=needs_cell_centers_x,
+        needs_cell_centers_y=needs_cell_centers_y,
+        needs_cell_centers_z=needs_cell_centers_z,
         needs_r=needs_r,
         needs_r_hat_alpha=needs_r_hat_alpha,
         needs_cell_volumes=needs_cell_volumes,
-        needs_inner_cell_boundaries=needs_inner_cbs,
-        needs_outer_cell_boundaries=needs_outer_cbs,
+        needs_inner_cell_boundaries=needs_inner_cell_boundaries,
+        needs_outer_cell_boundaries=needs_outer_cell_boundaries,
     )
 
 

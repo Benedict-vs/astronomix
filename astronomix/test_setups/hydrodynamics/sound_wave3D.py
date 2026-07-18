@@ -1,6 +1,6 @@
-# 3D Linear Sound Wave
-
 """
+3D linear sound wave.
+
 Three-dimensional convergence test using a small-amplitude acoustic
 eigenmode of the linearised Euler equations propagating obliquely with
 respect to the grid axes. This is the pure-hydro analogue of the CP Alfvén
@@ -23,29 +23,40 @@ and the grid spacing is uniform. After ``n_periods`` full periods the
 analytic state has returned to the initial condition.
 """
 
+# typing
 from typing import NamedTuple
 
+# jax
+import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
+# astronomix constants
 from astronomix import CARTESIAN
-from astronomix.data_classes.simulation_helper_data import HelperData, get_helper_data
-from astronomix.initial_condition_generation.construct_primitive_state import (
-    construct_primitive_state,
-)
 from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     STATE_TYPE,
+)
+
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.data_classes.simulation_helper_data import _normalize_config_vectors
+from astronomix.option_classes.simulation_config import (
     BoundarySettings,
     BoundarySettings1D,
     SimulationConfig,
     StaticFloatVector,
-    finalize_config,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
-from astronomix.variable_registry.registered_variables import (
-    RegisteredVariables,
-    get_registered_variables,
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix.data_classes.simulation_helper_data import get_helper_data
+from astronomix.initial_condition_generation.construct_primitive_state import (
+    construct_primitive_state,
 )
+from astronomix.option_classes.simulation_config import finalize_config
+from astronomix.variable_registry.registered_variables import get_registered_variables
 
 
 # Propagation direction in the simulation frame: (1, 2, 2)/3 (matches the
@@ -179,6 +190,100 @@ def setup_sound_wave(
         t=0.0,
         settings=settings,
     )
+
+    config = finalize_config(config, state.shape)
+    return state, config, params
+
+
+def _build_sound_wave_fields(
+    config: SimulationConfig,
+    registered_variables: RegisteredVariables,
+    settings: SoundWave3DSettings,
+    sharding,
+) -> STATE_TYPE:
+    """Build the sound-wave primitive state *inside* a single jit so that,
+    under a (possibly multi-process) sharding, each device materialises only
+    its local shard.
+
+    The cell-center coordinates are generated lazily with ``jnp.linspace`` /
+    ``jnp.meshgrid`` and immediately constrained to the target sharding
+    *before* the wave fields are evaluated, so the full global meshgrid is
+    never formed on a single device.  The coordinate formula matches the
+    unpadded (``ngc = 0``) 3D-Cartesian branch of
+    :func:`astronomix.data_classes.simulation_helper_data._build_helper_data`,
+    so the result is bit-for-bit comparable with :func:`setup_sound_wave`.
+    """
+    config = _normalize_config_vectors(config)
+    gs = config.grid_spacing
+    nx, ny, nz = config.num_cells.x, config.num_cells.y, config.num_cells.z
+    Lx, Ly, Lz = config.box_size.x, config.box_size.y, config.box_size.z
+
+    x = jnp.linspace(gs / 2, Lx + gs / 2, nx, endpoint=False)
+    y = jnp.linspace(gs / 2, Ly + gs / 2, ny, endpoint=False)
+    z = jnp.linspace(gs / 2, Lz + gs / 2, nz, endpoint=False)
+    Xc, Yc, Zc = jnp.meshgrid(x, y, z, indexing="ij")
+
+    if sharding is not None:
+        # Stack axis (leading) replicated; X/Y/Z mapped to the same mesh axes
+        # as the primitive state (drop the leading vars entry of the state
+        # spec, as in simulation_helper_data._apply_sharding).
+        spatial_sharding = jax.NamedSharding(
+            sharding.mesh, PartitionSpec(None, *sharding.spec[1:4])
+        )
+        Xc, Yc, Zc = jax.lax.with_sharding_constraint(
+            jnp.stack([Xc, Yc, Zc]), spatial_sharding
+        )
+
+    rho, v_x, v_y, v_z, p = _wave_primitive_state(Xc, Yc, Zc, t=0.0, settings=settings)
+
+    return construct_primitive_state(
+        config=config,
+        registered_variables=registered_variables,
+        density=rho,
+        velocity_x=v_x,
+        velocity_y=v_y,
+        velocity_z=v_z,
+        gas_pressure=p,
+        sharding=sharding,
+    )
+
+
+def build_sound_wave_state_sharded(
+    config: SimulationConfig,
+    params: SimulationParams,
+    sharding,
+    settings: SoundWave3DSettings = SoundWave3DSettings(),
+) -> tuple[STATE_TYPE, SimulationConfig, SimulationParams]:
+    """Memory-lean, sharding-aware sound-wave setup for multi-GPU / multi-node.
+
+    Identical physics to :func:`setup_sound_wave`, but the initial state is
+    produced as a globally-sharded ``jax.Array`` with each process computing
+    only its local shard (no full-grid host array is ever materialised).  This
+    is what makes the very large multi-node weak-scaling runs (up to 2048^3)
+    possible.  Returns only the state, finalized config and params -- no
+    lingering helper-data arrays.
+
+    ``config.num_cells`` must already be set (to the *global* grid shape).
+    Pass ``sharding=None`` to get the single-device lean path.
+    """
+    period = 2.0 * jnp.pi / _omega(settings)
+    t_end = float(settings.n_periods * period)
+
+    config = config._replace(
+        geometry=CARTESIAN,
+        dimensionality=3,
+        box_size=StaticFloatVector(*settings.box_size),
+        boundary_settings=BoundarySettings(
+            x=BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
+            y=BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
+            z=BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
+        ),
+        mhd=False,
+    )
+    params = params._replace(t_end=t_end, gamma=settings.gamma)
+
+    registered_variables = get_registered_variables(config)
+    state = _build_sound_wave_fields(config, registered_variables, settings, sharding)
 
     config = finalize_config(config, state.shape)
     return state, config, params

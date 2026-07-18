@@ -1,19 +1,35 @@
 """
-Here we implement a simple mixing layer
-cooling based on Lancaster 2026.
+Simple mixing-layer cooling model based on Lancaster et al. (2026).
+
+Provides a phenomenological net cooling/heating rate as a function of
+temperature for a turbulent mixing layer, together with explicit and implicit
+temperature-update steps and a driver that applies the update to the pressure
+of the primitive state.
 """
 
+# general
 from functools import partial
 
+# jax
 import jax
 import jax.numpy as jnp
 
-from astronomix.option_classes.simulation_params import SimulationParams
+# astronomix constants
+from astronomix._modules._cooling.cooling_options import (
+    COOLING_CURVE_TYPE,
+    EXPLICIT_COOLING,
+    IMPLICIT_COOLING,
+)
+from astronomix.option_classes.simulation_config import FIELD_TYPE, STATE_TYPE
 
+# astronomix containers
+from astronomix._modules._cooling.cooling_options import (
+    CoolingConfig,
+    CoolingCurveConfig,
+    MixingCoolingParams,
+)
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
-from astronomix._modules._cooling.cooling_options import COOLING_CURVE_TYPE, EXPLICIT_COOLING, IMPLICIT_COOLING, CoolingConfig, CoolingCurveConfig, MixingCoolingParams
-from astronomix.option_classes.simulation_config import FIELD_TYPE, STATE_TYPE
 
 def _cooling_rate(
     temperature: jnp.ndarray,
@@ -23,7 +39,7 @@ def _cooling_rate(
     beta_low: float = -2,
     beta_high: float = 3,
 ) -> jnp.ndarray:
-    """
+    r"""
     Returns dT/dt in units where we have simplified
     T = P / rho, so T is in units of velocity^2.
 
@@ -36,61 +52,58 @@ def _cooling_rate(
     mach_number = mixing_cooling_params.mach_number
     chi = mixing_cooling_params.density_contrast
 
-    # assume L_box = 1.0
+    # The model is non-dimensionalised so the box size and the hot-medium
+    # background density and pressure are all unity.
     L_box = 1.0
-
-    # assume rho_0 = P_0 = 1.0
     rho0 = 1.0
     P0 = 1.0
 
-    # T = P / rho
-    P = temperature * density
-    # or P = P_0 (isobaric)
+    # With the simplification T = P / rho (so T carries units of velocity^2,
+    # and T = (gamma - 1) * e), the local pressure follows the temperature.
+    pressure = temperature * density
 
-    # adiabatic sound speed in the hot medium
+    # Adiabatic sound speed in the hot medium and the shear velocity set by the
+    # Mach number M = v_rel / c_s_hot.
     c_s_hot = jnp.sqrt(gamma * P0 / rho0)
-
-    # relative shear velocity, mach number M = v_rel / c_s_hot
     v_rel = mach_number * c_s_hot
 
-    # simplification: T = P / rho
-    # (so T in units velocity^2)
-    # such that T = (gamma - 1) * e
-
+    # Shear time and minimum cooling time; xi = t_sh / t_coolmin controls how
+    # strongly the layer cools relative to the shear timescale.
     t_sh = L_box / v_rel
     t_coolmin = t_sh / xi
 
     T_hot = P0 / rho0
     T_cold = T_hot / chi
 
-    # peak of the cooling rate
+    # Temperature at which the cooling rate peaks.
     T_pk = (T_cold ** 2 * T_hot) ** (1/3)
 
-    # peak cooling rate
-    edot_max = P0 / (gamma - 1) / t_coolmin * (P / P0) ** 2
+    # Peak cooling rate.
+    edot_max = P0 / (gamma - 1) / t_coolmin * (pressure / P0) ** 2
 
-    # power law index
+    # Broken power-law slope of the cooling rate either side of the peak.
     beta = jnp.where(
         temperature < T_pk,
         beta_low,
         beta_high
     )
 
-    # cooling rate as a function of temperature
+    # Cooling rate as a function of temperature.
     edot_cooling = edot_max * (temperature / T_pk) ** (-beta)
 
-    # heating rate as a function of temperature
+    # Heating rate as a function of temperature, with a smooth roll-off above
+    # the hot-medium temperature.
     T_lim = 1.05 * T_hot
     c_heat = (T_cold / T_pk) ** ((beta_high - beta_low) * (1 + jnp.log(T_cold / T_pk) / jnp.log(chi)))
     alpha_heat = (beta_low - beta_high) * (jnp.log(T_cold / T_pk) / jnp.log(chi)) - beta_high
-    f = jnp.where(
+    heating_shape = jnp.where(
         temperature < T_lim,
         (temperature / T_pk) ** alpha_heat,
         (T_lim / T_pk) ** alpha_heat * (temperature / T_lim) ** (-beta_high - 0.5)
     )
-    edot_heating = c_heat * edot_max * f
+    edot_heating = c_heat * edot_max * heating_shape
 
-    # net cooling rate
+    # Net (heating minus cooling) energy rate, converted back to dT/dt.
     edot_net = edot_heating - edot_cooling
 
     return (gamma - 1) * edot_net / density
@@ -104,6 +117,19 @@ def update_temperature_explicit(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
+    """Advance the temperature one explicit (forward-Euler) cooling step.
+
+    Args:
+        density: The density field.
+        temperature: The current temperature field.
+        time_step: The time step.
+        gamma: The adiabatic index.
+        cooling_curve_config: The static cooling-curve configuration.
+        cooling_curve_params: The cooling-curve parameters.
+
+    Returns:
+        The temperature field after one explicit cooling step.
+    """
     return (
         temperature
         + _cooling_rate(
@@ -124,6 +150,22 @@ def update_temperature_implicit(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
+    """Advance the temperature one implicit (backward-Euler) cooling step.
+
+    The implicit relation is solved with a simple fixed-point iteration, which
+    is robust enough for the smooth mixing-layer cooling rate.
+
+    Args:
+        density: The density field.
+        temperature: The current temperature field.
+        time_step: The time step.
+        gamma: The adiabatic index.
+        cooling_curve_config: The static cooling-curve configuration.
+        cooling_curve_params: The cooling-curve parameters.
+
+    Returns:
+        The temperature field after one implicit cooling step.
+    """
 
     def implicit_eq(T_new):
         return (temperature
@@ -134,8 +176,8 @@ def update_temperature_implicit(
             gamma,
         ) * time_step)
 
-    # use a simple fixed point iteration
-    # - maybe do newton or bisection method later
+    # A simple fixed-point iteration suffices here; a Newton or bisection
+    # solver could be substituted later if convergence ever becomes an issue.
     max_iter = 50
     tol = 1e-6
 
@@ -163,9 +205,20 @@ def update_pressure_by_cooling_mixing(
     simulation_params: SimulationParams,
     time_step: float,
 ) -> STATE_TYPE:
-    
-    # here assume T = P / rho
-    
+    """Apply mixing-layer cooling to the pressure of the primitive state.
+
+    Args:
+        primitive_state: The primitive state array.
+        registered_variables: The registered variables.
+        cooling_config: The cooling configuration (selects explicit/implicit).
+        simulation_params: The simulation parameters.
+        time_step: The time step.
+
+    Returns:
+        The primitive state with the pressure updated by cooling.
+    """
+
+    # This model uses the simplification T = P / rho throughout.
     cooling_curve_config = cooling_config.cooling_curve_config
 
     # get the parameters

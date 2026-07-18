@@ -1,33 +1,51 @@
-import jax.numpy as jnp
+"""
+Stellar-wind injection into the fluid state.
+
+Implements the wind injection schemes of https://arxiv.org/abs/2107.14673 for
+the finite-volume solver (mass-and-energy overwrite, momentum-and-energy
+injection, thermal-energy injection) in 1D and 3D, plus the source-term variant
+used by the finite-difference solver. ``_wind_injection`` dispatches to the
+appropriate scheme based on the configuration.
+"""
+
+# general
+from functools import partial
+
+# typing
+from typing import Union
+from jaxtyping import Array, Float, jaxtyped
+from beartype import beartype as typechecker
+
+# jax
 import jax
+import jax.numpy as jnp
+
+# astronomix constants
+from astronomix.option_classes.simulation_config import STATE_TYPE
+from astronomix._modules._stellar_wind.stellar_wind_options import (
+    MEO,
+    MEI,
+    EI,
+)
+
+# astronomix containers
 from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix._modules._stellar_wind.stellar_wind_options import (
+    WindConfig,
+    WindParams,
+)
+
+# astronomix functions
 from astronomix._fluid_equations._equations import (
     conserved_state_from_primitive,
     pressure_from_energy,
     primitive_state_from_conserved,
 )
 
-from jaxtyping import Array, Float, jaxtyped
-from beartype import beartype as typechecker
 
-from functools import partial
-
-from astronomix.variable_registry.registered_variables import RegisteredVariables
-from astronomix.option_classes.simulation_config import STATE_TYPE, SimulationConfig
-from astronomix.option_classes.simulation_params import SimulationParams
-
-from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
-from astronomix._modules._stellar_wind.stellar_wind_options import (
-    WindConfig,
-    MEO,
-    MEI,
-    EI,
-)
-
-from typing import Union
-
-
-# @jaxtyped(typechecker=typechecker)
 @partial(jax.jit, static_argnames=["config", "registered_variables"])
 def _wind_injection(
     primitive_state: STATE_TYPE,
@@ -39,12 +57,15 @@ def _wind_injection(
 ) -> STATE_TYPE:
     """Inject stellar wind into the simulation.
 
+    Dispatches to the configured injection scheme for the active dimensionality.
+
     Args:
         primitive_state: The primitive state array.
         dt: The time step.
         config: The simulation configuration.
         params: The simulation parameters.
         helper_data: The helper data.
+        registered_variables: The registered variables.
 
     Returns:
         The primitive state array with the stellar wind injected.
@@ -107,13 +128,13 @@ def _wind_injection(
     return primitive_state
 
 
-# ================= Wind injection schemes =================
+# -------------------------------------------------------------
+# =============== ↓ Wind injection schemes ↓ ==================
+# -------------------------------------------------------------
+#
+# All injection schemes here follow https://arxiv.org/abs/2107.14673.
 
-# here we implement all the injection schemes from
-# https://arxiv.org/abs/2107.14673
 
-
-# @jaxtyped(typechecker=typechecker)
 @partial(jax.jit, static_argnames=["num_ghost_cells", "num_injection_cells"])
 def _wind_meo(
     wind_params: WindParams,
@@ -124,7 +145,7 @@ def _wind_meo(
     num_injection_cells: int,
     gamma: Union[float, Float[Array, ""]],
 ) -> Float[Array, "num_vars num_cells"]:
-    """Inject stellar wind into the simulation by a mass-and-energy-overwrite scheme (MEO).
+    """Inject stellar wind by a momentum-and-energy-overwrite scheme (MEO).
 
     Args:
         wind_params: The wind parameters.
@@ -139,7 +160,8 @@ def _wind_meo(
         The primitive state array with the stellar wind injected.
     """
 
-    # set density
+    # Overwrite the density in the injection cells with the steady free-wind
+    # density rho = M_dot * (r_out - r_in) / (v_inf * V_cell).
     density_overwrite = (
         wind_params.wind_mass_loss_rate
         / helper_data.cell_volumes[
@@ -159,12 +181,12 @@ def _wind_meo(
         0, num_ghost_cells : num_injection_cells + num_ghost_cells
     ].set(density_overwrite)
 
-    # set velocity
+    # Overwrite the velocity with the wind terminal velocity.
     primitive_state = primitive_state.at[
         1, num_ghost_cells : num_injection_cells + num_ghost_cells
     ].set(wind_params.wind_final_velocity)
 
-    # set pressure to the floor value
+    # Overwrite the pressure with the configured floor value.
     primitive_state = primitive_state.at[
         2, num_ghost_cells : num_injection_cells + num_ghost_cells
     ].set(wind_params.pressure_floor)
@@ -172,7 +194,6 @@ def _wind_meo(
     return primitive_state
 
 
-# @jaxtyped(typechecker=typechecker)
 @partial(
     jax.jit,
     static_argnames=[
@@ -193,16 +214,18 @@ def _wind_mei(
     gamma: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> Float[Array, "num_vars num_cells"]:
-    """Inject stellar wind into the simulation by a momentum-and-energy-injection scheme (MEI).
+    """Inject stellar wind by a momentum-and-energy-injection scheme (MEI).
 
     Args:
         wind_params: The wind parameters.
         primitive_state: The primitive state array.
         dt: The time step.
+        config: The simulation configuration.
         helper_data: The helper data.
         num_ghost_cells: The number of ghost cells.
         num_injection_cells: The number of injection cells.
         gamma: The adiabatic index.
+        registered_variables: The registered variables.
 
     Returns:
         The primitive state array with the stellar wind injected.
@@ -212,26 +235,30 @@ def _wind_mei(
         primitive_state, gamma, config, registered_variables
     )
 
-    V_inj = (
+    # Spherical injection volume out to the outer boundary of the last
+    # injection cell.
+    injection_volume = (
         4
         / 3
         * jnp.pi
         * helper_data.outer_cell_boundaries[num_injection_cells + num_ghost_cells] ** 3
     )
 
-    drho = wind_params.wind_mass_loss_rate * dt / V_inj
-    dmomentum = wind_params.wind_final_velocity * drho
-    denergy = 0.5 * wind_params.wind_final_velocity**2 * drho
+    # Distribute the per-step wind mass, momentum and energy over the injection
+    # volume and add them to the conserved state.
+    delta_density = wind_params.wind_mass_loss_rate * dt / injection_volume
+    delta_momentum = wind_params.wind_final_velocity * delta_density
+    delta_energy = 0.5 * wind_params.wind_final_velocity**2 * delta_density
 
     conservative_state = conservative_state.at[
         0, num_ghost_cells : num_injection_cells + num_ghost_cells
-    ].add(drho)
+    ].add(delta_density)
     conservative_state = conservative_state.at[
         1, num_ghost_cells : num_injection_cells + num_ghost_cells
-    ].add(dmomentum)
+    ].add(delta_momentum)
     conservative_state = conservative_state.at[
         2, num_ghost_cells : num_injection_cells + num_ghost_cells
-    ].add(denergy)
+    ].add(delta_energy)
 
     primitive_state = primitive_state_from_conserved(
         conservative_state, gamma, config, registered_variables
@@ -240,8 +267,6 @@ def _wind_mei(
     return primitive_state
 
 
-# not really ei
-# @jaxtyped(typechecker=typechecker)
 @partial(
     jax.jit,
     static_argnames=["num_ghost_cells", "num_injection_cells", "registered_variables"],
@@ -256,7 +281,7 @@ def _wind_ei(
     gamma: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> Float[Array, "num_vars num_cells"]:
-    """Inject stellar wind into the simulation by an thermal-energy-injection scheme (EI).
+    """Inject stellar wind by a thermal-energy-injection scheme (EI).
 
     Args:
         wind_params: The wind parameters.
@@ -266,6 +291,7 @@ def _wind_ei(
         num_ghost_cells: The number of ghost cells.
         num_injection_cells: The number of injection cells.
         gamma: The adiabatic index.
+        registered_variables: The registered variables.
 
     Returns:
         The primitive state array with the stellar wind injected.
@@ -273,40 +299,41 @@ def _wind_ei(
 
     source_term = jnp.zeros_like(primitive_state)
 
-    # r = helper_data.volumetric_centers
-    # r = helper_data.outer_cell_boundaries
-    # r_inj = r[num_injection_cells + 2]
-    # V = 4/3 * jnp.pi * r_inj**3
-
-    V = jnp.sum(
+    # Total volume of the injection cells, over which the wind mass and energy
+    # rates are distributed.
+    injection_volume = jnp.sum(
         helper_data.cell_volumes[
             num_ghost_cells : num_injection_cells + num_ghost_cells
         ]
     )
 
-    # mass injection
-    drho_dt = wind_params.wind_mass_loss_rate / V
+    # Mass injection: a uniform density source rate over the injection cells.
+    density_rate = wind_params.wind_mass_loss_rate / injection_volume
     source_term = source_term.at[
         0, num_ghost_cells : num_injection_cells + num_ghost_cells
-    ].set(drho_dt)
+    ].set(density_rate)
     updated_density = (
         primitive_state[0, num_ghost_cells : num_injection_cells + num_ghost_cells]
-        + drho_dt * dt
+        + density_rate * dt
     )
 
+    # When a wind-density tracer is active, tag the injected mass with the same
+    # source rate so the tracer follows the wind material.
     if registered_variables.wind_density_active:
         source_term = source_term.at[
             registered_variables.wind_density_index,
             num_ghost_cells : num_injection_cells + num_ghost_cells,
-        ].set(drho_dt)
+        ].set(density_rate)
 
-    # energy injection
-    dE_dt = (
-        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate / V
+    # Energy injection: convert the kinetic luminosity of the wind into a
+    # pressure source rate at the freshly injected density.
+    energy_rate = (
+        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate
+        / injection_volume
     )
 
-    dp_dt = pressure_from_energy(
-        dE_dt,
+    pressure_rate = pressure_from_energy(
+        energy_rate,
         updated_density,
         primitive_state[1, num_ghost_cells : num_injection_cells + num_ghost_cells],
         gamma,
@@ -314,15 +341,13 @@ def _wind_ei(
 
     source_term = source_term.at[
         2, num_ghost_cells : num_injection_cells + num_ghost_cells
-    ].set(dp_dt)
+    ].set(pressure_rate)
 
     primitive_state = primitive_state + source_term * dt
 
     return primitive_state
 
 
-# not really ei
-# @jaxtyped(typechecker=typechecker)
 @partial(
     jax.jit,
     static_argnames=["num_ghost_cells", "num_injection_cells", "registered_variables"],
@@ -338,6 +363,26 @@ def dummy_multi_star_wind(
     gamma: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
+    """Inject identical winds from several hard-coded star positions (3D).
+
+    A placeholder multi-source variant of the thermal-energy-injection scheme:
+    it loops over a fixed list of star positions and adds a spherical mass and
+    energy source around each.
+
+    Args:
+        wind_params: The wind parameters.
+        primitive_state: The primitive state array.
+        dt: The time step.
+        config: The simulation configuration.
+        helper_data: The helper data.
+        num_ghost_cells: The number of ghost cells.
+        num_injection_cells: The number of injection cells.
+        gamma: The adiabatic index.
+        registered_variables: The registered variables.
+
+    Returns:
+        The primitive state array with the stellar winds injected.
+    """
     star_positions = [
         jnp.array([0.2, 0.3, 0.5]),
         jnp.array([0.5, 0.7, 0.5]),
@@ -346,46 +391,51 @@ def dummy_multi_star_wind(
     ]
 
     for star_position in star_positions:
-        r = jnp.linalg.norm(helper_data.geometric_centers - star_position, axis=-1)
+        # Distance of every cell from this star.
+        radius = jnp.linalg.norm(
+            helper_data.geometric_centers - star_position, axis=-1
+        )
 
         source_term = jnp.zeros_like(primitive_state)
 
-        r_inj = num_injection_cells * config.grid_spacing
-        V = 4 / 3 * jnp.pi * r_inj**3
+        injection_radius = num_injection_cells * config.grid_spacing
+        injection_volume = 4 / 3 * jnp.pi * injection_radius**3
 
-        # for now only allow injection at the box center
-        injection_mask = r <= r_inj - config.grid_spacing / 2
+        # Inject only inside the spherical injection region around the star.
+        injection_mask = radius <= injection_radius - config.grid_spacing / 2
 
-        # mass injection
-        drho_dt = wind_params.wind_mass_loss_rate / V
-        # source_term = source_term.at[registered_variables.density_index].set(jnp.where(injection_mask, drho_dt, source_term[registered_variables.density_index]))
+        # Mass injection: a uniform density source rate inside the mask.
+        density_rate = wind_params.wind_mass_loss_rate / injection_volume
         source_term = source_term.at[registered_variables.density_index].set(
-            drho_dt * injection_mask
+            density_rate * injection_mask
         )
 
         updated_density = primitive_state[registered_variables.density_index]
         updated_density = jnp.where(
             injection_mask > 0,
-            updated_density + drho_dt * dt * injection_mask,
+            updated_density + density_rate * dt * injection_mask,
             updated_density,
         )
 
-        # energy injection
-        dE_dt = (
+        # Energy injection: the kinetic luminosity converted to a pressure
+        # source rate at the freshly injected density.
+        energy_rate = (
             0.5
             * wind_params.wind_final_velocity**2
             * wind_params.wind_mass_loss_rate
-            / V
+            / injection_volume
         )
-        u = jnp.sqrt(
+        speed = jnp.sqrt(
             primitive_state[registered_variables.velocity_index.x] ** 2
             + primitive_state[registered_variables.velocity_index.y] ** 2
             + primitive_state[registered_variables.velocity_index.z] ** 2
         )
-        dp_dt = pressure_from_energy(dE_dt, updated_density, u, gamma)
+        pressure_rate = pressure_from_energy(
+            energy_rate, updated_density, speed, gamma
+        )
 
         source_term = source_term.at[registered_variables.pressure_index].set(
-            dp_dt * injection_mask
+            pressure_rate * injection_mask
         )
 
         primitive_state = primitive_state + source_term * dt
@@ -393,8 +443,6 @@ def dummy_multi_star_wind(
     return primitive_state
 
 
-# not really ei
-# @jaxtyped(typechecker=typechecker)
 @partial(
     jax.jit,
     static_argnames=["num_ghost_cells", "num_injection_cells", "registered_variables"],
@@ -410,16 +458,18 @@ def _wind_ei3D(
     gamma: Union[float, Float[Array, ""]],
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
-    """Inject stellar wind into the simulation by an thermal-energy-injection scheme (EI).
+    """Inject stellar wind by a thermal-energy-injection scheme in 3D (EI).
 
     Args:
         wind_params: The wind parameters.
         primitive_state: The primitive state array.
         dt: The time step.
+        config: The simulation configuration.
         helper_data: The helper data.
         num_ghost_cells: The number of ghost cells.
         num_injection_cells: The number of injection cells.
         gamma: The adiabatic index.
+        registered_variables: The registered variables.
 
     Returns:
         The primitive state array with the stellar wind injected.
@@ -427,56 +477,48 @@ def _wind_ei3D(
 
     source_term = jnp.zeros_like(primitive_state)
 
-    r_inj = num_injection_cells * config.grid_spacing
-    V = 4 / 3 * jnp.pi * r_inj**3
+    injection_radius = num_injection_cells * config.grid_spacing
+    injection_volume = 4 / 3 * jnp.pi * injection_radius**3
 
-    # for now only allow injection at the box center
-    injection_mask = helper_data.r <= r_inj - config.grid_spacing / 2
-    # overlap_weights = (r_inj + config.grid_spacing / 2 - helper_data.r) / config.grid_spacing
-    # overlap_mask = (helper_data.r > r_inj - config.grid_spacing / 2) & (helper_data.r < r_inj + config.grid_spacing / 2)
-    # overlap_weights = overlap_weights * overlap_mask
-    # injection_mask = injection_mask | overlap_mask
-    # injection_mask = injection_mask / jnp.sum(injection_mask * config.grid_spacing**3) * V
+    # Inject only inside the spherical injection region at the box centre.
+    injection_mask = helper_data.r <= injection_radius - config.grid_spacing / 2
 
-    # mass injection
-    drho_dt = wind_params.wind_mass_loss_rate / V
-    # source_term = source_term.at[registered_variables.density_index].set(jnp.where(injection_mask, drho_dt, source_term[registered_variables.density_index]))
+    # Mass injection: a uniform density source rate inside the mask.
+    density_rate = wind_params.wind_mass_loss_rate / injection_volume
     source_term = source_term.at[registered_variables.density_index].set(
-        drho_dt * injection_mask
+        density_rate * injection_mask
     )
 
     updated_density = primitive_state[registered_variables.density_index]
     updated_density = jnp.where(
         injection_mask > 0,
-        updated_density + drho_dt * dt * injection_mask,
+        updated_density + density_rate * dt * injection_mask,
         updated_density,
     )
 
-    # scale down the velocity in the primitive state to conserve momentum
-    # density_ratio = updated_density / primitive_state[registered_variables.density_index]
-    # primitive_state = primitive_state.at[registered_variables.velocity_index.x].set(jnp.where(injection_mask, primitive_state[registered_variables.velocity_index.x] * density_ratio, primitive_state[registered_variables.velocity_index.x]))
-    # primitive_state = primitive_state.at[registered_variables.velocity_index.y].set(jnp.where(injection_mask, primitive_state[registered_variables.velocity_index.y] * density_ratio, primitive_state[registered_variables.velocity_index.y]))
-    # primitive_state = primitive_state.at[registered_variables.velocity_index.z].set(jnp.where(injection_mask, primitive_state[registered_variables.velocity_index.z] * density_ratio, primitive_state[registered_variables.velocity_index.z]))
-
-    # energy injection
-    dE_dt = (
-        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate / V
+    # Energy injection: the kinetic luminosity converted to a pressure source
+    # rate at the freshly injected density. A small floor on the speed avoids a
+    # division by zero in the pressure conversion at rest.
+    energy_rate = (
+        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate
+        / injection_volume
     )
-    u = jnp.sqrt(
+    speed = jnp.sqrt(
         primitive_state[registered_variables.velocity_index.x] ** 2
         + primitive_state[registered_variables.velocity_index.y] ** 2
         + primitive_state[registered_variables.velocity_index.z] ** 2
         + 1e-20
     )
-    dp_dt = pressure_from_energy(dE_dt, updated_density, u, gamma)
+    pressure_rate = pressure_from_energy(energy_rate, updated_density, speed, gamma)
 
     source_term = source_term.at[registered_variables.pressure_index].set(
-        dp_dt * injection_mask
+        pressure_rate * injection_mask
     )
 
     primitive_state = primitive_state + source_term * dt
 
     return primitive_state
+
 
 @partial(
     jax.jit,
@@ -491,57 +533,73 @@ def _wind_ei3D_source(
     num_injection_cells: int,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
+    """Build the 3D stellar-wind source term for the conserved state (FD path).
+
+    Returns the conserved-state increment for one time step: a tapered spherical
+    mass and thermal-energy injection, plus a momentum correction that keeps the
+    kinetic energy unchanged as the density grows.
+
+    Args:
+        wind_params: The wind parameters.
+        conserved_state: The conserved state array.
+        dt: The time step.
+        config: The simulation configuration.
+        helper_data: The helper data.
+        num_injection_cells: The number of injection cells.
+        registered_variables: The registered variables.
+
+    Returns:
+        The conserved-state source-term increment for this time step.
+    """
 
     source_term = jnp.zeros_like(conserved_state)
 
-    r_inj = num_injection_cells * config.grid_spacing
-    r_1 = 1.3 * r_inj
+    injection_radius = num_injection_cells * config.grid_spacing
+    taper_radius = 1.3 * injection_radius
 
-    # taper down injection to avoid sharp cut-off
-    # injection_mask = helper_data.r <= r_inj
+    # Taper the injection linearly between the injection radius and the taper
+    # radius to avoid a sharp cut-off at the injection boundary.
     injection_mask = jnp.where(
-        helper_data.r <= r_inj,
+        helper_data.r <= injection_radius,
         1.0,
         jnp.where(
-            (helper_data.r > r_inj) & (helper_data.r <= r_1),
-            (r_1 - helper_data.r) / (r_1 - r_inj),
+            (helper_data.r > injection_radius) & (helper_data.r <= taper_radius),
+            (taper_radius - helper_data.r) / (taper_radius - injection_radius),
             0.0,
         ),
     )
 
-    V = jnp.sum(injection_mask) * config.grid_spacing**3
+    injection_volume = jnp.sum(injection_mask) * config.grid_spacing**3
 
-    # mass injection
-    # V = sum(injection_mask) * config.grid_spacing**3
-    drho_dt = wind_params.wind_mass_loss_rate / V
+    # Mass injection.
+    density_rate = wind_params.wind_mass_loss_rate / injection_volume
 
     source_term = source_term.at[registered_variables.density_index].set(
-        drho_dt * injection_mask * dt
+        density_rate * injection_mask * dt
     )
 
-    # energy injection
-    dE = (
-        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate / V * dt
+    # Energy injection.
+    delta_energy = (
+        0.5 * wind_params.wind_final_velocity**2 * wind_params.wind_mass_loss_rate
+        / injection_volume * dt
     )
 
-    # we do not want to inject kinetic energy, only thermal, the kinetic energy
-    # is 1/2 * rho * v^2 = 1/2 * m^2 / rho, momentum m, as we change the density,
-    # and until now keep the momentum constant, we would change the kinetic energy
-    # to keep the kinetic energy constant
-    # 1/2 m_old^2 / rho_old = 1/2 m_new^2 / rho_new ->
-    # m_new = m_old * sqrt(rho_new / rho_old) ->
-    # dm = m_old * (sqrt(rho_new / rho_old) - 1)
-    #    = m_old * (sqrt((rho_old + drho * dt) / rho_old) - 1)
-    #    = m_old * (sqrt(1 + drho * dt / rho_old) - 1)
+    # We only want to inject thermal, not kinetic, energy. The kinetic energy is
+    # 1/2 rho v^2 = 1/2 m^2 / rho (momentum m). Adding mass while holding the
+    # momentum fixed would change the kinetic energy, so we rescale the momentum
+    # to keep the kinetic energy constant:
+    #   1/2 m_old^2 / rho_old = 1/2 m_new^2 / rho_new
+    #   -> m_new = m_old sqrt(rho_new / rho_old)
+    #   -> dm = m_old (sqrt(1 + drho * dt / rho_old) - 1).
     momentum_source_factor = jnp.sqrt(
-        1 + drho_dt * dt * injection_mask
+        1 + density_rate * dt * injection_mask
         / (conserved_state[registered_variables.density_index])
     ) - 1.0
-    # ensure we only inject momentum within r_1, while
-    # the momentum source factor should be zero outside r_1 anyway
-    # (sqrt(1 + 0) - 1) = 0 there might be small numerical errors
+    # Restrict the momentum correction to within the taper radius. Outside it the
+    # factor is already (sqrt(1 + 0) - 1) = 0 up to small numerical error, so
+    # this just zeroes that residual.
     momentum_source_factor = jnp.where(
-        helper_data.r <= r_1, momentum_source_factor, 0.0
+        helper_data.r <= taper_radius, momentum_source_factor, 0.0
     )
 
     source_term = source_term.at[registered_variables.momentum_index.x].set(
@@ -555,67 +613,11 @@ def _wind_ei3D_source(
     )
 
     source_term = source_term.at[registered_variables.energy_index].set(
-        dE * injection_mask
+        delta_energy * injection_mask
     )
 
     return source_term
 
-
-# # @jaxtyped(typechecker=typechecker)
-# @partial(jax.jit, static_argnames=['num_ghost_cells', 'num_injection_cells', 'registered_variables'])
-# def _wind_ei3D_superres(wind_params: WindParams, primitive_state: STATE_TYPE, dt: Float[Array, ""], config: SimulationConfig, helper_data: HelperData, num_ghost_cells: int, num_injection_cells: int, gamma: Union[float, Float[Array, ""]], registered_variables: RegisteredVariables) -> STATE_TYPE:
-#     """Inject stellar wind into the simulation by an thermal-energy-injection scheme (EI).
-
-#     Args:
-#         wind_params: The wind parameters.
-#         primitive_state: The primitive state array.
-#         dt: The time step.
-#         helper_data: The helper data.
-#         num_ghost_cells: The number of ghost cells.
-#         num_injection_cells: The number of injection cells.
-#         gamma: The adiabatic index.
-
-#     Returns:
-#         The primitive state array with the stellar wind injected.
-#     """
-
-#     source_term = jnp.zeros_like(primitive_state)
-#     r_inj = num_injection_cells * config.grid_spacing
-
-#     total_mass_change = wind_params.wind_mass_loss_rate * dt
-#     total_energy_change = 0.5 * wind_params.wind_final_velocity**2 * total_mass_change
-
-#     superres_factor = 8
-#     superres_grid_size = superres_factor * num_injection_cells * 2
-#     superres_grid_spacing = config.grid_spacing / superres_factor
-
-#     half_width = superres_grid_size * superres_grid_spacing / 2
-
-#     x = jnp.linspace(-half_width, half_width, superres_grid_size)
-#     y = jnp.linspace(-half_width, half_width, superres_grid_size)
-#     z = jnp.linspace(-half_width, half_width, superres_grid_size)
-#     X, Y, Z = jnp.meshgrid(x, y, z, indexing='ij')
-#     R = jnp.sqrt(X**2 + Y**2 + Z**2)
-#     superres_injection_weights = R <= r_inj
-#     superres_injection_weights = superres_injection_weights / jnp.sum(superres_injection_weights)
-
-
-#     # sum pool down the mask to get to a mask of size (num_injection_cells * 2)^3
-#     superres_injection_weights = superres_injection_weights.reshape((num_injection_cells * 2, superres_factor,
-#                                    num_injection_cells * 2, superres_factor,
-#                                    num_injection_cells * 2, superres_factor)).sum(axis=(1, 3, 5))
-
-
-#     injection_weights = jnp.zeros_like(primitive_state[0])
-#     half_index = primitive_state[0].shape[0] // 2
-#     injection_weights = injection_weights.at[half_index - num_injection_cells:half_index + num_injection_cells, half_index - num_injection_cells:half_index + num_injection_cells, half_index - num_injection_cells:half_index + num_injection_cells].set(superres_injection_weights)
-
-#     source_term = source_term.at[registered_variables.density_index].set(total_mass_change * injection_weights / (config.grid_spacing**3))
-#     gamma = 4/3
-#     source_term = source_term.at[registered_variables.pressure_index].set(total_energy_change * (gamma - 1) * injection_weights / (config.grid_spacing**3))
-
-#     primitive_state = primitive_state + source_term
-
-#     return primitive_state
-
-# ======================================================
+# -------------------------------------------------------------
+# =============== ↑ Wind injection schemes ↑ ==================
+# -------------------------------------------------------------

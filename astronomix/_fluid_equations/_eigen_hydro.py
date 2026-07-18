@@ -7,17 +7,30 @@ are problematic for small x, especially when multiplying gradients in the backwa
 -> exploding gradients.
 """
 
+# general
 from functools import partial
-import jax
-import jax.numpy as jnp
+
+# typing
 from typing import Union
 
-from astronomix._stencil_operations._stencil_operations import _shift
+# jax
+import jax
+import jax.numpy as jnp
+
+# astronomix containers
 from astronomix.option_classes.simulation_config import SimulationConfig
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 
+# astronomix functions
+from astronomix._stencil_operations._stencil_operations import _shift
+
 
 def diff_safe_sqrt(x):
+    """Square root with a small floor, so its derivative stays finite at x = 0.
+
+    The derivative of sqrt(x) is 1 / (2 sqrt(x)), which blows up as x -> 0;
+    clamping the argument to a tiny epsilon keeps the backward pass well-behaved.
+    """
     epsilon = 1e-12
     x_safe = jnp.maximum(x, epsilon)
     return jnp.sqrt(x_safe)
@@ -145,14 +158,13 @@ def _eigenvector_building_blocks(
 
     specific_enthalpy = (energy + gas_pressure) / rho
 
-    # periodic average to interfaces
+    # Periodic average from cell centres to interfaces.
     def avg_x(arr):
         return 0.5 * (arr + _shift(arr, shift=-1, axis=0))
 
-    # rho_interface = avg_x(rho)
-    # velocity_x_interface = avg_x(velocity_x)
-
-    # average momenta approach
+    # Average the momenta (rather than the velocities) to the interface and divide
+    # by the interface density; this keeps the interface velocity consistent with
+    # the averaged conserved quantities.
     rho_interface = avg_x(jnp.maximum(rho, rhomin))
     rho_interface = jnp.maximum(rho_interface, rhomin)
     velocity_x_interface = avg_x(momentum_x) / rho_interface
@@ -161,15 +173,12 @@ def _eigenvector_building_blocks(
         velocity_y_interface = 0.0
         velocity_z_interface = 0.0
     elif config.dimensionality == 2:
-        # velocity_y_interface = avg_x(velocity_y)
         velocity_y_interface = avg_x(momentum_y) / rho_interface
         velocity_z_interface = 0.0
     elif config.dimensionality == 3:
-        # velocity_y_interface = avg_x(velocity_y)
         velocity_y_interface = avg_x(momentum_y) / rho_interface
-        # velocity_z_interface = avg_x(velocity_z)
         velocity_z_interface = avg_x(momentum_z) / rho_interface
-        
+
     specific_enthalpy_interface = avg_x(specific_enthalpy)
 
     # interface derived quantities

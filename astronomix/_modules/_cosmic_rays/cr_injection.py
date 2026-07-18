@@ -1,28 +1,39 @@
+"""
+Cosmic-ray injection at shock fronts (diffusive shock acceleration).
+
+Locates the strongest shock in the domain, estimates its Mach number from the
+jump conditions, and converts a configurable fraction of the dissipated energy
+into cosmic-ray pressure. The injected energy is distributed across the
+broadened numerical shock layer. The scheme follows Pfrommer et al. (2017) and
+Dubois et al. (2019); see ``inject_crs_at_strongest_shock`` for the references.
+"""
+
 # general
-from typing import Union
-import jax
-import jax.numpy as jnp
 from functools import partial
 
 # typing
+from typing import Union
 from jaxtyping import Array, Float, jaxtyped
 from beartype import beartype as typechecker
-from typing import Union
-from astronomix.option_classes.simulation_config import STATE_TYPE
 
-# astronomix classes
+# jax
+import jax
+import jax.numpy as jnp
+
+# astronomix constants
+from astronomix.option_classes.simulation_config import SPHERICAL, STATE_TYPE
+
+# astronomix containers
 from astronomix._modules._cosmic_rays.cosmic_ray_options import CosmicRayParams
 from astronomix.data_classes.simulation_helper_data import HelperData
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 from astronomix.option_classes.simulation_config import SimulationConfig
 
-# astronomix constants
-from astronomix.option_classes.simulation_config import SPHERICAL
-
 # astronomix functions
 from astronomix.shock_finder.shock_finder import find_shock_zone
 
-# NOTE: currently only supports 1d setups, TODO: generalize
+# NOTE: this routine currently only supports 1D setups; generalising it to
+# 2D / 3D is still outstanding.
 
 
 @partial(jax.jit, static_argnames=["registered_variables", "config"])
@@ -68,48 +79,56 @@ def inject_crs_at_strongest_shock(
 
     num_cells = primitive_state.shape[1]
 
-    # the injection efficiency is specified by the user
-    injection_efficiency = cosmic_ray_params.diffusive_shock_acceleration_efficiency
-    # in future use e.g. models as implemented in
+    # The injection efficiency (fraction of dissipated energy that goes into
+    # cosmic rays) is supplied by the user. In future this could be replaced by
+    # a Mach-dependent model, e.g. the ones in
     # https://github.com/LudwigBoess/DiffusiveShockAccelerationModels.jl/tree/main/src/mach_models
+    injection_efficiency = cosmic_ray_params.diffusive_shock_acceleration_efficiency
 
-    # currently for crs the adiabatic indices are hard coded
+    # The adiabatic indices for the two fluids are currently hard-coded; the gas
+    # index follows the user-supplied ``gamma``.
     gamma_cr = 4 / 3
     gamma_gas = gamma
 
-    # find the strongest shock
+    # -------------------------------------------------------------
+    # ============= ↓ Locate the strongest shock ↓ ===============
+    # -------------------------------------------------------------
+
     max_shock_idx, left_idx, right_idx = find_shock_zone(
-        primitive_state, config, registered_variables, helper_data
+        primitive_state,
+        config,
+        registered_variables,
+        helper_data,
     )
 
-    # left_idx = left_idx + 2
-    # +2 leads to a smoother transition of the different pressure
-    # components in the shock, but will lead to problems at lower
-    # resolutions, also note the problem that CR pressure injected
-    # in the broadened shock layer experiences PCR∇.u forces
-    # (Dubois et al, 2019), so one might overinject effectively
+    # NOTE: shifting ``left_idx`` outward by +2 smooths the transition of the
+    # different pressure components across the shock, but causes problems at
+    # lower resolutions. There is also the subtlety that cosmic-ray pressure
+    # injected into the broadened shock layer experiences P_CR * div(u) forces
+    # (Dubois et al. 2019), which can lead to effective over-injection.
 
-    # we only consider a shock moving from left to right
-    # pre-shock is upstream in the shock frame
-    # post-shock is downstream in the shock frame
+    # We only consider a shock moving from left to right, so the pre-shock state
+    # is upstream and the post-shock state is downstream in the shock frame.
     pre_shock_idx = right_idx + 1
     post_shock_idx = left_idx - 1
 
-    # get the pre shock (upstream) state
-    rho1 = primitive_state[registered_variables.density_index, pre_shock_idx]  # density
-    P1 = primitive_state[
-        registered_variables.pressure_index, pre_shock_idx
-    ]  # total pressure
+    # -------------------------------------------------------------
+    # ======== ↓ Pre- and post-shock fluid quantities ↓ =========
+    # -------------------------------------------------------------
+
+    # Pre-shock (upstream) state: density, total/CR/gas pressures and energies.
+    rho1 = primitive_state[registered_variables.density_index, pre_shock_idx]
+    P1 = primitive_state[registered_variables.pressure_index, pre_shock_idx]
     P1_CRs = (
         primitive_state[registered_variables.cosmic_ray_n_index, pre_shock_idx]
         ** gamma_cr
-    )  # cosmic ray pressure
-    P1_gas = P1 - P1_CRs  # gas pressure
-    e1_gas = P1_gas / (gamma_gas - 1)  # gas energy / volume
-    e1_crs = P1_CRs / (gamma_cr - 1)  # cosmic ray energy / volume
-    e1 = e1_gas + e1_crs  # total energy / volume
+    )
+    P1_gas = P1 - P1_CRs
+    e1_gas = P1_gas / (gamma_gas - 1)  # gas energy density
+    e1_crs = P1_CRs / (gamma_cr - 1)  # cosmic-ray energy density
+    e1 = e1_gas + e1_crs  # total energy density
 
-    # get the post shock state
+    # Post-shock (downstream) state.
     rho2 = primitive_state[registered_variables.density_index, post_shock_idx]
     P2 = primitive_state[registered_variables.pressure_index, post_shock_idx]
     P2_CRs = (
@@ -121,36 +140,37 @@ def inject_crs_at_strongest_shock(
     e2_crs = P2_CRs / (gamma_cr - 1)
     e2 = e2_gas + e2_crs
 
-    # get the effective adiabatic index
-    gamma_eff1 = (gamma_cr * P1_CRs + gamma_gas * P1_gas) / P1
+    # -------------------------------------------------------------
+    # ============ ↓ Mach number and dissipated flux ↓ ===========
+    # -------------------------------------------------------------
 
-    # calculate the pre-shock sound speed
+    # Effective adiabatic index of the upstream mixture, and the corresponding
+    # upstream sound speed.
+    gamma_eff1 = (gamma_cr * P1_CRs + gamma_gas * P1_gas) / P1
     c1 = jnp.sqrt(gamma_eff1 * P1 / rho1)
 
-    # density ratio
+    # Compression ratio across the shock.
     x_s = rho2 / rho1
 
-    # pre-shock mach number, simplest formula
-    # M_1_sq = (P2 / P1 - 1) * x_s / (gamma_eff1 * (x_s - 1))
-
+    # Effective adiabatic indices on both sides of the shock.
     gamma_eff1 = (gamma_cr * P1_CRs + gamma_gas * P1_gas) / P1
     gamma_eff2 = (gamma_cr * P2_CRs + gamma_gas * P2_gas) / P2
 
+    # Pressure-weighted "energy" adiabatic indices used by the Mach-number
+    # estimate below.
     gamma1 = P1 / e1 + 1
     gamma2 = P2 / e2 + 1
 
     gammat = P2 / P1
-
     C = ((gamma2 + 1) * gammat + gamma2 - 1) * (gamma1 - 1)
 
-    # formula 16 in Dubois et al 2019, differing slightly
-    # from the expression in Pfrommer et al 2017, note however
-    # that in Pfrommer et al 2017 this formula is only used
-    # for the shock finder (because it is only a lower bound)
-    # and not the injection itself, where
-    # M_1_sq = (P2 / P1 - 1) * x_s / (gamma_eff1 * (x_s - 1))
-    # is used, which in my experience led to more crashes
-    # in spherical geometry setups
+    # Squared pre-shock Mach number following Eq. 16 of Dubois et al. (2019).
+    # This differs slightly from the expression in Pfrommer et al. (2017), where
+    # the simpler formula
+    #     M_1_sq = (P2 / P1 - 1) * x_s / (gamma_eff1 * (x_s - 1))
+    # is used for the injection itself (it is only a lower bound there). In our
+    # experience that simpler form led to more crashes in spherical-geometry
+    # setups, so the Dubois form is preferred here.
     M_1_sq = (
         1
         / gamma_eff2
@@ -159,29 +179,34 @@ def inject_crs_at_strongest_shock(
         / (C - ((gamma1 + 1) + (gamma1 - 1) * gammat) * (gamma2 - 1))
     )
 
-    # dissipated energy density
+    # Dissipated energy density and the corresponding dissipated energy flux
+    # through the shock surface.
     e_diss = e2_gas - e1_gas * x_s**gamma_gas + e2_crs - e1_crs * x_s**gamma_cr
-
-    # dissipated flux
     f_diss = e_diss * jnp.sqrt(M_1_sq) * c1 / x_s
 
-    # calculate the shock surface
+    # -------------------------------------------------------------
+    # ============ ↓ Distribute the injected energy ↓ ============
+    # -------------------------------------------------------------
+
+    # Shock surface area: a sphere in spherical geometry, otherwise the
+    # transverse cell area implied by the grid spacing and dimensionality.
     if config.geometry == SPHERICAL:
         shock_radius = helper_data.geometric_centers[max_shock_idx]
         shock_surface = 4 * jnp.pi * shock_radius**2
     else:
         shock_surface = config.grid_spacing ** (config.dimensionality - 1)
 
-    # energy to be injected in the form of cosmic ray pressure
+    # Total energy to be injected as cosmic-ray pressure over this time step.
     DeltaE_CR = f_diss * shock_surface * dt * injection_efficiency
 
-    # get a mask for the shock, if an injection as done in Pfommer et al. 2017 is desired
+    # Build a mask for the broadened shock zone over which the energy is spread.
+    # NOTE: Pfrommer et al. (2017) use ``post_shock_idx`` here instead of
+    # ``left_idx`` as the lower bound.
     indices = jnp.arange(num_cells)
-
-    # in Pfrommer et al 2017 instead of left_idx the post_shock_idx is used
-    # as far as I understand
     shock_zone_mask = (indices >= left_idx) & (indices <= max_shock_idx)
 
+    # Distribute the injected energy across the shock zone in proportion to each
+    # cell's total energy excess relative to the upstream reference cell.
     cosmic_ray_pressure = (
         primitive_state[registered_variables.cosmic_ray_n_index] ** gamma_cr
     )
@@ -195,21 +220,27 @@ def inject_crs_at_strongest_shock(
     DeltaE_CR_split = DeltaE_CR * (E_tot - E_tot[right_idx]) / DeltaEtot
     DeltaE_CR_split = jnp.where(shock_zone_mask, DeltaE_CR_split, 0)
 
-    # to be injected cosmic ray pressure
+    # -------------------------------------------------------------
+    # ============ ↓ Apply the cosmic-ray injection ↓ ============
+    # -------------------------------------------------------------
+
+    # Existing cosmic-ray pressure, then the updated pressure after injection.
     p_cr_injection = (
         primitive_state[registered_variables.cosmic_ray_n_index] ** gamma_cr
     )
-    # updated cosmic ray pressure
     p_cr_injection_new = p_cr_injection + DeltaE_CR_split / helper_data.cell_volumes * (
         gamma_cr - 1
     )
-    # note that we work with n_cr = P_CR ^ (1 / gamma_cr) to describe the cosmic rays
+    # The cosmic rays are tracked through n_cr = P_CR ** (1 / gamma_cr), so the
+    # updated pressure is converted back to the advected scalar before storing.
     n_cr_injection_new = p_cr_injection_new ** (1 / gamma_cr)
     primitive_state = primitive_state.at[registered_variables.cosmic_ray_n_index].set(
         n_cr_injection_new
     )
 
-    # we want energy and not pressure conservation, so the total pressure must be adapted
+    # We want energy (not pressure) conservation, so removing thermal energy and
+    # converting it into cosmic-ray energy requires adapting the stored total
+    # pressure accordingly.
     delta_p_gas = DeltaE_CR_split / helper_data.cell_volumes * (gamma_gas - 1)
     p_gas_new = (
         primitive_state[registered_variables.pressure_index]
@@ -218,7 +249,6 @@ def inject_crs_at_strongest_shock(
     )
     total_pressure_new = p_gas_new + p_cr_injection_new
 
-    # update the total pressure
     primitive_state = primitive_state.at[registered_variables.pressure_index].set(
         total_pressure_new
     )

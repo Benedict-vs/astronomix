@@ -19,24 +19,33 @@ the periodic box, so the exact final density profile coincides with the
 initial one.
 """
 
+# typing
 from typing import NamedTuple
 
+# jax
 import jax.numpy as jnp
 
+# astronomix constants
 from astronomix import CARTESIAN
-from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.initial_condition_generation.construct_primitive_state import (
-    construct_primitive_state,
-)
 from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     STATE_TYPE,
+)
+
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import (
     BoundarySettings1D,
     SimulationConfig,
-    finalize_config,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix.initial_condition_generation.construct_primitive_state import (
+    construct_primitive_state,
+)
+from astronomix.option_classes.simulation_config import finalize_config
 
 
 class GaussianPulseAdvection1DSettings(NamedTuple):

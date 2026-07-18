@@ -31,10 +31,14 @@ div(B)=0 is preserved; blending toward LLF merely adds a localised magnetic
 diffusivity at the trouble cell, and the normal-B flux is overwritten by CT).
 """
 
+# jax
 import jax.numpy as jnp
 
-from astronomix._stencil_operations._stencil_operations import _shift
+# astronomix constants
 from astronomix.option_classes.simulation_config import IDEAL_GAS
+
+# astronomix functions
+from astronomix._stencil_operations._stencil_operations import _shift
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +217,8 @@ def _deepvoid_blend_weight(conserved_state, axis, params, config,
 # ---------------------------------------------------------------------------
 
 def _momentum_components(config, registered_variables):
+    """Return the conserved-state momentum component indices for this run,
+    truncated to the active dimensionality."""
     if config.dimensionality == 1:
         return [registered_variables.velocity_index]
     return [registered_variables.velocity_index.x,
@@ -328,6 +334,9 @@ def _blend_interface_flux(dF_weno, conserved_state, axis, dtdx, params, config,
 # _blend_interface_flux with the activation paths selected via config.
 def _deepvoid_llf_blend(dF_weno, conserved_state, axis, params, config,
                         registered_variables):
+    """Deep-void-only LLF blend (density ramp). Back-compat entry point; new
+    code uses ``_blend_interface_flux`` with the activation paths selected via
+    config."""
     F_llf = _local_lax_friedrichs_flux(
         conserved_state, axis, params, config, registered_variables)
     w = _deepvoid_blend_weight(

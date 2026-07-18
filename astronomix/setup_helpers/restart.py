@@ -5,16 +5,21 @@ path of the time integration: it reads the most recent checkpoint written to a
 directory and returns everything needed to continue the run.
 """
 
+# typing
 from typing import Optional, Tuple
 
+# jax
 import jax
 
+# astronomix containers
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.time_stepping.time_integration import LoopState
+
+# astronomix functions
 from astronomix._snapshotting._orbax_storage import (
     latest_step,
     load_loop_checkpoint,
 )
-from astronomix.option_classes.simulation_params import SimulationParams
-from astronomix.time_stepping.time_integration import LoopState
 
 
 def restart_from_latest_checkpoint(

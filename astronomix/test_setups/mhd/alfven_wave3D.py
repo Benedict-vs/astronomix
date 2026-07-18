@@ -1,6 +1,6 @@
-# Circularly Polarized Alfvén Wave (3D)
-
 """
+Circularly polarized Alfvén wave (3D).
+
 Three-dimensional convergence test using a circularly polarized Alfvén
 wave propagating obliquely with respect to the grid axes. Polarized Alfvén
 waves are common in astrophysical plasmas (e.g. the solar corona;
@@ -44,28 +44,39 @@ The uniform B background is added analytically in both cases.
 
 """
 
+# typing
 from typing import NamedTuple
 
+# jax
 import jax.numpy as jnp
 
+# astronomix constants
 from astronomix import CARTESIAN
-from astronomix.data_classes.simulation_helper_data import HelperData, get_helper_data
-from astronomix.initial_condition_generation.construct_primitive_state import (
-    construct_primitive_state,
-)
 from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     STATE_TYPE,
+    FINITE_DIFFERENCE,
+    FINITE_VOLUME,
+)
+
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import (
     BoundarySettings,
     BoundarySettings1D,
     SimulationConfig,
     StaticFloatVector,
-    finalize_config,
-    FINITE_DIFFERENCE,
-    FINITE_VOLUME,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
-from astronomix.variable_registry.registered_variables import RegisteredVariables, get_registered_variables
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix.data_classes.simulation_helper_data import get_helper_data
+from astronomix.initial_condition_generation.construct_primitive_state import (
+    construct_primitive_state,
+)
+from astronomix.option_classes.simulation_config import finalize_config
+from astronomix.variable_registry.registered_variables import get_registered_variables
 from astronomix._spatial_operators._differencing import finite_difference_int6
 from astronomix._spatial_operators._interpolate import interp_face_to_center
 

@@ -1,9 +1,19 @@
+"""
+High-order finite-difference operators on interface-defined fields.
+
+Provides the 6th-order interface-to-centre derivative used by the
+finite-difference (constrained-transport) backend and the magnetic-field
+divergence built from it.
+"""
+
+# general
+from functools import partial
+
+# jax
 import jax
 import jax.numpy as jnp
 
-
-from functools import partial
-
+# astronomix functions
 from astronomix._stencil_operations._stencil_operations import _shift
 
 

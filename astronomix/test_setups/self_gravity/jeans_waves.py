@@ -1,6 +1,6 @@
-# Jeans Linear Waves (3D)
+r"""
+Jeans linear waves (3D).
 
-"""
 Jeans Linear Waves are a self-gravity setup with
 analytical solution.
 
@@ -32,29 +32,37 @@ We will run for N_periods = 3.
 
 """
 
+# typing
 from typing import NamedTuple
 
+# jax
 import jax.numpy as jnp
 
+# astronomix constants
 from astronomix import CARTESIAN
-from astronomix.data_classes.simulation_helper_data import HelperData, get_helper_data
-from astronomix.initial_condition_generation.construct_primitive_state import (
-    construct_primitive_state,
-)
 from astronomix.option_classes.simulation_config import (
     PERIODIC_BOUNDARY,
     STATE_TYPE,
+)
+
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import (
     BoundarySettings,
     BoundarySettings1D,
     SimulationConfig,
     StaticFloatVector,
-    finalize_config,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
-from astronomix.variable_registry.registered_variables import (
-    RegisteredVariables,
-    get_registered_variables,
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix.data_classes.simulation_helper_data import get_helper_data
+from astronomix.initial_condition_generation.construct_primitive_state import (
+    construct_primitive_state,
 )
+from astronomix.option_classes.simulation_config import finalize_config
+from astronomix.variable_registry.registered_variables import get_registered_variables
 
 
 class JeansWaveSettings(NamedTuple):
@@ -198,7 +206,7 @@ def setup_jeans_wave(
             z=BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
         ),
         mhd=False,
-        self_gravity=True,
+        gravity_config=config.gravity_config._replace(self_gravity=True),
     )
     params = params._replace(
         t_end=t_end,

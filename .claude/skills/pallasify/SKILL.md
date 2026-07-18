@@ -579,13 +579,36 @@ primal:
 
 The native-JAX fallback gives correct gradients with zero new kernel
 code, but the backward pass runs at native speed. Once a kernel's
-backward pass is on the hot path, replace its ``native_branch`` with a
-hand-rolled Pallas adjoint kernel paired through ``jax.custom_vjp``
+backward pass is on the hot path, you *may* replace its ``native_branch``
+with a hand-rolled Pallas adjoint kernel paired through ``jax.custom_vjp``
 (forward calls the aliased Pallas kernel, backward calls a paired
 adjoint kernel). The call-site interface (``diffable_pallas_call`` /
 ``diffable_pallas_call_n``) is the seam; nothing in the dispatchers
 changes when an individual kernel is later upgraded to a hand-rolled
 adjoint.
+
+**But do not make ``jax.custom_vjp`` the default AD boundary.** A
+custom_vjp-only path (``pallas_vjp_call``) has three sharp costs that bit
+the WENO flux dispatch:
+
+1. **No forward mode.** ``jax.custom_vjp`` defines reverse mode only, so
+   any ``jax.jvp`` / ``jacfwd`` through the kernel raises
+   ``can't apply forward-mode autodiff (jvp) to a custom_vjp function``
+   (e.g. the eigenmode-Jacobian example, which linearises the RHS with
+   ``jax.jvp``). ``custom_jvp`` supports *both* modes (reverse via
+   transposition).
+2. **Zeroed parameter gradients.** A hand-rolled state-only adjoint
+   returns a zero cotangent for every non-state primal, so optimizing a
+   physical parameter that enters the flux silently gets no gradient.
+   ``diffable_pallas_call`` differentiates w.r.t. state *and* params.
+3. **Pathologically slow adjoint compile.** The Triton lowering of a
+   fused WENO adjoint kernel can hang for many minutes (same halo-depth
+   blow-up as §4c). The native tangent transposes to standard XLA and
+   compiles fast.
+
+Prefer ``diffable_pallas_call`` / ``diffable_pallas_call_n`` unless a
+kernel's backward is *measured* to dominate a production run AND its
+adjoint compiles quickly AND state-only gradients are acceptable.
 
 ### 5. Wire the dispatcher in the native file
 

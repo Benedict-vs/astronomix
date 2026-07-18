@@ -53,12 +53,12 @@ API
 
    .. autodoc2-docstring:: astronomix._fluid_equations.total_quantities.calculate_kinetic_energy
 
-.. py:function:: calculate_gravitational_energy(state, helper_data, gravitational_constant, config, registered_variables)
+.. py:function:: calculate_gravitational_energy(state, helper_data, gravitational_constant, params, config, registered_variables)
    :canonical: astronomix._fluid_equations.total_quantities.calculate_gravitational_energy
 
    .. autodoc2-docstring:: astronomix._fluid_equations.total_quantities.calculate_gravitational_energy
 
-.. py:function:: calculate_total_energy(primitive_state: astronomix.option_classes.simulation_config.STATE_TYPE, helper_data: astronomix.data_classes.simulation_helper_data.HelperData, gamma: typing.Union[float, jaxtyping.Float[jaxtyping.Array, ]], gravitational_constant: typing.Union[float, jaxtyping.Float[jaxtyping.Array, ]], config: astronomix.option_classes.simulation_config.SimulationConfig, registered_variables: astronomix.variable_registry.registered_variables.RegisteredVariables) -> jaxtyping.Float[jaxtyping.Array, ]
+.. py:function:: calculate_total_energy(primitive_state: astronomix.option_classes.simulation_config.STATE_TYPE, helper_data: astronomix.data_classes.simulation_helper_data.HelperData, gamma: typing.Union[float, jaxtyping.Float[jaxtyping.Array, ]], gravitational_constant: typing.Union[float, jaxtyping.Float[jaxtyping.Array, ]], params: astronomix.option_classes.simulation_params.SimulationParams, config: astronomix.option_classes.simulation_config.SimulationConfig, registered_variables: astronomix.variable_registry.registered_variables.RegisteredVariables) -> jaxtyping.Float[jaxtyping.Array, ]
    :canonical: astronomix._fluid_equations.total_quantities.calculate_total_energy
 
    .. autodoc2-docstring:: astronomix._fluid_equations.total_quantities.calculate_total_energy

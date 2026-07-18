@@ -1,15 +1,18 @@
 # standard gitignore from
 # https://github.com/github/gitignore/blob/main/Python.gitignore
 
-.claude/
+
 node_modules/
 package.json
 package-lock.json
 .firebase/
 
-CLAUDE.md
-
 arena/results/*/data
+
+examples/notebooks/stellar_wind/turb_frames
+examples/notebooks/stellar_wind/wind_frames
+
+tests
 
 data_mhdgrav
 
@@ -39,6 +42,10 @@ tests/finite_difference/data
 tests/field_level_inference/frames
 
 tests/cooling_corrector/models
+
+# regenerated methods-paper outputs (see pytests/paper_plots)
+pytests/paper_plots/**/figures/
+pytests/paper_plots/**/data/
 
 TODO.md
 
@@ -227,3 +234,32 @@ cython_debug/
 /poetry.toml
 # Generated NumPy simulation data
 *.npy
+
+# generated example/test outputs: simulation caches + figures
+# (directories are kept in git via their .gitkeep placeholders)
+examples/scripts/**/data/
+examples/gallery/**/data/
+examples/scripts/**/figures/*
+!examples/scripts/**/figures/.gitkeep
+examples/gallery/**/figures/*
+!examples/gallery/**/figures/.gitkeep
+pytests/**/figures/*
+!pytests/**/figures/.gitkeep
+
+examples/notebooks/differentiability/frames
+
+# generated example/test outputs: simulation caches + figures
+# (directories are kept in git via their .gitkeep placeholders)
+examples/scripts/**/data/
+examples/gallery/**/data/
+examples/scripts/**/figures/*
+!examples/scripts/**/figures/.gitkeep
+examples/gallery/**/figures/*
+!examples/gallery/**/figures/.gitkeep
+pytests/**/figures/*
+!pytests/**/figures/.gitkeep
+
+# field_level_inference generated outputs (logo.png is the tracked input target)
+examples/scripts/differentiability/field_level_inference/panel_snaps.npz
+examples/scripts/differentiability/field_level_inference/*.png
+!examples/scripts/differentiability/field_level_inference/logo.png

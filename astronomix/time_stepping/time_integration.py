@@ -1,50 +1,75 @@
+"""
+Time integration of the fluid equations.
+
+This module wires together everything needed to advance a primitive state in
+time: it prepares the helper data and sharding, optionally compiles for memory
+analysis or runtime debugging, and then drives the per-step update through the
+generic loop driver (fixed-step / adaptive while / checkpointed). The snapshot
+machinery that records diagnostics along the way also lives here. For the
+available options see the simulation configuration and the simulation parameters.
+"""
+
 # general
-import os
 from contextlib import nullcontext
-from types import NoneType
-import jax
-from jax.sharding import PartitionSpec
-import jax.numpy as jnp
 
-
+# typing
 from typing import Any, NamedTuple, Union
+from types import NoneType
 
-# runtime debugging
+# jax
+import jax
+import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 from jax.experimental import checkify
 
 # astronomix constants
-from astronomix._finite_difference._state_evolution._evolve_state import _evolve_state_fd
-from astronomix._finite_difference._timestep_estimation._timestep_estimator import _cfl_time_step_fd, _cfl_time_step_fd_hydro
-from astronomix._geometry.boundaries import _boundary_handler
-from astronomix._pallas_helpers import pallas_mesh_context
-from astronomix.data_classes.simulation_state_struct import StateStruct
-from astronomix.option_classes.simulation_config import BACKWARDS, FINITE_DIFFERENCE, FINITE_VOLUME, FORWARDS, GHOST_CELLS, ON_DEVICE, PERIODIC_ROLL, STATE_TYPE, TO_DISK
+from astronomix.option_classes.simulation_config import (
+    BACKWARDS,
+    FINITE_DIFFERENCE,
+    FINITE_VOLUME,
+    FORWARDS,
+    GHOST_CELLS,
+    ON_DEVICE,
+    PALLAS,
+    PERIODIC_ROLL,
+    RK4_LSRK,
+    STATE_TYPE,
+    TO_DISK
+)
 
 # astronomix containers
 from astronomix.option_classes.simulation_config import SimulationConfig
-from astronomix.data_classes.simulation_helper_data import (
-    HelperData,
-    _helper_data_requirements,
-    _unpad_helper_data,
-    get_helper_data,
-)
+from astronomix.data_classes.simulation_state_struct import StateStruct
+from astronomix.data_classes.simulation_helper_data import HelperData
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.data_classes.simulation_snapshot_data import SnapshotData
 
 # astronomix functions
 from astronomix._finite_volume._state_evolution.evolve_state import _evolve_state_fv
-from astronomix._modules._iteration_level_updates import _iteration_level_updates
-from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
+from astronomix._finite_difference._state_evolution._evolve_state import _evolve_state_fd
 from astronomix._finite_volume._timestep_estimation._timestep_estimator import (
     _cfl_time_step,
     _source_term_aware_time_step,
 )
+from astronomix._finite_difference._timestep_estimation._timestep_estimator import (
+    _cfl_time_step_fd,
+    _cfl_time_step_fd_hydro
+)
+from astronomix._modules._iteration_level_updates import _iteration_level_updates
+from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
 from astronomix._snapshotting._snapshot_diagnostics import (
     build_snapshot_store,
     record_snapshot,
 )
 from astronomix.time_stepping._utils import _pad, _unpad
+from astronomix.data_classes.simulation_helper_data import (
+    _helper_data_requirements,
+    _unpad_helper_data,
+    get_helper_data,
+)
+from astronomix._geometry.boundaries import _boundary_handler
+from astronomix._pallas_helpers import pallas_mesh_context
 
 # progress bar
 from astronomix.time_stepping._progress_bar import _show_diagnostics, _show_progress
@@ -80,6 +105,90 @@ class LoopState(NamedTuple):
     primitive_state: Any
     key: Any
     forcing: Any = None
+
+
+def _raise_with_time_integration_hint(error: Exception, config: SimulationConfig):
+    """Re-raise a time-integration failure after printing actionable hints.
+
+    JAX surfaces two failure modes that a user can usually fix by tweaking the
+    configuration, but its raw error messages give no hint on which knob to turn:
+
+    - Running out of device memory (a ``RESOURCE_EXHAUSTED`` / out-of-memory
+      runtime error). We suggest the lower-storage options for the active
+      solver mode: the 2N-storage LSRK4 integrator and the fused Pallas kernels
+      on the finite-difference path, plus donating the input state buffers.
+    - The solver going unstable and producing NaNs (caught by ``checkify`` when
+      ``runtime_debugging`` is on). We suggest the stability knobs: positivity
+      protection, a positivity-preserving limiter, and a smaller CFL number.
+
+    The original error is always re-raised so callers and tracebacks are
+    unchanged; the hints are printed alongside it as a convenience.
+
+    Args:
+        error: The exception raised by the JIT'd time integration.
+        config: The (finalized) simulation configuration, used to tailor the
+            hints to the active solver mode, backend and integrator.
+
+    Raises:
+        Exception: Always re-raises ``error`` unchanged.
+    """
+    message = str(error).lower()
+    is_out_of_memory = (
+        "resource_exhausted" in message
+        or "out of memory" in message
+        or "out_of_memory" in message
+    )
+    is_nan = "nan" in message
+
+    hints = []
+    if is_out_of_memory:
+        hints.append(
+            "The time integration ran out of device memory. Options to lower "
+            "the memory footprint:"
+        )
+        if config.solver_mode == FINITE_DIFFERENCE:
+            if config.time_integrator != RK4_LSRK:
+                hints.append(
+                    "  - set config.time_integrator = RK4_LSRK, the 2N-storage "
+                    "low-memory RK4 integrator (one fewer full-state buffer)."
+                )
+            if config.backend != PALLAS:
+                hints.append(
+                    "  - set config.backend = PALLAS (or OPTIMAL_BACKEND on an "
+                    "Ampere+ GPU); its fused kernels need far less temporary "
+                    "memory than the native-JAX backend."
+                )
+        if not config.donate_state:
+            hints.append(
+                "  - set config.donate_state = True to reuse the input state "
+                "buffers instead of allocating fresh ones."
+            )
+        hints.append(
+            "  - reduce the resolution (num_cells) or shard the run across "
+            "more GPUs."
+        )
+    elif is_nan:
+        hints.append(
+            "The time integration produced NaNs, i.e. the solver went unstable. "
+            "Options to stabilize it:"
+        )
+        hints.append(
+            "  - enable positivity protection: set "
+            "config.positivity_config.default_positivity_protection = True."
+        )
+        hints.append(
+            "  - use a positivity-preserving limiter such as VAN_ALBADA_PP "
+            "(config.limiter)."
+        )
+        hints.append(
+            "  - reduce the CFL number (params.C_cfl) for smaller, safer time "
+            "steps."
+        )
+
+    if hints:
+        print("\n".join(["", *hints, ""]))
+
+    raise error
 
 
 # @jaxtyped(typechecker=typechecker)
@@ -175,16 +284,20 @@ def time_integration(
     # Orbax (sharding preserved per device). It reuses the helper data and the
     # promoted params built above.
     if config.snapshot_storage_mode == TO_DISK:
-        return _time_integration_to_disk(
-            primitive_state,
-            config,
-            params,
-            registered_variables,
-            helper_data_pad,
-            snapshot_callable,
-            sharding,
-            restart_state,
-        )
+        try:
+            return _time_integration_to_disk(
+                primitive_state,
+                config,
+                params,
+                registered_variables,
+                helper_data_pad,
+                snapshot_callable,
+                sharding,
+                restart_state,
+            )
+        except Exception as error:
+            # Turn an opaque out-of-memory / NaN failure into an actionable one.
+            _raise_with_time_integration_hint(error, config)
 
     if config.donate_state:
         time_integration_jit = jax.jit(
@@ -216,15 +329,20 @@ def time_integration(
         )
         checked_integration = checkify.checkify(_time_integration, errors)
 
-        err, final_state = checked_integration(
-            primitive_state,
-            config,
-            params,
-            registered_variables,
-            helper_data_pad,
-            snapshot_callable,
-        )
-        err.throw()
+        try:
+            err, final_state = checked_integration(
+                primitive_state,
+                config,
+                params,
+                registered_variables,
+                helper_data_pad,
+                snapshot_callable,
+            )
+            # ``err.throw()`` raises on the first tripped check (NaN, negative
+            # pressure, ...); route it through the hint helper too.
+            err.throw()
+        except Exception as error:
+            _raise_with_time_integration_hint(error, config)
 
     else:
         memory_stats = None
@@ -293,15 +411,23 @@ def time_integration(
             start_time = timer()
             print("🚀 Starting simulation...")
 
-        with mesh_ctx, pallas_mesh_context(pallas_mesh):
-            final_state = time_integration_jit(
-                primitive_state,
-                config,
-                params,
-                registered_variables,
-                helper_data_pad,
-                snapshot_callable,
-            )
+        try:
+            with mesh_ctx, pallas_mesh_context(pallas_mesh):
+                final_state = time_integration_jit(
+                    primitive_state,
+                    config,
+                    params,
+                    registered_variables,
+                    helper_data_pad,
+                    snapshot_callable,
+                )
+            # JAX dispatch is asynchronous, so an out-of-memory failure only
+            # surfaces once the buffers are actually realized. Block here, inside
+            # the guard, so the hint helper can annotate it.
+            final_state = jax.block_until_ready(final_state)
+        except Exception as error:
+            # Turn an opaque out-of-memory / NaN failure into an actionable one.
+            _raise_with_time_integration_hint(error, config)
 
         # For certain backend/size combinations (notably FD JAX at large
         # N with a multi-device mesh) pjit returns some scalar/auxiliary
@@ -541,37 +667,6 @@ def _integrate_core(
                 primitive_state, dt, params.gamma, config, params,
                 helper_data_pad, registered_variables, time,
             )
-
-        # Read-only per-step deep-void probe (env-gated; no graph impact when
-        # off, bit-identical trajectory when on — it only reads the new state).
-        # Prints (t, dt, min_rho, max|v|, NaN) when |v| crosses a threshold or a
-        # non-finite appears, to observe the velocity run-up into the blow-up
-        # without perturbing the dt sequence the way a dense snapshot grid does.
-        if os.environ.get("DEEPVOID_PROBE"):
-            _thr = float(os.environ.get("DEEPVOID_PROBE_VTHR", "3.0"))
-            _di = registered_variables.density_index
-            _vx = registered_variables.velocity_index.x
-            _vy = registered_variables.velocity_index.y
-            _vz = registered_variables.velocity_index.z
-            _rho = primitive_state[_di]
-            _vmag = jnp.sqrt(
-                primitive_state[_vx] ** 2
-                + primitive_state[_vy] ** 2
-                + primitive_state[_vz] ** 2
-            )
-            _stats = jnp.stack([
-                time + dt, dt, jnp.min(_rho), jnp.max(_vmag),
-                jnp.any(~jnp.isfinite(primitive_state)).astype(jnp.float32),
-            ])
-
-            def _probe(s, thr=_thr):
-                import numpy as _np
-                t_, dt_, rmin_, vmax_, nan_ = [float(x) for x in _np.asarray(s)]
-                if vmax_ > thr or nan_ > 0 or not _np.isfinite(vmax_):
-                    print(f"[probe] t={t_:.5f} dt={dt_:.3e} min_rho={rmin_:.3e} "
-                          f"max|v|={vmax_:.4g} NaN={int(nan_)}", flush=True)
-
-            jax.debug.callback(_probe, _stats)
 
         return dt, LoopState(primitive_state, key, forcing)
 

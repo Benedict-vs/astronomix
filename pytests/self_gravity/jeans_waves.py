@@ -14,9 +14,12 @@ Modes:
         memory plots.
 """
 
+# general
 import os
 import sys
 
+# The number of GPUs requested from autocvd depends on the run mode, which is
+# parsed from argv here — before the GPU block and the first jax import.
 NUM_GPUS_SCALING = 4
 
 RUN_SCALING = "--scaling" in sys.argv
@@ -28,24 +31,34 @@ autocvd(num_gpus=NUM_GPUS_SCALING if RUN_SCALING else 1)
 # ruff: noqa: E402
 # =======================
 
+# jax
 import jax
 
-# Double precision: the perturbation amplitude is eps = 1e-6.
+# The perturbation amplitude is eps = 1e-6, so we run in double precision to keep
+# the linear wave from being swamped by round-off.
 jax.config.update("jax_enable_x64", True)
 
+# astronomix constants
+from astronomix import FINITE_DIFFERENCE
 from astronomix.option_classes.simulation_config import (
-    GravityConfig,
-    SECOND_ORDER_CONSERVATIVE,
-    FINITE_DIFFERENCE,
-    SIMPLE_SOURCE,
     FOURTH_ORDER_CONSERVATIVE,
+    SECOND_ORDER_CONSERVATIVE,
+    SIMPLE_SOURCE,
+)
+
+# astronomix containers
+from astronomix import (
+    GravityConfig,
     SimulationConfig,
     SnapshotSettings,
 )
+
+# astronomix functions
 from astronomix.test_setups.self_gravity.jeans_waves import (
     jeans_wave_solution,
     setup_jeans_wave,
 )
+
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PYTESTS_DIR = os.path.dirname(_HERE)
@@ -53,8 +66,7 @@ if _PYTESTS_DIR not in sys.path:
     sys.path.insert(0, _PYTESTS_DIR)
 from _benchmark_utils import (  # noqa: E402
     BenchmarkSpec,
-    run_convergence_and_runtime,
-    run_strong_scaling,
+    assert_correctness_at_resolution,
 )
 
 DATA_DIR = os.path.join(_HERE, "data", "astronomix")
@@ -76,7 +88,10 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, simple source",
         base_config=SimulationConfig(
-            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=SIMPLE_SOURCE),
+            gravity_config=GravityConfig(
+                self_gravity=True,
+                self_gravity_version=SIMPLE_SOURCE,
+            ),
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -84,7 +99,10 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, flux-based source",
         base_config=SimulationConfig(
-            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=SECOND_ORDER_CONSERVATIVE),
+            gravity_config=GravityConfig(
+                self_gravity=True,
+                self_gravity_version=SECOND_ORDER_CONSERVATIVE,
+            ),
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -92,7 +110,10 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD, corrected flux-based source",
         base_config=SimulationConfig(
-            gravity_config=GravityConfig(self_gravity=True, self_gravity_version=FOURTH_ORDER_CONSERVATIVE),
+            gravity_config=GravityConfig(
+                self_gravity=True,
+                self_gravity_version=FOURTH_ORDER_CONSERVATIVE,
+            ),
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -100,43 +121,36 @@ BENCHMARKS = [
 ]
 
 
-def _error_indices(rv):
+def _error_indices(registered_variables):
+    """Return the state-array indices whose L1 error the benchmark tracks.
+
+    Args:
+        registered_variables: The registered variables of the run.
+
+    Returns:
+        A tuple of the density, three velocity component and pressure indices.
+    """
     return (
-        rv.density_index,
-        rv.velocity_index.x, rv.velocity_index.y, rv.velocity_index.z,
-        rv.pressure_index,
+        registered_variables.density_index,
+        registered_variables.velocity_index.x,
+        registered_variables.velocity_index.y,
+        registered_variables.velocity_index.z,
+        registered_variables.pressure_index,
     )
 
 
 def test_jeans_wave_convergence():
-    run_convergence_and_runtime(
+    """Run the resolution sweep and emit the L1-error and runtime plots."""
+    assert_correctness_at_resolution(
         BENCHMARKS,
-        N_values=[8, 16, 32, 48],
+        N=16,
         setup_fn=setup_jeans_wave,
         analytic_fn=jeans_wave_solution,
         error_var_indices_fn=_error_indices,
         name="jeans_waves3D",
-        title="3D Jeans linear wave",
-        data_dir=DATA_DIR,
-        figure_dir=FIG_DIR,
-    )
-
-
-def test_jeans_wave_strong_scaling():
-    run_strong_scaling(
-        BENCHMARKS,
-        N_values=[16, 32, 48],
-        setup_fn=setup_jeans_wave,
-        num_gpus=NUM_GPUS_SCALING,
-        name="jeans_waves3D",
-        title="3D Jeans linear wave",
-        data_dir=DATA_DIR,
-        figure_dir=FIG_DIR,
+        tol=0.05,
     )
 
 
 if __name__ == "__main__":
-    if RUN_CONVERGENCE:
-        test_jeans_wave_convergence()
-    if RUN_SCALING:
-        test_jeans_wave_strong_scaling()
+    test_jeans_wave_convergence()

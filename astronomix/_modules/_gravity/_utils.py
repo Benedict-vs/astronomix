@@ -4,11 +4,16 @@ Utility helpers for the gravity physics module.
 
 # general
 from functools import partial
+
+# jax
 import jax
 import jax.numpy as jnp
 
-# astronomix constants / classes
-from astronomix.option_classes.simulation_config import FIELD_TYPE, SimulationConfig
+# astronomix constants
+from astronomix.option_classes.simulation_config import FIELD_TYPE
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 

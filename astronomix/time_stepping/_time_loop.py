@@ -31,16 +31,30 @@ carries no domain knowledge and can be reused by any project:
 ``state`` and ``store`` are opaque pytrees to the driver.
 """
 
+# typing
 from typing import Any, Callable, NamedTuple, Optional
 
+# jax
 import jax
 import jax.numpy as jnp
+
+# checkpointed loop
 from equinox.internal._loop.checkpointed import checkpointed_while_loop
 
-# ---- loop backends ----
+
+# -------------------------------------------------------------
+# =================== ↓ Loop backends ↓ =======================
+# -------------------------------------------------------------
+# Identifiers selecting which underlying JAX loop construct ``integrate`` uses.
+# ``FIXED_STEP`` and ``ADAPTIVE_WHILE`` are not reverse-mode differentiable on
+# their own; ``ADAPTIVE_CHECKPOINTED`` trades memory for a reverse-mode-friendly
+# while loop via equinox.
 FIXED_STEP = 0            # jax.lax.fori_loop over a fixed number of steps
 ADAPTIVE_WHILE = 1        # jax.lax.while_loop until t >= t_end (forward-mode AD)
 ADAPTIVE_CHECKPOINTED = 2  # checkpointed_while_loop until t >= t_end (reverse-mode AD)
+# -------------------------------------------------------------
+# =================== ↑ Loop backends ↑ =======================
+# -------------------------------------------------------------
 
 
 def times_close(t, target):
@@ -111,30 +125,37 @@ def integrate(
         ``(t, state, store, num_iterations)``.  ``store`` is the (possibly
         updated) snapshot store, or ``None`` when snapshots are disabled.
     """
-    has_snap = snapshots is not None
+    has_snapshots = snapshots is not None
 
     def body(carry):
-        if has_snap:
-            t, state, idx, n_iter, store = carry
+        # The carry has an extra snapshot-store slot only when snapshots are
+        # collected; the snapshot index is carried either way (and stays 0 when
+        # snapshots are disabled) so ``step`` always receives a valid counter.
+        if has_snapshots:
+            t, state, snapshot_index, num_iterations, store = carry
 
-            # Record the snapshot that is due at the start of this step
-            # (captures the state *before* this step's update).
-            def _record(operand):
-                store_, idx_ = operand
-                return snapshots.record(t, state, store_, idx_), idx_ + 1
+            # Record the snapshot that is due at the start of this step. This
+            # deliberately captures the state *before* this step's update, so a
+            # snapshot reflects the field at exactly its recorded time.
+            def record_due_snapshot(store_and_index):
+                store, snapshot_index = store_and_index
+                return (
+                    snapshots.record(t, state, store, snapshot_index),
+                    snapshot_index + 1,
+                )
 
-            store, idx = jax.lax.cond(
-                snapshots.should_record(t, idx),
-                _record,
-                lambda operand: operand,
-                (store, idx),
+            store, snapshot_index = jax.lax.cond(
+                snapshots.should_record(t, snapshot_index),
+                record_due_snapshot,
+                lambda store_and_index: store_and_index,
+                (store, snapshot_index),
             )
         else:
-            t, state, idx, n_iter = carry  # idx stays 0
+            t, state, snapshot_index, num_iterations = carry
 
-        dt, state = step(t, state, idx)
+        dt, state = step(t, state, snapshot_index)
         t = t + dt
-        n_iter = n_iter + 1
+        num_iterations = num_iterations + 1
 
         if progress is not None:
             jax.debug.callback(progress, t, t_end)
@@ -142,15 +163,18 @@ def integrate(
         if monitor is not None:
             monitor(t, state)
 
-        if has_snap:
-            return (t, state, idx, n_iter, store)
-        return (t, state, idx, n_iter)
+        if has_snapshots:
+            return (t, state, snapshot_index, num_iterations, store)
+        return (t, state, snapshot_index, num_iterations)
 
-    if has_snap:
+    if has_snapshots:
         carry = (t_start, state, 0, 0, snapshots.store)
     else:
         carry = (t_start, state, 0, 0)
 
+    # Fixed-step runs use a plain ``fori_loop``; adaptive runs use a while loop
+    # whose predicate runs until the clock reaches ``t_end``, optionally in the
+    # checkpointed variant for reverse-mode differentiability.
     if backend == FIXED_STEP:
         carry = jax.lax.fori_loop(0, num_steps, lambda _i, c: body(c), carry)
     elif backend == ADAPTIVE_WHILE:
@@ -162,16 +186,20 @@ def integrate(
     else:
         raise ValueError(f"Unknown loop backend: {backend}")
 
-    if has_snap:
-        t, state, idx, n_iter, store = carry
+    if has_snapshots:
+        t, state, snapshot_index, num_iterations, store = carry
         # The evenly spaced ``should_record`` grid never lands exactly on
         # ``t_end`` (the loop exits at the first step past it), so the final
         # state would otherwise be missing. Record it once here into the
         # reserved final slot — guaranteed written regardless of step
         # alignment, and differentiable since it acts on the loop output.
         if snapshots.record_final:
-            final_idx = idx if snapshots.final_index is None else snapshots.final_index
-            store = snapshots.record(t, state, store, final_idx)
-        return t, state, store, n_iter
-    t, state, _idx, n_iter = carry
-    return t, state, None, n_iter
+            final_snapshot_index = (
+                snapshot_index
+                if snapshots.final_index is None
+                else snapshots.final_index
+            )
+            store = snapshots.record(t, state, store, final_snapshot_index)
+        return t, state, store, num_iterations
+    t, state, _snapshot_index, num_iterations = carry
+    return t, state, None, num_iterations

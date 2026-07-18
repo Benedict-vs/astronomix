@@ -1,30 +1,40 @@
-# TOWNSEND SCHEME DOES NOT WORK CURRENTLY,
-# ONLY THE SIMPLE EXPLICIT COOLING IS USED
+"""
+Radiative cooling of the gas.
 
-# For proper cooling something like Grackle
-# might be used. For now we are interested in
-# the most simple cooling model.
+Implements a small family of cooling-curve models (simple and piecewise power
+laws, and neural-network curves) together with the temperature-update steps and
+the drivers that apply cooling to the pressure of the primitive state. The
+governing source term is
 
-# dE/dt + ... = Phi(T, rho)
-# Phi(T, rho) = n_H * Gamma(T) - n_H ^ 2 * Lambda(T)
+    dE/dt + ... = Phi(T, rho),  Phi = n_H * Gamma(T) - n_H^2 * Lambda(T).
 
-# for a simple cooling term (Lambda) see 5.3 in
-# https://arxiv.org/pdf/2111.03399
+For a simple cooling term Lambda see Section 5.3 of
+https://arxiv.org/pdf/2111.03399; see also
+https://academic.oup.com/mnras/article/502/3/3179/6081066 and
+https://iopscience.iop.org/article/10.1088/0067-0049/181/2/391.
 
-# also see
-# https://academic.oup.com/mnras/article/502/3/3179/6081066
+NOTE: All temperatures and cooling rates use the rescaled units
+``\\tilde{T} = T * k_B / u`` and ``\\tilde{\\Lambda} = \\lambda / u^2``.
 
-# and
-# https://iopscience.iop.org/article/10.1088/0067-0049/181/2/391
+WARNING: The Townsend exact-integration scheme is not currently working; only
+the simple explicit cooling is used. Grackle could be used for proper cooling,
+but here we are interested in the simplest cooling model.
+"""
 
-from typing import Tuple
-
+# general
 from functools import partial
 
-import jax
+# typing
+from typing import Tuple
 
+# jax
+import jax
+import jax.numpy as jnp
+
+# neural networks
 import equinox as eqx
 
+# astronomix constants
 from astronomix._modules._cooling.cooling_options import (
     COOLING_CURVE_TYPE,
     EXPLICIT_COOLING,
@@ -33,22 +43,22 @@ from astronomix._modules._cooling.cooling_options import (
     NEURAL_NET_COOLING_WITH_DENSITY,
     PIECEWISE_POWER_LAW,
     SIMPLE_POWER_LAW,
+)
+from astronomix.option_classes.simulation_config import FIELD_TYPE, STATE_TYPE
+
+# astronomix containers
+from astronomix._modules._cooling.cooling_options import (
     CoolingConfig,
     CoolingCurveConfig,
     CoolingParams,
 )
-from astronomix._finite_volume._state_evolution.limited_gradients import _calculate_limited_gradients
 from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.variable_registry.registered_variables import RegisteredVariables
-from astronomix.option_classes.simulation_config import FIELD_TYPE, STATE_TYPE, SimulationConfig
-
-import jax.numpy as jnp
-
+from astronomix.option_classes.simulation_config import SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.variable_registry.registered_variables import RegisteredVariables
 
-# NOTE the rescaled units
-# \tilde{T} = T * k_B / u
-# \tilde{\Lambda} = \lambda / u^2
+# astronomix functions
+from astronomix._finite_volume._state_evolution.limited_gradients import _calculate_limited_gradients
 
 
 def get_effective_molecular_weights(
@@ -80,6 +90,7 @@ def get_effective_molecular_weights(
 def get_particle_number_density(
     density: FIELD_TYPE, mean_molecular_weight: float
 ) -> FIELD_TYPE:
+    """Return the particle number density n = rho / mu."""
     return density / mean_molecular_weight
 
 
@@ -128,13 +139,13 @@ def get_temperature_from_pressure(
     return pressure / n  # so the density must never be zero
 
 
-# \Lambda(T)
 def cooling_rate_power_law(
     temperature: FIELD_TYPE,
     reference_temperature: float,
     factor: float,
     exponent: float,
 ):
+    """Single power-law cooling curve Lambda(T) = factor * (T / T_ref)^exponent."""
     return factor * (temperature / reference_temperature) ** exponent
 
 
@@ -335,6 +346,20 @@ def _cooling_rate(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
+    """Evaluate the cooling rate Lambda(T) for the configured cooling curve.
+
+    Dispatches on ``cooling_curve_config.cooling_curve_type`` to the simple or
+    piecewise power law, or to a (density-aware) neural-network curve.
+
+    Args:
+        temperature: The temperature field.
+        density: The density field (used by the density-aware network curve).
+        cooling_curve_config: The static cooling-curve configuration.
+        cooling_curve_params: The cooling-curve parameters.
+
+    Returns:
+        The cooling rate evaluated at each cell.
+    """
     if cooling_curve_config.cooling_curve_type == SIMPLE_POWER_LAW:
         return cooling_rate_power_law(
             temperature,
@@ -436,26 +461,15 @@ def update_temperature(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
-    """
+    r"""
     T_new = Y^-1[Y(T) + T / T_ref * \Lambda(T_ref) / \Lambda(T) * delta_t / t_cool]
     """
 
     reference_temperature = cooling_curve_params.reference_temperature
 
-    # calculate the cooling time
-    # not numerically stable, divisiion
-    # by the cooling
-    # t_cool = cooling_time(
-    #     density,
-    #     temperature,
-    #     hydrogen_mass_fraction,
-    #     metal_mass_fraction,
-    #     gamma,
-    #     cooling_curve_config,
-    #     cooling_curve_params
-    # )
-
-    # calculate the cooling rate
+    # Evaluate the cooling rate at the current temperature and at the reference
+    # temperature; the Townsend update advances the temporal-evolution function
+    # and inverts it, which avoids dividing by the (possibly tiny) cooling time.
     cooling_rate = _cooling_rate(
         temperature, density, cooling_curve_config, cooling_curve_params
     )
@@ -467,17 +481,11 @@ def update_temperature(
         cooling_curve_params,
     )
 
-    # calculate the temporal evolution function
+    # Advance the temporal-evolution function Y(T) and invert it for the new
+    # temperature.
     temporal_evolution_function = _temporal_evolution_function(
         temperature, cooling_curve_config, cooling_curve_params
     )
-
-    # calculate the new temperature
-    # new_temperature = _temporal_evolution_function_inverse(
-    #     temporal_evolution_function + (temperature / reference_temperature) * (cooling_rate_reference / cooling_rate) * time_step / t_cool,
-    #     cooling_curve_config,
-    #     cooling_curve_params
-    # )
 
     mu, mu_e, mu_H = get_effective_molecular_weights(
         hydrogen_mass_fraction,
@@ -508,7 +516,7 @@ def dtemperature_dt(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
-    """
+    r"""
     T_new = T - (gamma - 1) * rho * \mu / (mu_e * mu_H * k) * Lambda(T) * delta_t
     (units absorbed in Lambda)
     """
@@ -537,53 +545,10 @@ def update_temperature_explicit(
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
 ) -> FIELD_TYPE:
-    """
+    r"""
     T_new = T - (gamma - 1) * rho * \mu / (mu_e * mu_H * k) * Lambda(T) * delta_t
     (units absorbed in Lambda)
     """
-
-    # t_cool = cooling_time(
-    #     density,
-    #     temperature,
-    #     hydrogen_mass_fraction,
-    #     metal_mass_fraction,
-    #     gamma,
-    #     cooling_curve_config,
-    #     cooling_curve_params
-    # )
-
-    # dt_cool_min = jnp.minimum(time_step, 0.1 * t_cool)
-    # num_steps_min = jnp.ceil(time_step / dt_cool_min)
-    # dt_cool = time_step / num_steps_min
-
-    # def T_update(T):
-    #     # RK2 step
-    #     k1 = dtemperature_dt(
-    #         density,
-    #         T,
-    #         hydrogen_mass_fraction,
-    #         metal_mass_fraction,
-    #         gamma,
-    #         cooling_curve_config,
-    #         cooling_curve_params
-    #     )
-    #     k2 = dtemperature_dt(
-    #         density,
-    #         T + 0.5 * dt_cool * k1,
-    #         hydrogen_mass_fraction,
-    #         metal_mass_fraction,
-    #         gamma,
-    #         cooling_curve_config,
-    #         cooling_curve_params
-    #     )
-    #     return T + dt_cool * k2
-
-    # new_temperature = jax.lax.fori_loop(
-    #     0, jnp.int32(num_steps_min[0]),
-    #     lambda i, T: T_update(T),
-    #     temperature
-    # )
-    # return new_temperature
 
     return (
         temperature
@@ -652,7 +617,23 @@ def update_pressure_by_cooling(
     simulation_params: SimulationParams,
     time_step: float,
 ) -> STATE_TYPE:
-    
+    """Apply cooling to the pressure of the primitive state for one time step.
+
+    Converts pressure to temperature, advances the temperature with the chosen
+    cooling method (explicit / implicit), applies the temperature floor and
+    converts the result back to pressure.
+
+    Args:
+        primitive_state: The primitive state array.
+        registered_variables: The registered variables.
+        cooling_config: The cooling configuration (method and curve).
+        simulation_params: The simulation parameters.
+        time_step: The time step.
+
+    Returns:
+        The primitive state with the pressure updated by cooling.
+    """
+
     cooling_curve_config = cooling_config.cooling_curve_config
 
     # get the parameters
@@ -696,13 +677,13 @@ def update_pressure_by_cooling(
             cooling_params.cooling_curve_params,
         )
 
+    # Never let cooling push the temperature below the configured floor; where
+    # it would, keep the original temperature instead.
     new_temperature = jnp.where(
         (new_temperature > cooling_params.floor_temperature),
         new_temperature,
         temperature,
     )
-
-    # new_temperature = temperature
 
     # update the pressure
     new_pressure = get_pressure_from_temperature(
@@ -731,8 +712,25 @@ def first_order_pressure_update(
     simulation_params: SimulationParams,
     time_step: float,
 ) -> STATE_TYPE:
-    # dP/dt_cooling = -(gamma - 1) n_e n_H Lambda(T)
-    # with n_e = rho / mu_e, n_H = rho / mu_H
+    """Higher-order finite-volume pressure update from cooling (currently unused).
+
+    Integrates the cooling source term
+    ``dP/dt = -(gamma - 1) n_e n_H Lambda(T)`` (with ``n_e = rho / mu_e`` and
+    ``n_H = rho / mu_H``), adding gradient-based correction terms from a
+    Taylor expansion of the cooling rate across the cell. Supports only one
+    spatial dimension (along the x axis) for now.
+
+    Args:
+        primitive_state: The primitive state array.
+        registered_variables: The registered variables.
+        config: The simulation configuration.
+        helper_data: The helper data (used for the limited gradients).
+        simulation_params: The simulation parameters.
+        time_step: The time step.
+
+    Returns:
+        The primitive state with the pressure updated by cooling.
+    """
 
     cooling_curve_config = config.cooling_config.cooling_curve_config
 
@@ -806,13 +804,6 @@ def first_order_pressure_update(
             + 1/6 * config.grid_spacing ** 2 * density * cooling_rate_gradient * density_gradient
         )
     )
-
-    # jax.debug.print("mean correction = {corr}, 0th-order = {zeroth}", corr = jnp.mean(
-    #     (+ 1/12 * config.grid_spacing ** 2 * cooling_rate * density_gradient ** 2
-    #     + 1/6 * config.grid_spacing ** 2 * density * cooling_rate_gradient * density_gradient)
-    # ), zeroth = jnp.mean(
-    #     density**2 * cooling_rate
-    # ))
 
     # calculate the new temperature
     new_temperature = get_temperature_from_pressure(

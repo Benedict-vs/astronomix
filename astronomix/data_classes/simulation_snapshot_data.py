@@ -1,4 +1,16 @@
+"""
+Snapshot return container for the time integration.
+
+Holds the per-snapshot diagnostics (states, energies, spectra, ...) plus
+run-level metadata (runtime, iteration count, compiled-step memory usage)
+returned by :func:`astronomix.time_stepping.time_integration.time_integration`
+when ``config.return_snapshots`` is set.
+"""
+
+# typing
 from typing import NamedTuple
+
+# jax
 import jax.numpy as jnp
 
 
@@ -52,7 +64,7 @@ class SnapshotData(NamedTuple):
     #: The temperature PDF (dV/dlogT) at the times the snapshots were taken.
     temperature_pdf: jnp.ndarray = None
 
-    # The runtime of the simulation-loop.
+    #: The runtime of the simulation loop.
     runtime: float = 0.0
 
     #: Number of timesteps taken.
@@ -73,6 +85,3 @@ class SnapshotData(NamedTuple):
 
     #: The current checkpoint, used internally.
     current_checkpoint: int = 0
-
-
-

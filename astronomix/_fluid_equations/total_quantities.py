@@ -1,27 +1,40 @@
+"""
+Domain-integrated diagnostic quantities.
+
+Computes globally integrated quantities of the fluid state (internal, kinetic,
+gravitational and total energy, total mass and radial momentum) used for the
+simulation diagnostics.
+"""
+
 # general
-import jax
-import jax.numpy as jnp
 from functools import partial
 
-# type checking
-from beartype import beartype as typechecker
-from jaxtyping import Array, Float, jaxtyped
+# typing
 from typing import Union
+from jaxtyping import Array, Float, jaxtyped
+from beartype import beartype as typechecker
+
+# jax
+import jax
+import jax.numpy as jnp
+
+# astronomix constants
+from astronomix.option_classes.simulation_config import STATE_TYPE
 
 # astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_params import SimulationParams
+
+# astronomix functions
 from astronomix._modules._cosmic_rays.cr_fluid_equations import (
     total_energy_from_primitives_with_crs,
 )
-from astronomix.variable_registry.registered_variables import RegisteredVariables
-from astronomix.option_classes.simulation_config import STATE_TYPE, SimulationConfig
-from astronomix.data_classes.simulation_helper_data import HelperData
-
-# astronomix functions
 from astronomix._modules._gravity._poisson_solver import (
     _compute_gravitational_potential,
 )
 from astronomix._modules._gravity._utils import _pad_external_potential
-from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix._fluid_equations._equations import (
     get_absolute_velocity,
     total_energy_from_primitives,

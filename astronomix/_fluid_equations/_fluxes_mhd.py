@@ -1,25 +1,45 @@
-import jax.numpy as jnp
-import jax
+"""
+Physical fluxes for the magnetohydrodynamic (MHD) equations.
+
+Only the x-direction fluxes are defined here; fluxes in the other directions are
+obtained by permuting the state arrays accordingly. Variants are provided for the
+ideal-gas MHD, isothermal MHD and isothermal hydro equations of state.
+"""
+
+# general
 from functools import partial
 
+# typing
+from typing import Union
 from jaxtyping import Array, Float
 
-from typing import Union
+# jax
+import jax
+import jax.numpy as jnp
 
-from astronomix._fluid_equations._equations_mhd import primitive_state_from_conserved_isothermal, primitive_state_from_conserved_mhd, total_energy_from_primitives_mhd, total_pressure_from_conserved_mhd
-from astronomix.variable_registry.registered_variables import AxisInfo, RegisteredVariables
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
     FIELD_TYPE,
     STATE_TYPE,
-    SimulationConfig,
+)
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.variable_registry.registered_variables import AxisInfo, RegisteredVariables
+
+# astronomix functions
+from astronomix._fluid_equations._equations_mhd import (
+    primitive_state_from_conserved_isothermal,
+    primitive_state_from_conserved_mhd,
+    total_energy_from_primitives_mhd,
+    total_pressure_from_conserved_mhd,
 )
 
 
-# We only define the flux in x-direction here,
-# since the other directions can be obtained
-# by permuting the arrays accordingly.
-# for equation_of_state == IDEAL_GAS,
-# ISOTHERMAL see below
+# We only define the flux in the x-direction here; the other directions are
+# obtained by permuting the arrays accordingly. For the IDEAL_GAS variant see
+# ``_mhd_flux_x`` below, and for the ISOTHERMAL variants see the functions that
+# follow it.
 @partial(
     jax.jit, static_argnames=["registered_variables", "config"]
 )
@@ -31,12 +51,25 @@ def _mhd_flux_x(
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
+    """Compute the ideal-gas MHD x-direction flux for a conserved state.
+
+    Args:
+        conserved_state: The conserved MHD state.
+        minimum_density: The density floor used when recovering primitives.
+        minimum_pressure: The pressure floor used when recovering primitives.
+        gamma: The adiabatic index of the fluid.
+        config: The simulation configuration.
+        registered_variables: The registered variables.
+
+    Returns:
+        The MHD flux vector in the x-direction.
+    """
 
     primitive_state = primitive_state_from_conserved_mhd(
         conserved_state, minimum_density, minimum_pressure, gamma, config, registered_variables
     )
-    
-    # retrieve necessary quantities
+
+    # Retrieve the primitive quantities entering the flux.
     rho = primitive_state[registered_variables.density_index]
     v_x = primitive_state[registered_variables.velocity_index.x]
     v_y = primitive_state[registered_variables.velocity_index.y]
@@ -46,7 +79,8 @@ def _mhd_flux_x(
     B_z = primitive_state[registered_variables.magnetic_index.z]
     p_gas = primitive_state[registered_variables.pressure_index]
 
-    # compute derived quantities
+    # Compute the derived quantities (total pressure including magnetic pressure,
+    # the v.B work term and the total energy) that enter the MHD fluxes.
     b_squared = B_x**2 + B_y**2 + B_z**2
     v_squared = v_x**2 + v_y**2 + v_z**2
     total_pressure = p_gas + 0.5 * b_squared
@@ -59,7 +93,7 @@ def _mhd_flux_x(
         gamma,
     )
 
-    # compute fluxes
+    # Assemble the MHD flux vector.
     flux = jnp.zeros_like(primitive_state)
     flux = flux.at[registered_variables.density_index].set(rho * v_x)
     flux = flux.at[registered_variables.velocity_index.x].set(rho * v_x**2 + total_pressure - B_x**2)
@@ -79,12 +113,27 @@ def _mhd_flux_isothermal_x(
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
 ) -> STATE_TYPE:
-    
+    """Compute the isothermal MHD x-direction flux for a conserved state.
+
+    There is no energy equation in the isothermal case; the gas pressure follows
+    directly from the fixed isothermal sound speed via ``p = c_s^2 rho``.
+
+    Args:
+        conserved_state: The conserved isothermal MHD state.
+        minimum_density: The density floor used when recovering primitives.
+        isothermal_sound_speed: The fixed isothermal sound speed.
+        config: The simulation configuration.
+        registered_variables: The registered variables.
+
+    Returns:
+        The isothermal MHD flux vector in the x-direction.
+    """
+
     primitive_state = primitive_state_from_conserved_isothermal(
         conserved_state, minimum_density, config, registered_variables
     )
-    
-    # retrieve necessary quantities
+
+    # Retrieve the primitive quantities entering the flux.
     rho = primitive_state[registered_variables.density_index]
     v_x = primitive_state[registered_variables.velocity_index.x]
     v_y = primitive_state[registered_variables.velocity_index.y]
@@ -93,12 +142,13 @@ def _mhd_flux_isothermal_x(
     B_y = primitive_state[registered_variables.magnetic_index.y]
     B_z = primitive_state[registered_variables.magnetic_index.z]
 
-    # compute derived quantities
+    # Compute the derived quantities. The isothermal gas pressure is fixed by the
+    # sound speed, and the total pressure adds the magnetic pressure.
     b_squared = B_x**2 + B_y**2 + B_z**2
     p_gas = isothermal_sound_speed**2 * rho
     total_pressure = p_gas + 0.5 * b_squared
 
-    # compute fluxes
+    # Assemble the isothermal MHD flux vector.
     flux = jnp.zeros_like(primitive_state)
     flux = flux.at[registered_variables.density_index].set(rho * v_x)
     flux = flux.at[registered_variables.velocity_index.x].set(rho * v_x**2 + total_pressure - B_x**2)
@@ -131,7 +181,7 @@ def _euler_flux_isothermal_x(
         # no energy equation in the isothermal case
     ]
     """
-    
+
     flux_vector = jnp.zeros_like(conserved_state)
 
     if config.dimensionality == 1:
@@ -146,7 +196,7 @@ def _euler_flux_isothermal_x(
 
     p = isothermal_sound_speed**2 * rho
 
-    # compute the flux vector
+    # Assemble the isothermal Euler flux vector.
     flux_vector = flux_vector.at[registered_variables.density_index].set(m_x)
 
     if config.dimensionality == 1:

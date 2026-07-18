@@ -1,6 +1,19 @@
+"""
+Runtime simulation parameters.
+
+Unlike the simulation configuration, these parameters can be changed without
+triggering a recompilation, and the simulation can be differentiated with
+respect to them (CFL number, gas constants, viscosity, end time, ...). The
+per-module parameter containers are bundled in here too.
+"""
+
+# typing
 from typing import NamedTuple
+
+# jax
 import jax.numpy as jnp
 
+# astronomix containers
 from astronomix._modules._cnn_mhd_corrector._cnn_mhd_corrector_options import CNNMHDconfig
 from astronomix._modules._cooling.cooling_options import CoolingParams
 from astronomix._modules._cosmic_rays.cosmic_ray_options import CosmicRayParams
@@ -9,13 +22,19 @@ from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
 from astronomix._modules._cgols_wind.cgols_wind_options import CGOLSWindParams
 from astronomix._modules._turbulent_forcing._turbulent_forcing_options import TurbulentForcingParams
 
+
 class FixedBoundaryState1D(NamedTuple):
+    """The prescribed left/right states for a single axis with FIXED_BOUNDARY."""
+
     #: Left state of shape (num_variables,).
     left_state: jnp.ndarray = jnp.array([])
     #: Right state of shape (num_variables,).
     right_state: jnp.ndarray = jnp.array([])
 
+
 class FixedBoundaryState(NamedTuple):
+    """Per-axis fixed boundary states used when a boundary is FIXED_BOUNDARY."""
+
     x: FixedBoundaryState1D = FixedBoundaryState1D()
     y: FixedBoundaryState1D = FixedBoundaryState1D()
     z: FixedBoundaryState1D = FixedBoundaryState1D()

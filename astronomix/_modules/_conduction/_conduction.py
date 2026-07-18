@@ -21,11 +21,14 @@ reflective hydro boundary mirrors density and pressure as even quantities, so
 flux -- vanishes at the wall.
 """
 
+# general
 from functools import partial
 
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix functions
 from astronomix._stencil_operations._stencil_operations import _stencil_add
 
 

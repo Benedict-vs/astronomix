@@ -1,10 +1,19 @@
 """
-Helpers for computing Jacobians.
+Helpers for computing Jacobians of the simulator.
+
+For a base state that depends only on ``y``, the streamwise (``x``) direction is
+translation-invariant, so different ``x``-Fourier modes decouple in the
+linearised problem. These helpers assemble the dense Jacobian of a single
+``+kx`` Fourier block — either of the spatial RHS or of the time-integrated
+simulator — column-by-column in small batches, avoiding the cost of forming the
+full grid-sized Jacobian.
 """
 
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix functions
 from astronomix._fluid_equations._equations import conserved_state_from_primitive
 from astronomix.analysis_helpers._exposed_rhs import _exposed_rhs
 from astronomix.option_classes.simulation_config import finalize_config
@@ -93,17 +102,17 @@ def single_xmode_rhs_jacobian2D(
 
     config = finalize_config(config, primitive_state_unperturbed.shape)
 
-    cons0 = conserved_state_from_primitive(
+    conserved_base_state = conserved_state_from_primitive(
         primitive_state_unperturbed,
         params.gamma,
         config,
         registered_variables,
     )
 
-    real_dtype = cons0.dtype
+    real_dtype = conserved_base_state.dtype
     complex_dtype = jnp.complex128 if real_dtype == jnp.float64 else jnp.complex64
 
-    nvar, Nx, Ny = cons0.shape
+    nvar, Nx, Ny = conserved_base_state.shape
     n = nvar * Ny
 
     Lx = float(config.box_size.x)
@@ -126,7 +135,7 @@ def single_xmode_rhs_jacobian2D(
         return _exposed_rhs(q, params, config, registered_variables)
 
     def rhs_jvp(dq_real):
-        _, Jdq = jax.jvp(rhs, (cons0,), (dq_real,))
+        _, Jdq = jax.jvp(rhs, (conserved_base_state,), (dq_real,))
         return Jdq
 
     def apply_one_real_column(qhat_flat_real):
@@ -172,6 +181,7 @@ def single_xmode_rhs_jacobian2D(
 
     return J_complex
 
+
 def single_xmode_jacobian2Dt(
     primitive_state_unperturbed,
     config,
@@ -181,9 +191,38 @@ def single_xmode_jacobian2Dt(
     wavelength,
     assembly_batch_size=4,
 ):
-    """
+    r"""
     Return the dense +kx Fourier-block Jacobian of the time-integrated simulator.
-    This might be useful for bringing out modes with large Re(\lambda).
+
+    This is the time-integration analogue of :func:`single_xmode_rhs_jacobian2D`:
+    instead of linearising the instantaneous RHS ``R(U)`` it linearises the full
+    time integration over ``[t_start, t_end]``. Because the time map amplifies
+    growing modes, this can bring out the eigenmodes with large ``Re(\lambda)``
+    more cleanly than the RHS Jacobian. The complex ``+kx`` block is assembled
+    column-by-column from real JVPs exactly as in the RHS variant.
+
+    Args:
+        primitive_state_unperturbed:
+            Primitive base state to linearise about.
+        config:
+            Simulation config. The x-boundary should be periodic.
+        params:
+            Simulation parameters.
+        registered_variables:
+            Variable registry.
+        helper_data:
+            Grid/helper data containing cell centers.
+        wavelength:
+            Physical wavelength of the x-Fourier perturbation. Must be
+            commensurate with the x-domain length.
+        assembly_batch_size:
+            Number of Jacobian columns to compute per JVP batch. Lower this if
+            GPU memory is tight.
+
+    Returns:
+        J_complex:
+            Complex array of shape (nvar * Ny, nvar * Ny), the raw +kx
+            Fourier-block tangent operator of the time-integrated simulator.
     """
     config = finalize_config(config, primitive_state_unperturbed.shape)
 
@@ -244,9 +283,6 @@ def single_xmode_jacobian2Dt(
     column_blocks = []
 
     for start in range(0, n, assembly_batch_size):
-
-        print(f"Iteration {start // assembly_batch_size} / {(n + assembly_batch_size - 1) // assembly_batch_size}")
-        
         stop = min(start + assembly_batch_size, n)
 
         cols = jnp.arange(start, stop)

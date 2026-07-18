@@ -13,15 +13,21 @@ Every Pallas kernel module under ``astronomix`` should import from here so
 new knobs / fallbacks only need to be added once.
 """
 
+# general
 import contextvars
 from contextlib import contextmanager
 
+# jax
 import jax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding, PartitionSpec
 
+# astronomix containers
 from astronomix.option_classes.simulation_config import PALLAS, SimulationConfig
 
+# Pallas / Triton are optional: a CPU-only or older JAX install may lack one or
+# both. We import them defensively so the rest of the module loads (callers gate
+# on ``pl is None`` / ``pltriton is None``) rather than failing at import time.
 try:
     from jax.experimental import pallas as pl
 except Exception:  # pragma: no cover - Pallas optional
@@ -34,10 +40,13 @@ except Exception:  # pragma: no cover - Triton GPU backend optional
 
 
 def _backend_is_pallas(config: SimulationConfig) -> bool:
+    """Return whether the configured backend is the Pallas/Triton GPU backend."""
     return config.backend == PALLAS
 
 
 def _default_pallas_block_shape(ndim: int) -> tuple[int, int, int]:
+    """Return the default Pallas block shape ``(bx, by, bz)`` for ``ndim`` spatial
+    dimensions (inactive dimensions forced to 1)."""
     if ndim == 1:
         return (128, 1, 1)
     if ndim == 2:

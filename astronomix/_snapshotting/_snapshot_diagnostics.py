@@ -8,10 +8,19 @@ appending one ``SnapshotQuantity`` entry here and adding the matching field to
 are generic and need no changes.
 """
 
+# typing
 from typing import Callable, NamedTuple
 
+# jax
 import jax.numpy as jnp
 
+# astronomix constants
+from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE
+
+# astronomix containers
+from astronomix.data_classes.simulation_snapshot_data import SnapshotData
+
+# astronomix functions
 from astronomix._finite_volume._magnetic_update._vector_maths import divergence3D
 from astronomix._fluid_equations.total_quantities import (
     calculate_gravitational_energy,
@@ -28,8 +37,6 @@ from astronomix.analysis_helpers.energy_spectrum import (
     get_magnetic_energy_spectrum,
     get_magnetic_helicity_spectrum,
 )
-from astronomix.data_classes.simulation_snapshot_data import SnapshotData
-from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE
 
 
 class SnapshotQuantity(NamedTuple):

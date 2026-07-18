@@ -100,6 +100,41 @@ API
 
       .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.magnetic_divergence
 
+   .. py:attribute:: kinetic_energy_spectrum
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.kinetic_energy_spectrum
+      :type: jax.numpy.ndarray
+      :value: None
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.kinetic_energy_spectrum
+
+   .. py:attribute:: magnetic_energy_spectrum
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.magnetic_energy_spectrum
+      :type: jax.numpy.ndarray
+      :value: None
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.magnetic_energy_spectrum
+
+   .. py:attribute:: helicity_spectrum
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.helicity_spectrum
+      :type: jax.numpy.ndarray
+      :value: None
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.helicity_spectrum
+
+   .. py:attribute:: k_spectra
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.k_spectra
+      :type: jax.numpy.ndarray
+      :value: None
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.k_spectra
+
+   .. py:attribute:: temperature_pdf
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.temperature_pdf
+      :type: jax.numpy.ndarray
+      :value: None
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.temperature_pdf
+
    .. py:attribute:: runtime
       :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.runtime
       :type: float
@@ -113,6 +148,27 @@ API
       :value: 0
 
       .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.num_iterations
+
+   .. py:attribute:: temporary_memory_bytes
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.temporary_memory_bytes
+      :type: int
+      :value: 0
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.temporary_memory_bytes
+
+   .. py:attribute:: argument_memory_bytes
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.argument_memory_bytes
+      :type: int
+      :value: 0
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.argument_memory_bytes
+
+   .. py:attribute:: total_memory_bytes
+      :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.total_memory_bytes
+      :type: int
+      :value: 0
+
+      .. autodoc2-docstring:: astronomix.data_classes.simulation_snapshot_data.SnapshotData.total_memory_bytes
 
    .. py:attribute:: current_checkpoint
       :canonical: astronomix.data_classes.simulation_snapshot_data.SnapshotData.current_checkpoint

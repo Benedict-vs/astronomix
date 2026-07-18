@@ -1,28 +1,55 @@
-# TOWNSEND SCHEME DOES NOT WORK CURRENTLY
+"""
+Tabulated radiative cooling curves.
 
+Builds the piecewise power-law cooling-curve parameters from the published
+Schure et al. (2009) high-temperature cooling table (which also includes the
+Dalgarno & McCray 1972 low-temperature curve), converted to code units.
+
+NOTE: The Townsend exact-integration scheme this table feeds is not currently
+working; only the simple explicit cooling is in use (see ``_cooling.py``).
+"""
+
+# general
 from functools import partial
+
+# jax
 import jax
 import jax.numpy as jnp
+
+# numerics
 import numpy as np
 
-from astronomix._modules._cooling.cooling_options import PiecewisePowerLawParams
-from astronomix.units.unit_helpers import CodeUnits
-
+# units and constants
 from astropy import units as u
 import astropy.constants as c
 from astropy.constants import m_p
 
+# astronomix containers
+from astronomix._modules._cooling.cooling_options import PiecewisePowerLawParams
+from astronomix.units.unit_helpers import CodeUnits
+
+
 def schure_cooling(
     code_units: CodeUnits,
 ):
+    """Build piecewise power-law cooling parameters from the Schure 2009 table.
 
-    # high temperature cooling table from
-    # https://arxiv.org/pdf/0909.5204
-    # the paper also includes the low temperature
-    # cooling curve from
-    # Dalgarno & McCray (1972)
+    Args:
+        code_units: The code-unit system used to convert the tabulated
+            temperatures and cooling rates from physical to code units.
 
-    # T in K
+    Returns:
+        A :class:`PiecewisePowerLawParams` holding the log10 temperature and
+        cooling-rate tables, the per-bin power-law slopes, the Townsend
+        temporal-evolution coefficients and the reference temperature, all in
+        code units.
+    """
+
+    # High-temperature cooling table from Schure et al. (2009),
+    # https://arxiv.org/pdf/0909.5204. That paper also includes the
+    # low-temperature cooling curve from Dalgarno & McCray (1972).
+
+    # Tabulated temperatures in Kelvin.
     log10_T = np.array([
         3.80, 3.84, 3.88, 3.92, 3.96, 4.00, 4.04, 4.08, 4.12, 4.16,
         4.20, 4.24, 4.28, 4.32, 4.36, 4.40, 4.44, 4.48, 4.52, 4.56,

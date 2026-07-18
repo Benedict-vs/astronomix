@@ -35,11 +35,13 @@ Schemes:
     rk2_ssp  - 2-stage 2nd-order SSP RK (Heun).
 """
 
+# jax
 import jax
 import jax.numpy as jnp
 
 
 def _identity(u):
+    """Identity hook: return the state pytree unchanged (the default stage hook)."""
     return u
 
 
@@ -49,6 +51,7 @@ def _tree_axpby(a, x, b, y):
 
 
 def _tree_add(x, y):
+    """Return the elementwise pytree sum ``x + y``."""
     return jax.tree_util.tree_map(lambda x_, y_: x_ + y_, x, y)
 
 

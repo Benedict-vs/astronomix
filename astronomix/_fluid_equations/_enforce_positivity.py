@@ -5,26 +5,33 @@ In my view this is a bit of a shady practice, hiding unphysical
 updates under the rug. However, it is common practice.
 """
 
+# general
 import itertools
-
-import jax.numpy as jnp
-import jax
 from functools import partial
 
+# typing
+from typing import Union
 from jaxtyping import Array, Float
 
-from typing import Union
+# jax
+import jax
+import jax.numpy as jnp
 
-from astronomix._pallas_helpers import diffable_pallas_call_n
-from astronomix.variable_registry.registered_variables import RegisteredVariables
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
     IDEAL_GAS,
     POSITIVITY_CONSERVATIVE,
     POSITIVITY_HARD_FLOOR,
     POSITIVITY_REDISTRIBUTE,
     STATE_TYPE,
-    SimulationConfig,
 )
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix._pallas_helpers import diffable_pallas_call_n
 
 
 def _enforce_positivity_native(

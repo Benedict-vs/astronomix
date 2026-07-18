@@ -1,9 +1,19 @@
-# data structures
-from astronomix.option_classes.simulation_config import SimulationConfig
-from astronomix.option_classes.simulation_params import SimulationParams
+"""
+astronomix: a differentiable finite-volume / finite-difference (magneto)hydrodynamics code.
 
-# constants
+This top-level package re-exports the most commonly used entry points — the
+configuration and parameter containers, the variable registry, the initial
+condition helpers and the ``time_integration`` driver — so that user scripts can
+import them directly from ``astronomix``.
+"""
+
+# astronomix constants
 from astronomix.option_classes.simulation_config import (
+    NATIVE_JAX,
+    PALLAS,
+    OPTIMAL_BACKEND,
+    FINITE_VOLUME,
+    FINITE_DIFFERENCE,
     FORWARDS,
     BACKWARDS,
     MINMOD,
@@ -22,7 +32,20 @@ from astronomix.option_classes.simulation_config import (
     TO_DISK,
 )
 
-# initialization functions
+# astronomix containers
+from astronomix.option_classes.simulation_config import (
+    SimulationConfig,
+    BoundarySettings,
+    BoundarySettings1D,
+    SnapshotSettings,
+    PositivityConfig,
+    GravityConfig,
+)
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
+from astronomix.units import CodeUnits
+
+# astronomix functions
 from astronomix.data_classes.simulation_helper_data import get_helper_data
 from astronomix.variable_registry.registered_variables import get_registered_variables
 from astronomix.option_classes.simulation_config import finalize_config
@@ -30,11 +53,6 @@ from astronomix.initial_condition_generation.construct_primitive_state import co
 from astronomix._finite_difference._magnetic_update._constrained_transport import (
     initialize_interface_fields,
 )
-
-# module-setup
-from astronomix._modules._stellar_wind.stellar_wind_options import WindParams
-
-# run
 from astronomix.time_stepping.time_integration import time_integration
 
 # setup helpers (disk-checkpoint restart). The restart path depends on Orbax,
@@ -56,6 +74,8 @@ except (ImportError, AttributeError) as _orbax_exc:
             "(orbax-checkpoint, compatible with the installed JAX). Original "
             f"import error: {_orbax_import_error}"
         )
+
+from astronomix.initial_condition_generation.magnetic_field_from_vector_potential import setup_magnetic_fields_from_vector_potential
 
 # units
 from astronomix.units import CodeUnits

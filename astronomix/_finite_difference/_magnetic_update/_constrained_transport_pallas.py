@@ -35,17 +35,24 @@ change.  See ``pallas_backend_implementation_guide.md`` §4.4 for the
 recipe and the diagnostic that motivated the split.
 """
 
+# jax
 import jax
 import jax.numpy as jnp
 
+# astronomix constants
+from astronomix.option_classes.simulation_config import IDEAL_GAS
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
 from astronomix._pallas_helpers import (
     _as_3tuple_block_shape,
     _backend_is_pallas,
     _pallas_compiler_params,
     pl,
 )
-from astronomix.option_classes.simulation_config import IDEAL_GAS, SimulationConfig
-from astronomix.variable_registry.registered_variables import RegisteredVariables
 
 
 XAXIS = 0

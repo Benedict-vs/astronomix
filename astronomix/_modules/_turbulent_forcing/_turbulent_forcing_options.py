@@ -1,4 +1,14 @@
+"""
+Configuration and parameter containers for turbulent forcing.
+
+``TurbulentForcingConfig`` holds the static switches (forcing on/off, vacuum
+protection, and the choice of Ornstein-Uhlenbeck versus white-in-time forcing),
+while ``TurbulentForcingParams`` holds the tunable physical parameters.
+"""
+
+# typing
 from typing import NamedTuple
+
 
 class TurbulentForcingConfig(NamedTuple):
     vacuum_protection: bool = False
@@ -12,6 +22,7 @@ class TurbulentForcingConfig(NamedTuple):
     #: which is state-independent (clean adjoint) and -- unlike the white
     #: forcing -- lets rotation organise coherent structures (columns).
     ou_forcing: bool = False
+
 
 class TurbulentForcingParams(NamedTuple):
     protection_density_threshold: float = 0.02

@@ -11,12 +11,12 @@ as surrogate / solver-in-the-loop training.
 
 ## Features
 
-- [x] 1D, 2D and 3D hydrodynamics and magnetohydrodynamics simulations scaling to multiple GPUs
+- [x] 1D, 2D and 3D hydrodynamics and magnetohydrodynamics simulations scaling to multiple GPUs and nodes
 - [x] a 5th order finite difference constrained transport WENO MHD scheme following [HOW-MHD by Seo & Ryu 2023](https://arxiv.org/abs/2304.04360) as well as the provably divergence free and provably positivity preserving
 finite volume approach of [Pang and Wu (2024)](https://arxiv.org/abs/2410.05173) (the WENO scheme is also available standalone for hydrodynamics)
 - [x] isothermal hydrodynamics and magnetohydrodynamics are also supported (currently only in the finite difference scheme)
 - [x] for finite volume simulations the basic Lax-Friedrichs, HLL and HLLC Riemann solvers as well as the HLLC-LM ([Fleischmann et al., 2020](https://www.sciencedirect.com/science/article/pii/S0021999120305362)) and HYBRID-HLLC & AM-HLLC ([Hu et al., 2025](https://www.sciencedirect.com/science/article/pii/S1007570425005891)) (sequels to HLLC-LM) variants
-- [x] novel (possibly) conservative self gravity scheme, with improved stability at strong discontinuities
+- [x] novel semi-discretely energy conserving self-gravity scheme
 - [x] spherically symmetric simulations such that mass and energy are conserved based on the scheme of [Crittenden and Balachandar (2018)](https://doi.org/10.1007/s00193-017-0784-y)
 - [x] backwards and forwards differentiable with adaptive timestepping
 - [x] turbulent driving, simple stellar wind, simple radiative cooling modules
@@ -24,14 +24,17 @@ finite volume approach of [Pang and Wu (2024)](https://arxiv.org/abs/2410.05173)
 
 ## Contents
 
+- [Features](#features)
 - [Installation](#installation)
 - [Hello World! Your first astronomix simulation](#hello-world-your-first-astronomix-simulation)
-- [Notebooks for Getting Started](#notebooks-for-getting-started)
+- [Examples for Getting Started](#examples-for-getting-started)
 - [Showcase](#showcase)
-- [Scaling tests](#scaling-tests)
+- [Performance](#performance)
+- [Frequently Asked Questions (FAQ)](#frequently-asked-questions-faq)
+  - [How to store intermediate information during the simulation?](#how-to-store-intermediate-information-during-the-simulation)
+  - [How to fit larger simulations into GPU memory?](#how-to-fit-larger-simulations-into-gpu-memory)
+  - [What if my simulation crashes?](#what-if-my-simulation-crashes)
 - [Documentation](#documentation)
-- [Methodology](#methodology)
-- [Limitations](#limitations)
 - [Citing astronomix](#citing-astronomix)
 
 ## Installation
@@ -112,47 +115,53 @@ the notebooks below and we have also prepared a more advanced use-case
 (stellar wind in driven MHD tubulence) which you can
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1Pg98IPGnoejaGvzmNNZiwmf1JnXwYAJH?usp=sharing).
 
-## Notebooks for Getting Started
+## Examples for Getting Started
 
-- hydrodynamics
-  - [1d shock tube](notebooks/hydrodynamics/simple_example.ipynb)
-  - [1d spherical check of conservational properties](notebooks/hydrodynamics/conservational_properties.ipynb)
-  - [2d Kelvin-Helmholtz instability](notebooks/hydrodynamics/kelvin_helmholtz.ipynb)
-- magnetohydrodynamics
-  - [2d Orszag-Tang vortex](notebooks/magnetohydrodynamics/orszag_tang_vortex.ipynb)
-  - [3D MHD blast with the 5th order FD scheme](notebooks/magnetohydrodynamics/fd_mhd_blast.ipynb)
-- self-gravity
-  - [3d simulation of Evrard's collapse](notebooks/self_gravity/evrards_collapse.ipynb)
-- stellar wind
-  - [1d stellar wind with gradient showcase](notebooks/stellar_wind/gradients_through_stellar_wind.ipynb)
-  - [1d stellar wind with parameter optimization](notebooks/stellar_wind/wind_parameter_optimization.ipynb)
-  - [3d stellar wind](notebooks/stellar_wind/stellar_wind3D.ipynb)
+Every example is available both as a runnable script (`examples/scripts/…`) and
+as an equivalent notebook (`examples/notebooks/…`).
+
+- forward simulations
+  - [1D Sod shock tube](examples/notebooks/forward/hydro/shock_tube.ipynb)
+  - [2D Kelvin-Helmholtz instability](examples/notebooks/forward/hydro/khi.ipynb)
+  - [3D MHD jet](examples/notebooks/forward/mhd/jet.ipynb)
+  - [3D driven MHD turbulence](examples/notebooks/forward/mhd/turbulence.ipynb)
+  - [3D self-gravitating collapse](examples/notebooks/forward/self_gravity/collapse.ipynb)
+- differentiability
+  - [Field-level inference](examples/notebooks/differentiability/field_level_inference.ipynb)
+  - [KHI eigenmode initialization](examples/notebooks/differentiability/eigen_initialization.ipynb)
+  - [Solver-in-the-loop correction network](examples/notebooks/differentiability/solver_in_the_loop.ipynb)
+- output options
+  - [On-the-fly movie via callback](examples/notebooks/output_options/callback.ipynb)
+  - [Orbax checkpointing and restart](examples/notebooks/output_options/orbax_checkpointing.ipynb)
+  - [In-memory snapshot diagnostics](examples/notebooks/output_options/return_snapshots.ipynb)
+- multi-GPU
+  - [Sharded multi-GPU run](examples/notebooks/multi_gpu/multi_gpu.ipynb)
+  - [Multi-node run](examples/notebooks/multi_gpu/multi_node.ipynb)
+
+More involved, physics-module showcase scripts — turbulent radiative mixing
+layer, stellar wind, cosmic rays, cooling and more — live in
+[`examples/gallery/`](examples/gallery). The faithful methods-paper figure
+generators live under [`examples/scripts/`](examples/scripts); regenerate every
+paper figure with `pytest pytests/test_reproduce_paper.py --reproduce-paper`.
+The fast correctness tests live under [`pytests/`](pytests).
 
 ## Showcase
 
-| ![wind in driven turbulence](tests/finite_difference/figures/interm_driven_turb_wind4.png) |
+| ![wind in driven turbulence](readme_resources/readme_figures/interm_driven_turb_wind4.png) |
 |:---------------------------------------------------------------------------------:|
 | Magnetohydrodynamics simulation with driven turbulence at a resolution of 512³ cells in a fifth order CT MHD scheme run on 4 H200 GPUs. |
 
-| ![wind in driven turbulence](tests/finite_difference/figures/driven_turb_wind4.png) |
+| ![wind in driven turbulence](readme_resources/readme_figures/driven_turb_wind4.png) |
 |:---------------------------------------------------------------------------------:|
 | Magnetohydrodynamics simulation with driven turbulence and stellar wind at a resolution of 512³ cells in a fifth order CT MHD scheme run on 4 H200 GPUs. |
 
-| ![Orszag-Tang Vortex](notebooks/figures/orszag_tang_animation.gif) | ![3D Collapse](notebooks/figures/3d_collapse.gif) |
-|:------------------------------------------------------------------:|:-------------------------------------------------:|
-| Orszag-Tang Vortex                                                 | 3D Collapse                                       |
+| ![3D MHD jet](readme_resources/readme_figures/mhd_jet.png) |
+|:----------------------------------------------------------:|
+| 3D MHD jet propagating into a magnetized medium. |
 
-| ![Gradients Through Stellar Wind](notebooks/figures/gradients_through_stellar_wind.svg) |
-|:---------------------------------------------------------------------------------------:|
-| Gradients Through Stellar Wind                                                          |
-
-| ![Novel (Possibly) Conservative Self Gravity Scheme, Stable at Strong Discontinuities](notebooks/figures/collapse_conservation.svg) |
-|:-----------------------------------------------------------------------------------------------------------------------------------:|
-| Novel (Possibly) Conservative Self Gravity Scheme, Stable at Strong Discontinuities                                                 |
-
-| ![Wind Parameter Optimization](notebooks/figures/wind_parameter_optimization.png) |
-|:---------------------------------------------------------------------------------:|
-| Wind Parameter Optimization                                                       |
+| ![Semi-Discretely Energy Conserving Self Gravity Scheme](readme_resources/readme_figures/collapse_energy_evolution_comparison.svg) |
+|:-----------------------------------------------------------------------------------------------------------:|
+| Novel semi-discretely energy conserving self-gravity scheme. |
 
 ## Performance
 
@@ -175,6 +184,13 @@ you used to construct the state might still be in GPU memory). To further save s
 you can donate the initial state to the time integration (activate `donate_state` in the `SimulationConfig`),
 which allows `JAX` to reuse the same memory for the state throughout the simulation (but you can also no
 longer access the initial state after the simulation has started).
+
+### What if my simulation crashes?
+
+First of all check if the initial conditions are valid. Then there 
+is the `PositivityConfig` in the `SimulationConfig`, in which for instance
+a positivity preserving limiter can be turned on for the finite 
+difference scheme.
 
 ## Documentation
 

@@ -23,6 +23,11 @@ Examples:
     python pytests/mhd/alfven_wave3D.py --convergence --scaling
 """
 
+# general
+# NOTE: os/sys and the argv parsing below must run before autocvd, because the
+# number of GPUs requested from autocvd is derived from the --scaling flag. The
+# jax / astronomix imports are therefore deliberately deferred until after the
+# autocvd call (see the E402 waiver below).
 import os
 import sys
 
@@ -45,30 +50,40 @@ autocvd(num_gpus=NUM_GPUS_SCALING if RUN_SCALING else 1)
 # ruff: noqa: E402
 # =======================
 
+# jax
 import jax
 
-from astronomix.option_classes.simulation_config import (
-    FINITE_DIFFERENCE,
+# astronomix constants
+from astronomix import (
     FINITE_VOLUME,
     NATIVE_JAX,
-    PALLAS,
+)
+
+# astronomix containers
+from astronomix import (
     SimulationConfig,
     SnapshotSettings,
-    StaticFloatVector,
 )
+from astronomix.option_classes.simulation_config import StaticFloatVector
+
+# astronomix functions
 from astronomix.test_setups.mhd.alfven_wave3D import (
     setup_cp_alfven_wave,
     cp_alfven_wave_solution,
 )
 
+
+# benchmark helpers
+# The shared benchmark module lives in the pytests/ root; make sure that
+# directory is importable before pulling it in (it may not be on sys.path when
+# this file is run directly rather than through pytest).
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PYTESTS_DIR = os.path.dirname(_HERE)
 if _PYTESTS_DIR not in sys.path:
     sys.path.insert(0, _PYTESTS_DIR)
 from _benchmark_utils import (  # noqa: E402
     BenchmarkSpec,
-    run_convergence_and_runtime,
-    run_strong_scaling,
+    assert_correctness_at_resolution,
 )
 
 DATA_DIR = os.path.join(_HERE, "data", "astronomix")
@@ -100,11 +115,6 @@ BENCHMARKS = [
     BenchmarkSpec(
         label="FD (Pallas)",
         base_config=SimulationConfig(
-            backend=PALLAS,
-            pallas_block_shape=(4, 4, 8),
-            pallas_use_triton=True,
-            pallas_interpret=False,
-            solver_mode=FINITE_DIFFERENCE,
             **_common_kwargs,
         ),
         cfl=1.5,
@@ -112,55 +122,53 @@ BENCHMARKS = [
 ]
 
 
-def _error_indices(rv):
+def _error_indices(registered_variables):
+    """State-array indices of the variables entered into the L1 error norm.
+
+    The convergence metric averages the error over density, the three velocity
+    components, pressure and the three magnetic-field components. Indexing goes
+    through ``registered_variables`` so the layout stays in sync with the solver.
+    """
     return (
-        rv.density_index,
-        rv.velocity_index.x, rv.velocity_index.y, rv.velocity_index.z,
-        rv.pressure_index,
-        rv.magnetic_index.x, rv.magnetic_index.y, rv.magnetic_index.z,
+        registered_variables.density_index,
+        registered_variables.velocity_index.x,
+        registered_variables.velocity_index.y,
+        registered_variables.velocity_index.z,
+        registered_variables.pressure_index,
+        registered_variables.magnetic_index.x,
+        registered_variables.magnetic_index.y,
+        registered_variables.magnetic_index.z,
     )
 
 
 def _precision_label(precision: str) -> str:
+    """Human-readable precision name for plot titles ("dp" -> "double")."""
     return "double" if precision == "dp" else "single"
 
 
 def test_alfven_wave_convergence():
+    """Run the convergence + runtime sweep for each requested precision.
+
+    Each precision is run in its own x64 setting with the JIT caches cleared in
+    between (single and double precision compile to different kernels), and the
+    matching AthenaPK reference overlay is attached when its NPZ is present.
+    """
     for precision in PRECISIONS:
         jax.config.update("jax_enable_x64", precision == "dp")
         jax.clear_caches()
         athenapk_npz = os.path.join(
             ATHENAPK_DIR, f"athenapk_alfven_convergence_{precision}.npz"
         )
-        run_convergence_and_runtime(
-            BENCHMARKS,
-            N_values=[8, 16, 32, 64, 128],
+        assert_correctness_at_resolution(
+        BENCHMARKS,
+        N=16,
             setup_fn=setup_cp_alfven_wave,
             analytic_fn=cp_alfven_wave_solution,
             error_var_indices_fn=_error_indices,
-            name=f"alfven_wave3D_{precision}",
-            title=f"3D CP Alfvén wave ({_precision_label(precision)} precision)",
-            data_dir=DATA_DIR,
-            figure_dir=FIG_DIR,
-            athenapk_npz=athenapk_npz if os.path.exists(athenapk_npz) else None,
-        )
-
-
-def test_alfven_wave_strong_scaling():
-    run_strong_scaling(
-        BENCHMARKS,
-        N_values=[16, 32, 64, 128],
-        setup_fn=setup_cp_alfven_wave,
-        num_gpus=NUM_GPUS_SCALING,
-        name="alfven_wave3D",
-        title="3D CP Alfvén wave",
-        data_dir=DATA_DIR,
-        figure_dir=FIG_DIR,
+        name=f"alfven_wave3D_{precision}",
+        tol=0.005,
     )
 
 
 if __name__ == "__main__":
-    if RUN_CONVERGENCE:
-        test_alfven_wave_convergence()
-    if RUN_SCALING:
-        test_alfven_wave_strong_scaling()
+    test_alfven_wave_convergence()

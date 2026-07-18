@@ -1,16 +1,50 @@
-# general imports
-import jax.numpy as jnp
-import jax
+"""
+One finite-difference time step on the primitive state.
+
+Converts the primitive state to conserved variables, dispatches to the
+requested Runge-Kutta integrator (SSPRK4 or low-storage RK4, with constrained
+transport for MHD), converts back to primitives, and re-fills ghost cells when
+ghost-cell boundaries are in use.
+"""
+
+# general
 from functools import partial
 
-
-# type checking imports
+# typing
+from typing import Union
 from jaxtyping import Array, Float
 from beartype import beartype as typechecker
-from typing import Union
 
-# general astronomix imports
-from astronomix._fluid_equations._equations_mhd import conserved_state_from_primitive_isothermal, conserved_state_from_primitive_mhd, primitive_state_from_conserved_isothermal, primitive_state_from_conserved_mhd
+# jax
+import jax
+import jax.numpy as jnp
+
+# astronomix constants
+from astronomix.option_classes.simulation_config import (
+    GHOST_CELLS,
+    IDEAL_GAS,
+    ISOTHERMAL,
+    RK4_LSRK,
+    STATE_TYPE,
+)
+
+# astronomix containers
+from astronomix.data_classes.simulation_helper_data import HelperData
+from astronomix.option_classes.simulation_config import SimulationConfig
+from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+# astronomix functions
+from astronomix._fluid_equations._equations import (
+    conserved_state_from_primitive,
+    primitive_state_from_conserved,
+)
+from astronomix._fluid_equations._equations_mhd import (
+    conserved_state_from_primitive_isothermal,
+    conserved_state_from_primitive_mhd,
+    primitive_state_from_conserved_isothermal,
+    primitive_state_from_conserved_mhd,
+)
 from astronomix._finite_difference._magnetic_update._constrained_transport import update_cell_center_fields
 from astronomix._finite_difference._time_integrators._ssprk import (
     _lsrk4_hydro,
@@ -18,20 +52,8 @@ from astronomix._finite_difference._time_integrators._ssprk import (
     _ssprk4_hydro,
     _ssprk4_with_ct,
 )
-from astronomix._fluid_equations._equations import conserved_state_from_primitive, primitive_state_from_conserved
 from astronomix._geometry.boundaries import _boundary_handler
-from astronomix.data_classes.simulation_helper_data import HelperData
-from astronomix.variable_registry.registered_variables import RegisteredVariables
-from astronomix.option_classes.simulation_config import (
-    GHOST_CELLS,
-    IDEAL_GAS,
-    ISOTHERMAL,
-    RK4_LSRK,
-    STATE_TYPE,
-    SimulationConfig,
-)
 
-from astronomix.option_classes.simulation_params import SimulationParams
 
 @partial(jax.jit, static_argnames=["config", "registered_variables"], donate_argnames=["primitive_state"])
 def _evolve_state_fd(
@@ -44,6 +66,21 @@ def _evolve_state_fd(
     registered_variables: RegisteredVariables,
     current_time: Union[float, Float[Array, ""]] = 0.0,
 ) -> STATE_TYPE:
+    """
+    Advance the primitive state by one finite-difference time step.
+
+    Args:
+        primitive_state: The primitive state array.
+        dt: The time step.
+        gamma: The adiabatic index.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        helper_data: The helper data.
+        registered_variables: The registered variables.
+
+    Returns:
+        The primitive state after one time step.
+    """
 
     if config.mhd:
         # NOTE: here we assume the magnetic field at interfaces
@@ -133,8 +170,9 @@ def _evolve_state_fd(
             params.minimum_density,
             params.minimum_pressure,
         )
-    
-    # handle the boundary conditions
+
+    # When ghost-cell boundaries are in use, refill the ghost zones from the
+    # updated interior so the next step sees a consistent boundary state.
     if config.boundary_handling == GHOST_CELLS:
         primitive_state = _boundary_handler(
             primitive_state, config, registered_variables, params

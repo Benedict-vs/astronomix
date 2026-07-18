@@ -16,12 +16,67 @@ Classes
    :class: autosummary longtable
    :align: left
 
+   * - :py:obj:`FixedBoundaryState1D <astronomix.option_classes.simulation_params.FixedBoundaryState1D>`
+     - .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+          :summary:
+   * - :py:obj:`FixedBoundaryState <astronomix.option_classes.simulation_params.FixedBoundaryState>`
+     - .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState
+          :summary:
    * - :py:obj:`SimulationParams <astronomix.option_classes.simulation_params.SimulationParams>`
      - .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams
           :summary:
 
 API
 ~~~
+
+.. py:class:: FixedBoundaryState1D
+   :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+
+   Bases: :py:obj:`typing.NamedTuple`
+
+   .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+
+   .. py:attribute:: left_state
+      :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState1D.left_state
+      :type: jax.numpy.ndarray
+      :value: 'array(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState1D.left_state
+
+   .. py:attribute:: right_state
+      :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState1D.right_state
+      :type: jax.numpy.ndarray
+      :value: 'array(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState1D.right_state
+
+.. py:class:: FixedBoundaryState
+   :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState
+
+   Bases: :py:obj:`typing.NamedTuple`
+
+   .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState
+
+   .. py:attribute:: x
+      :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState.x
+      :type: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+      :value: 'FixedBoundaryState1D(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState.x
+
+   .. py:attribute:: y
+      :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState.y
+      :type: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+      :value: 'FixedBoundaryState1D(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState.y
+
+   .. py:attribute:: z
+      :canonical: astronomix.option_classes.simulation_params.FixedBoundaryState.z
+      :type: astronomix.option_classes.simulation_params.FixedBoundaryState1D
+      :value: 'FixedBoundaryState1D(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.FixedBoundaryState.z
 
 .. py:class:: SimulationParams
    :canonical: astronomix.option_classes.simulation_params.SimulationParams
@@ -44,6 +99,34 @@ API
 
       .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.gravitational_constant
 
+   .. py:attribute:: gravitational_potential
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.gravitational_potential
+      :type: jax.numpy.array
+      :value: 'array(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.gravitational_potential
+
+   .. py:attribute:: viscosity
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.viscosity
+      :type: float
+      :value: 0.0
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.viscosity
+
+   .. py:attribute:: thermal_conductivity
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.thermal_conductivity
+      :type: float
+      :value: 0.0
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.thermal_conductivity
+
+   .. py:attribute:: isothermal_sound_speed
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.isothermal_sound_speed
+      :type: float
+      :value: 1.0
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.isothermal_sound_speed
+
    .. py:attribute:: gamma
       :canonical: astronomix.option_classes.simulation_params.SimulationParams.gamma
       :type: float
@@ -65,12 +148,26 @@ API
 
       .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.minimum_pressure
 
+   .. py:attribute:: positivity_max_velocity
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.positivity_max_velocity
+      :type: float
+      :value: 50.0
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.positivity_max_velocity
+
    .. py:attribute:: dt_max
       :canonical: astronomix.option_classes.simulation_params.SimulationParams.dt_max
       :type: float
-      :value: 0.001
+      :value: None
 
       .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.dt_max
+
+   .. py:attribute:: t_start
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.t_start
+      :type: float
+      :value: 0.0
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.t_start
 
    .. py:attribute:: t_end
       :canonical: astronomix.option_classes.simulation_params.SimulationParams.t_end
@@ -85,6 +182,13 @@ API
       :value: 'array(...)'
 
       .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.snapshot_timepoints
+
+   .. py:attribute:: fixed_boundary_state
+      :canonical: astronomix.option_classes.simulation_params.SimulationParams.fixed_boundary_state
+      :type: astronomix.option_classes.simulation_params.FixedBoundaryState
+      :value: 'FixedBoundaryState(...)'
+
+      .. autodoc2-docstring:: astronomix.option_classes.simulation_params.SimulationParams.fixed_boundary_state
 
    .. py:attribute:: turbulent_forcing_params
       :canonical: astronomix.option_classes.simulation_params.SimulationParams.turbulent_forcing_params

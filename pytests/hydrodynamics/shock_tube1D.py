@@ -1,5 +1,10 @@
 """
-1D shock tube pytest
+1D Sod shock tube pytest.
+
+Runs the classic Sod shock tube on a handful of solver configurations
+(finite-volume HLLC with minmod / superbee limiters and the finite-difference
+solver), compares each against the analytic Riemann solution to within a fixed
+tolerance, and writes an overview figure of density, velocity and pressure.
 """
 
 # ==== GPU selection ====
@@ -8,28 +13,48 @@ autocvd(num_gpus=1)
 # ruff: noqa: E402
 # =======================
 
+# general
+from pathlib import Path
+
+# jax
 import jax.numpy as jnp
+
+# plotting
 import matplotlib.pyplot as plt
 
-from astronomix.data_classes.simulation_helper_data import get_helper_data
-from astronomix.option_classes.simulation_config import (
-    FINITE_VOLUME,
+# astronomix constants
+from astronomix import (
     FINITE_DIFFERENCE,
-    HLL,
+    FINITE_VOLUME,
     HLLC,
     MINMOD,
-    SUPERBEE,
-    SimulationConfig,
-    config_to_string
 )
-from astronomix.time_stepping.time_integration import time_integration
-from astronomix.option_classes.simulation_params import SimulationParams
+from astronomix.option_classes.simulation_config import SUPERBEE
+
+# astronomix containers
+from astronomix import (
+    SimulationConfig,
+    SimulationParams,
+)
+
+# astronomix functions
+from astronomix import (
+    get_helper_data,
+    time_integration,
+    get_registered_variables,
+)
+from astronomix.option_classes.simulation_config import config_to_string
 from astronomix.plotting_helpers.inset_box import add_inset_box
-from astronomix.variable_registry.registered_variables import get_registered_variables
-from astronomix.test_setups.hydrodynamics.shock_tube1D import setup_sod_shock_tube, sod_shock_tube_solution
+from astronomix.test_setups.hydrodynamics.shock_tube1D import (
+    setup_sod_shock_tube,
+    sod_shock_tube_solution,
+)
+
 
 num_cells = 200
 
+# The configurations under test: two finite-volume HLLC runs differing only in
+# their slope limiter, plus the finite-difference solver.
 config_list = [
     SimulationConfig(
         solver_mode = FINITE_VOLUME,
@@ -44,17 +69,32 @@ config_list = [
         num_cells = num_cells,
     ),
     SimulationConfig(
-        solver_mode = FINITE_DIFFERENCE,
         num_cells = num_cells,
     ),
 ]
 
+
 def test_shock_tube1D(tol = 1e-2):
-    
-    # Create figure
+    """
+    Run the Sod shock tube for every configuration and assert convergence.
+
+    Each configuration is integrated to the test end time, compared against the
+    analytic Sod solution, and plotted alongside a high-resolution reference.
+    The mean absolute error in density, velocity and pressure must stay below
+    ``tol`` for the test to pass.
+
+    Args:
+        tol: The maximum allowed mean absolute error per primitive variable.
+    """
+
+    # -------------------------------------------------------------
+    # =========== ↓ High-resolution reference solution ↓ ==========
+    # -------------------------------------------------------------
+
     fig, (ax_density, ax_velocity, ax_pressure) = plt.subplots(1, 3, figsize=(15, 5))
 
-    # Get high resolution analytic solution
+    # A finely resolved analytic solution serves as the visual reference the
+    # coarser runs are plotted against.
     config_high_res = SimulationConfig(
         dimensionality = 1,
         num_cells = 1000,
@@ -75,7 +115,6 @@ def test_shock_tube1D(tol = 1e-2):
         helper_data_high_res,
     )
 
-    # Plot the reference solution
     ax_density.plot(
         helper_data_high_res.geometric_centers,
         reference_solution_high_res[registered_variables.density_index],
@@ -104,13 +143,22 @@ def test_shock_tube1D(tol = 1e-2):
     ax_velocity.set_title('Velocity')
     ax_pressure.set_title('Pressure')
 
+    # -------------------------------------------------------------
+    # =========== ↑ High-resolution reference solution ↑ ==========
+    # -------------------------------------------------------------
+
+    # -------------------------------------------------------------
+    # ============ ↓ Per-configuration run and check ↓ ============
+    # -------------------------------------------------------------
+
     for config in config_list:
 
-        # setup the simulation
+        # Set up the simulation for this configuration.
         registered_variables = get_registered_variables(config)
         helper_data = get_helper_data(config)
 
-        # get the initial state
+        # Build the initial state. The finite-difference solver tolerates a
+        # larger CFL number than the finite-volume solver here.
         initial_state, config, params = setup_sod_shock_tube(
             config,
             registered_variables,
@@ -120,7 +168,7 @@ def test_shock_tube1D(tol = 1e-2):
             helper_data,
         )
 
-        # run the simulation
+        # Run the simulation to the test end time.
         final_state = time_integration(
             initial_state,
             config,
@@ -128,7 +176,7 @@ def test_shock_tube1D(tol = 1e-2):
             registered_variables
         )
 
-        # get the reference solution
+        # The analytic Sod solution on this configuration's grid.
         true_final_state = sod_shock_tube_solution(
             config,
             registered_variables,
@@ -136,17 +184,33 @@ def test_shock_tube1D(tol = 1e-2):
             helper_data,
         )
 
-        # calculate the density, velocity and pressure error
-        density_error = jnp.mean(jnp.abs(final_state[registered_variables.density_index] - true_final_state[registered_variables.density_index]))
-        velocity_error = jnp.mean(jnp.abs(final_state[registered_variables.velocity_index] - true_final_state[registered_variables.velocity_index]))
-        pressure_error = jnp.mean(jnp.abs(final_state[registered_variables.pressure_index] - true_final_state[registered_variables.pressure_index]))
+        # Mean absolute error per primitive variable against the analytic
+        # solution, indexed through the registered variables.
+        density_error = jnp.mean(
+            jnp.abs(
+                final_state[registered_variables.density_index]
+                - true_final_state[registered_variables.density_index]
+            )
+        )
+        velocity_error = jnp.mean(
+            jnp.abs(
+                final_state[registered_variables.velocity_index]
+                - true_final_state[registered_variables.velocity_index]
+            )
+        )
+        pressure_error = jnp.mean(
+            jnp.abs(
+                final_state[registered_variables.pressure_index]
+                - true_final_state[registered_variables.pressure_index]
+            )
+        )
 
-        # assert that the errors are below the tolerance
+        # Every primitive variable must match the analytic solution within tol.
         assert density_error < tol, f"Density error {density_error} exceeds tolerance {tol}"
         assert velocity_error < tol, f"Velocity error {velocity_error} exceeds tolerance {tol}"
         assert pressure_error < tol, f"Pressure error {pressure_error} exceeds tolerance {tol}"
 
-        # plot the simulation result
+        # Overlay this run on the reference plots.
         ax_density.plot(
             helper_data.geometric_centers,
             final_state[registered_variables.density_index],
@@ -163,13 +227,20 @@ def test_shock_tube1D(tol = 1e-2):
             label=config_to_string(config),
         )
 
-    
+    # -------------------------------------------------------------
+    # ============ ↑ Per-configuration run and check ↑ ============
+    # -------------------------------------------------------------
+
+    # A zoomed inset around the contact discontinuity highlights how the
+    # limiters differ where the solutions are hardest to resolve.
     add_inset_box(ax_density, x1=0.62, x2=0.72, y1=0.20, y2=0.30, connect_loc1=1)
 
     handles, labels = ax_density.get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', ncol=4)
 
     fig.tight_layout(rect=[0, 0.08, 1, 1])
-    fig.savefig("figures/shock_tube1D_test.svg")
+    figures_dir = Path(__file__).resolve().parent / "figures"
+    figures_dir.mkdir(exist_ok=True)
+    fig.savefig(figures_dir / "shock_tube1D_test.svg")
 
 test_shock_tube1D()

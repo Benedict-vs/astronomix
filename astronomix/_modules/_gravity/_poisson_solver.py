@@ -1,21 +1,34 @@
+"""
+FFT-based Poisson solver for the gravitational potential.
+
+Solves Poisson's equation for the gravitational potential in Fourier space.
+Fully periodic domains use the spectral Green's function directly (with the
+Jeans swindle subtracting the mean density). Non-periodic (open) boundaries use
+the Hockney & Eastwood method, zero-padding the domain to twice its size and
+convolving with the isolated-system Green's function.
+"""
+
 # general
 from functools import partial
-import jax
-import jax.numpy as jnp
 
 # typing
-from beartype import beartype as typechecker
 from typing import Union
 from jaxtyping import Array, Float, jaxtyped
+from beartype import beartype as typechecker
 
-# jf1uid constants
-from astronomix.option_classes.simulation_config import FIELD_TYPE, PERIODIC_BOUNDARY
-
-# astronomix classes
-from astronomix.option_classes.simulation_config import SimulationConfig
-
-# fft
+# jax
+import jax
+import jax.numpy as jnp
 from jax.numpy.fft import fftn, ifftn
+
+# astronomix constants
+from astronomix.option_classes.simulation_config import (
+    FIELD_TYPE,
+    PERIODIC_BOUNDARY,
+)
+
+# astronomix containers
+from astronomix.option_classes.simulation_config import SimulationConfig
 
 
 # @jaxtyped(typechecker=typechecker)
@@ -41,14 +54,15 @@ def _compute_gravitational_potential(
 
     """
 
-    # TODO: remove ghost cells in this computations (?)
+    # TODO: remove ghost cells in this computation, which currently treats the
+    # padded field directly.
 
     dimensionality = config.dimensionality
 
-    # we only use outflow if not all boundaries are periodic
-    # SO THERES EITHER ALL PERIODIC OR NONE
-    # TODO: improve
-
+    # The open-boundary branch is only taken when *no* boundary is periodic; a
+    # mix of periodic and non-periodic boundaries is not yet supported, so the
+    # domain is treated as either fully periodic or fully open.
+    # TODO: support mixed boundary conditions.
     non_periodic_boundaries = False
 
     if dimensionality == 1:
@@ -79,22 +93,24 @@ def _compute_gravitational_potential(
     if config.gravity_config.poisson_manual_open_boundaries:
         non_periodic_boundaries = True
 
-    # if periodic boundaries
+    # The Jeans swindle: only a meaningful periodic solution exists once the
+    # (unphysical) mean density is removed, so subtract it for periodic domains.
     if not non_periodic_boundaries:
-        # jeans swindle
         gas_density = gas_density - jnp.mean(gas_density)
 
     if not non_periodic_boundaries:
-        # -----------------------------
-        # Periodic boundaries version
-        # -----------------------------
-        # Compute FFT of the density field.
+        # -------------------------------------------------------------
+        # ============= ↓ Periodic boundaries version ↓ ==============
+        # -------------------------------------------------------------
+
+        # Transform the density to Fourier space.
         density_k = fftn(gas_density)
 
+        # Build the squared wavenumber magnitude for the active dimensionality.
         if dimensionality == 1:
             num_cells_x = gas_density.shape[0]
             k_base_x = jnp.fft.fftfreq(num_cells_x, d=grid_spacing) * 2 * jnp.pi
-            k = k_base_x  # 1D case.
+            k = k_base_x
             k_squared = k**2
         elif dimensionality == 2:
             num_cells_x, num_cells_y = gas_density.shape
@@ -110,42 +126,44 @@ def _compute_gravitational_potential(
             kx, ky, kz = jnp.meshgrid(k_base_x, k_base_y, k_base_z, indexing="ij")
             k_squared = kx**2 + ky**2 + kz**2
 
-        # Avoid division by zero (k = 0 mode).
+        # Regularise the k = 0 mode to avoid dividing by zero; its Green's-
+        # function value is the finite constant -1 / (4 pi). This is harmless
+        # because the Jeans swindle above already removed the mean density, so
+        # density_k[0] ~ 0.
         k_squared = jnp.where(k_squared == 0, 1e-12, k_squared)
         greens_function = jnp.where(
             k_squared > 1e-12, -4 * jnp.pi * G / k_squared, -1 / (4 * jnp.pi)
         )
 
-        # Multiply in Fourier space and invert.
+        # Apply the Green's function in Fourier space and transform back.
         potential_k = greens_function * density_k
         gravitational_potential = jnp.real(ifftn(potential_k))
 
         return gravitational_potential
 
     else:
-        # TODO: check if it works for different cell numbers in each dimension
-        # ----------------------------------------------------
-        # Open boundaries version via Hockney & Eastwood method
-        # ----------------------------------------------------
+        # -------------------------------------------------------------
+        # ====== ↓ Open boundaries (Hockney & Eastwood) version ↓ ====
+        # -------------------------------------------------------------
+        # TODO: check that this works for differing cell counts per dimension.
         #
-        # (a) Extend the domain to twice the size in each dimension.
+        # (a) Extend the domain to twice the size in each dimension and embed
+        #     the original density in the (0, ..., 0) corner; the zero padding
+        #     is what makes the periodic FFT convolution behave as an isolated
+        #     (open-boundary) one.
         original_shape = gas_density.shape
         extended_shape = tuple(2 * s for s in original_shape)
 
-        # Embed the original density in the (0,...,0) corner of the extended grid.
         extended_density = jnp.zeros(extended_shape, dtype=gas_density.dtype)
         slices = tuple(slice(0, s) for s in original_shape)
         extended_density = extended_density.at[slices].set(gas_density)
 
         # (b) Construct the Green's function on the extended grid.
         #
-        # The Hockney–Eastwood prescription is to compute, for each dimension,
+        # The Hockney-Eastwood prescription computes, for each dimension,
         #     pos = [0, 1, 2, ..., n-1, 2n - n, ..., 1] * grid_spacing,
-        # which is equivalent to:
-        #
-        #    pos = np.arange(2*n);  pos = where(pos < n, pos, 2*n - pos)
-        #
-        # This yields the “minimum–image” distances from the source placed at the origin.
+        # i.e. pos = arange(2*n); pos = where(pos < n, pos, 2*n - pos), which
+        # yields the minimum-image distances from a source placed at the origin.
         grids = []
         for s in original_shape:
             n = s
@@ -155,9 +173,9 @@ def _compute_gravitational_potential(
             pos = pos * grid_spacing
             grids.append(pos)
 
-        # Now create the distance array r on the extended grid.
+        # Build the radial distance array r on the extended grid.
         if dimensionality == 1:
-            r = grids[0]  # Already nonnegative.
+            r = grids[0]  # already nonnegative
         elif dimensionality == 2:
             x, y = jnp.meshgrid(grids[0], grids[1], indexing="ij")
             r = jnp.sqrt(x**2 + y**2)
@@ -165,25 +183,28 @@ def _compute_gravitational_potential(
             x, y, z = jnp.meshgrid(grids[0], grids[1], grids[2], indexing="ij")
             r = jnp.sqrt(x**2 + y**2 + z**2)
 
-        # Replace any zero distance with grid_spacing (to avoid singularity).
+        # Replace any zero distance with grid_spacing to avoid the singularity
+        # at the origin.
         r_safe = jnp.where(r == 0, grid_spacing, r)
 
-        # (c) Define the isolated (open–boundary) Green's function.
+        # (c) Isolated (open-boundary) Green's function for each dimensionality.
         if dimensionality == 1:
-            # For 1D (solving φ'' = 4πGδ(x)), the solution is φ = -2πG |x|
+            # 1D: solving phi'' = 4 pi G delta(x) gives phi = -2 pi G |x|.
             kernel = -2 * jnp.pi * G * r
         elif dimensionality == 2:
-            # In 2D, φ = -2G log(r)  (up to an additive constant).
+            # 2D: phi = -2 G log(r) (up to an additive constant).
             kernel = -2 * G * jnp.log(r_safe)
         elif dimensionality == 3:
-            # In 3D, the isolated potential is φ = -G/r.
+            # 3D: the isolated potential is phi = -G / r.
             kernel = -G / r_safe
 
-        # (d) FFT–convolve: Multiply the FFTs of the extended density and the Green's function.
+        # (d) FFT-convolve the extended density with the Green's function.
         density_k_ext = fftn(extended_density)
         kernel_k_ext = fftn(kernel)
         potential_ext = jnp.real(ifftn(density_k_ext * kernel_k_ext))
 
-        # (e) Extract the portion of the potential corresponding to the original grid.
+        # (e) Extract the portion of the potential covering the original grid;
+        #     the grid_spacing**dim factor accounts for the discrete convolution
+        #     measure.
         gravitational_potential = potential_ext[slices]
         return gravitational_potential * grid_spacing**dimensionality

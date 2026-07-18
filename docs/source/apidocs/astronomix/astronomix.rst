@@ -13,9 +13,12 @@ Subpackages
    :titlesonly:
    :maxdepth: 3
 
-   astronomix.time_stepping
+   astronomix.initial_condition_generation
+   astronomix.units
+   astronomix.analysis_helpers
    astronomix.option_classes
    astronomix.data_classes
+   astronomix.time_stepping
+   astronomix.setup_helpers
+   astronomix.plotting_helpers
    astronomix.shock_finder
-   astronomix.units
-   astronomix.initial_condition_generation

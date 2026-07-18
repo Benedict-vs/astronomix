@@ -1,9 +1,19 @@
+"""
+High-order interpolation between cell centres and cell faces.
+
+Provides the 4th-order centre-to-face and 6th-order face-to-centre
+interpolations, plus the point-value to cell-average correction used to retain
+high-order accuracy in dimensionally split settings.
+"""
+
+# general
+from functools import partial
+
+# jax
 import jax
 import jax.numpy as jnp
 
-
-from functools import partial
-
+# astronomix functions
 from astronomix._stencil_operations._stencil_operations import _shift
 
 
