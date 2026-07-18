@@ -69,5 +69,37 @@ IC_FILE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
 # RUN_TAG keeps leg 1's frames/checkpoints from being wiped by the startup
 # cleanup. For a fresh full run, drop the two CGOLS_RESTART_FROM /
 # CGOLS_RUN_TAG variables again.
-CGOLS_RESTART_FROM="data/cgols_checkpoints" CGOLS_RUN_TAG="_leg2" \
-    CGOLS_SHARD_SPLIT="$PROD_SPLIT" python cgols.py
+#
+# Watchdog wrapper: job 4901231 deadlocked ~1 min in at the NCCL clique
+# rendezvous - a startup timing race (leg 1 passed the same spot after a 37 s
+# wobble). XLA only warns ("may be stuck"), it never aborts, so a hung job
+# silently burns its whole walltime. The hang strikes before any frame or
+# checkpoint exists, so killing and relaunching inside the same allocation is
+# safe and costs ~20 min instead of another multi-day queue wait. Healthy runs
+# pass untouched: warnings that resolve print a matching "unstuck" line.
+ERR_FILE="cgols_${SLURM_JOB_ID}.err"
+for attempt in 1 2 3 4; do
+    stuck0=$(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true)
+    unstuck0=$(grep -c 'unstuck' "$ERR_FILE" 2>/dev/null || true)
+    CGOLS_RESTART_FROM="data/cgols_checkpoints" CGOLS_RUN_TAG="_leg2" \
+        CGOLS_SHARD_SPLIT="$PROD_SPLIT" python cgols.py &
+    SOLVER_PID=$!
+    sleep 900   # the racy rendezvous fires ~1 min in; 15 min is ample slack
+    if kill -0 "$SOLVER_PID" 2>/dev/null; then
+        sleep 180   # grace so an in-flight stuck warning can still resolve
+        stuck=$(( $(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true) - stuck0 ))
+        unstuck=$(( $(grep -c 'unstuck' "$ERR_FILE" 2>/dev/null || true) - unstuck0 ))
+        if [ "$stuck" -gt "$unstuck" ]; then
+            echo "WATCHDOG: attempt $attempt hung at NCCL init, relaunching"
+            kill "$SOLVER_PID" 2>/dev/null; sleep 30
+            kill -9 "$SOLVER_PID" 2>/dev/null || true
+            wait "$SOLVER_PID" 2>/dev/null || true
+            sleep 30   # let the driver reclaim the ~134 GB on each GPU
+            continue
+        fi
+    fi
+    wait "$SOLVER_PID"
+    exit $?
+done
+echo "WATCHDOG: giving up after 4 hung attempts" >&2
+exit 1
