@@ -86,6 +86,7 @@ import jax.numpy as jnp
 from astropy import units as u
 
 from astronomix import time_integration
+from astronomix.option_classes.simulation_config import ON_DEVICE
 
 # Importing cgols runs autocvd + the cheap module-level constants/functions, but
 # not the simulation (guarded behind __main__).
@@ -143,6 +144,10 @@ def build_pipeline():
         monitor_diagnostics=False,
         activate_snapshot_callback=False,
         memory_analysis=False,
+        # cgols.build_config() now defaults to the Orbax TO_DISK checkpoint
+        # driver (host-side segmented loop) - not traceable under jvp, so force
+        # the in-memory path here.
+        snapshot_storage_mode=ON_DEVICE,
     )
 
     # Override only the end time; keep the loaded potential, floors and the paper

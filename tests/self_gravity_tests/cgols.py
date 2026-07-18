@@ -97,6 +97,7 @@ import os
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 
 import glob
+import shutil
 
 import jax
 import jax.numpy as jnp
@@ -124,6 +125,7 @@ from astronomix import (
     construct_primitive_state,
     get_helper_data,
     get_registered_variables,
+    restart_from_latest_checkpoint,
     time_integration,
 )
 from astronomix.option_classes.simulation_config import (
@@ -133,6 +135,7 @@ from astronomix.option_classes.simulation_config import (
     PALLAS,
     RK4_LSRK,
     SIMPLE_SOURCE,
+    TO_DISK,
     VARAXIS,
     XAXIS,
     YAXIS,
@@ -295,18 +298,25 @@ _BOUNDARY_TYPE = OPEN_BOUNDARY_DIODE if BOUNDARY == "diode" else OPEN_BOUNDARY
 # other or the production outputs. Empty = the production filenames.
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "")
 
-# Full-state checkpointing: every Nth snapshot frame the full interior
-# primitive state (~5.4 GB at 512, uncompressed) is written to
-# data/cgols_checkpoints<RUN_TAG>/checkpoint_NNNN.npz (bulk-data dir on
-# scratch), keeping only the newest CGOLS_CHECKPOINT_KEEP - a bounded, rolling
-# safety net that always brackets a potential crash. 0 = off. A run can be
-# RESUMED/REPLAYED from a checkpoint with CGOLS_RESTART_FROM=<checkpoint file>
-# (sets params.t_start to the stored time; the wind schedule uses absolute
-# time, so nothing else shifts) instead of re-paying the ramp-up from t=0 -
-# use a fresh CGOLS_RUN_TAG per replay.
+# Full-state checkpointing, via astronomix's Orbax TO_DISK mode: the run is
+# split into num_snapshots segments and after each one the full loop carry is
+# written (each device streams its own shard - no host gather) to
+# data/cgols_checkpoints<RUN_TAG>/<step>/ (bulk-data dir on scratch), keeping
+# only the newest CGOLS_CHECKPOINT_KEEP step dirs - a bounded, rolling safety
+# net that always brackets a potential crash. The frame callback keeps running
+# alongside (the driver invokes it at every segment end). CGOLS_CHECKPOINT_EVERY
+# is now only the on/off gate (0 = off, plain in-memory run); the write cadence
+# is one checkpoint per snapshot frame, dictated by the TO_DISK driver.
+# A run is RESUMED with CGOLS_RESTART_FROM=latest (this run-tag's checkpoint
+# dir) or =<path to a checkpoint dir>, optionally CGOLS_RESTART_STEP=<n> for a
+# specific step (default: newest). params.t_start continues from the stored
+# time; the wind schedule uses absolute time, so nothing else shifts. Resuming
+# into the same tag continues the checkpoint numbering; a resumed run is
+# bit-identical to one left uninterrupted.
 CHECKPOINT_EVERY = int(os.environ.get("CGOLS_CHECKPOINT_EVERY", "3"))
 CHECKPOINT_KEEP = int(os.environ.get("CGOLS_CHECKPOINT_KEEP", "4"))
 RESTART_FROM = os.environ.get("CGOLS_RESTART_FROM", "")
+RESTART_STEP = os.environ.get("CGOLS_RESTART_STEP", "")
 
 # Runtime numerics knobs (defaults are the production values).
 # CGOLS_CFL: 0.9 is production-proven; the paper's Cholla setup ran 0.3, which
@@ -615,6 +625,18 @@ def build_config():
         # one frame every t_end / num_snapshots.
         activate_snapshot_callback=(not BENCH_STEPS),
         num_snapshots=NUM_SNAPSHOTS,
+        # Full-state checkpointing (see the CGOLS_CHECKPOINT_* knobs): Orbax
+        # TO_DISK mode writes the loop carry after every snapshot segment,
+        # sharded per device. The frame callback above keeps working - the
+        # driver invokes it at each segment end. Off in benchmark mode.
+        **(
+            dict(
+                snapshot_storage_mode=TO_DISK,
+                snapshot_storage_path=_data(f"cgols_checkpoints{RUN_TAG}"),
+            )
+            if CHECKPOINT_EVERY and not BENCH_STEPS
+            else {}
+        ),
     )
     registered_variables = get_registered_variables(config)
     return config, registered_variables
@@ -1029,19 +1051,27 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     dy = config.box_size.y / dim_y
     code_mdot_to_msun_per_yr = (code_mass / code_units.code_time).to(u.M_sun / u.yr).value
 
-    # Full-state checkpoints are multi-GB, so they go to the bulk-data dir
-    # (scratch), separate from the small frame files.
+    # Orbax full-state checkpoints are multi-GB, so they go to the bulk-data
+    # dir (scratch), separate from the small frame files.
     ckpt_dir = _data(f"cgols_checkpoints{RUN_TAG}")
 
-    # Fresh output directories: drop any frames (and checkpoints) from a
-    # previous run so they cannot be mixed into this run's animation / forensics.
+    # Fresh output directories: drop any frames from a previous run so they
+    # cannot be mixed into this run's animation / forensics. On a cold start
+    # also clear old checkpoint step dirs (and legacy npz checkpoints):
+    # leftover steps would make the TO_DISK driver continue their numbering and
+    # skip the t=0 frame. On a resume (CGOLS_RESTART_FROM) the history must
+    # stay - the numbering continues from it.
     os.makedirs(out_dir, exist_ok=True)
-    stale = glob.glob(os.path.join(out_dir, "frame_*.npz"))
+    for f in glob.glob(os.path.join(out_dir, "frame_*.npz")):
+        os.remove(f)
     if CHECKPOINT_EVERY:
         os.makedirs(ckpt_dir, exist_ok=True)
-        stale += glob.glob(os.path.join(ckpt_dir, "checkpoint_*.npz"))
-    for f in stale:
-        os.remove(f)
+        if not RESTART_FROM:
+            for entry in glob.glob(os.path.join(ckpt_dir, "*")):
+                if os.path.isdir(entry):
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    os.remove(entry)
 
     # Host-side frame counter for the filename. The callback may fire unordered, so
     # filenames are not assumed to be time-ordered; each file stores its own time
@@ -1062,26 +1092,15 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
             mdot_z=np.asarray(mdot_z, dtype=np.float32),
         )
 
-    # Full-state checkpoints (CGOLS_CHECKPOINT_EVERY > 0). The interior state is
-    # sliced on-device and crosses to the host on EVERY frame (~0.5 s at 512,
-    # trivial next to the minutes between frames); the host counter then decides
-    # whether to write, since the traced callable itself cannot carry state.
-    ckpt_counter = {"i": 0}
-
-    def _save_checkpoint(time, interior_state):
-        i = ckpt_counter["i"]
-        ckpt_counter["i"] += 1
-        if i % CHECKPOINT_EVERY != 0:
-            return
-        np.savez(
-            os.path.join(ckpt_dir, f"checkpoint_{i:04d}.npz"),
-            time_code=np.float64(float(time)),
-            state=np.asarray(interior_state, dtype=np.float32),
-        )
-        # Rolling window: keep only the newest CHECKPOINT_KEEP checkpoints.
-        ckpts = sorted(glob.glob(os.path.join(ckpt_dir, "checkpoint_*.npz")))
-        for old in ckpts[:-CHECKPOINT_KEEP]:
-            os.remove(old)
+    # Rolling retention for the Orbax checkpoints (CGOLS_CHECKPOINT_EVERY > 0):
+    # the TO_DISK driver writes one step dir per frame and never deletes; keep
+    # only the newest CHECKPOINT_KEEP steps. Runs as a host callback after each
+    # frame - the driver saves the checkpoint synchronously BEFORE invoking the
+    # callable, so the newest step is always complete when we prune.
+    def _prune_checkpoints():
+        steps = sorted(int(d) for d in os.listdir(ckpt_dir) if d.isdigit())
+        for step in steps[:-CHECKPOINT_KEEP]:
+            shutil.rmtree(os.path.join(ckpt_dir, str(step)), ignore_errors=True)
 
     def snapshot_callable(time, state, registered_variables):
         rho = state[registered_variables.density_index]
@@ -1089,7 +1108,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
         vz = state[registered_variables.velocity_index.z]
 
         if CHECKPOINT_EVERY:
-            jax.debug.callback(_save_checkpoint, time, state[:, g:hi, g:hi, g:hi])
+            jax.debug.callback(_prune_checkpoints)
 
         # Edge-on (x-z, y=0) and face-on (x-y, z=0) physical slices.
         rho_xz = rho[g:hi, my, g:hi]   # (dim_x, dim_z)
@@ -1758,32 +1777,14 @@ if __name__ == "__main__":
 
         initial_state, config, params, registered_variables = load_initial_conditions()
 
-        # Resume from a full-state checkpoint (crash forensics): replace the t=0
-        # initial state with the checkpointed one and start the clock at its time.
-        # The wind schedule and the snapshot grid both use absolute time, so the
-        # replayed window continues exactly where the checkpointing run was -
-        # only the external potential and params are still taken from the IC files.
-        if RESTART_FROM:
-            _ckpt_path = RESTART_FROM if os.path.isabs(RESTART_FROM) else _here(RESTART_FROM)
-            _ckpt = np.load(_ckpt_path)
-            _t0 = float(_ckpt["time_code"])
-            _restart_state = jnp.asarray(_ckpt["state"])
-            if _restart_state.shape != initial_state.shape:
-                raise ValueError(
-                    f"checkpoint state {_restart_state.shape} does not match the "
-                    f"configured grid {initial_state.shape} - check CGOLS_DIM / CGOLS_IC_TAG"
-                )
-            initial_state = _restart_state
-            params = params._replace(t_start=_t0)
-            _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
-            print(f"Restarting from {_ckpt_path} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
-
         # ---- Multi-GPU domain decomposition ----
         # When SHARD_SPLIT asks for more than one GPU, distribute the state over a
         # (var, x, y, z) device mesh and hand the sharding to time_integration, which
         # shards its helper data the same way and runs the inter-device halo exchange
         # itself. Only the initial state has to be device_put onto the sharding here.
         # SHARD_SPLIT == (1, 1, 1, 1) keeps the original single-GPU path (sharding=None).
+        # Built BEFORE the restart below so a checkpoint restores each device's
+        # shard directly onto the mesh (no single-device staging).
         if NUM_GPUS > 1:
             # axis_types=Auto is required: jax.make_mesh defaults to Explicit sharding
             # mode on jax >= 0.10, under which the ghost-cell padding inside the solver
@@ -1796,6 +1797,43 @@ if __name__ == "__main__":
                 axis_types=(AxisType.Auto,) * 4,
             )
             sharding = jax.NamedSharding(mesh, P(VARAXIS, XAXIS, YAXIS, ZAXIS))
+        else:
+            sharding = None
+
+        # Resume from an Orbax checkpoint (CGOLS_RESTART_FROM=latest for this
+        # run-tag's checkpoint dir, or an explicit dir; CGOLS_RESTART_STEP picks
+        # a step, default newest): replace the t=0 initial state with the
+        # restored carry and start the clock at its time. The wind schedule and
+        # the snapshot grid both use absolute time, so the resumed window
+        # continues exactly where the checkpointing run left off - only the
+        # external potential and the other params are still taken from the IC
+        # files.
+        restart_state = None
+        if RESTART_FROM:
+            _ckpt_dir = (
+                _data(f"cgols_checkpoints{RUN_TAG}")
+                if RESTART_FROM == "latest"
+                else (RESTART_FROM if os.path.isabs(RESTART_FROM) else _here(RESTART_FROM))
+            )
+            _restored, params, restart_state = restart_from_latest_checkpoint(
+                _ckpt_dir,
+                params,
+                step=(int(RESTART_STEP) if RESTART_STEP else None),
+                sharding=sharding,
+            )
+            if _restored.shape != initial_state.shape:
+                raise ValueError(
+                    f"checkpoint state {_restored.shape} does not match the "
+                    f"configured grid {initial_state.shape} - check CGOLS_DIM / CGOLS_IC_TAG"
+                )
+            initial_state = _restored
+            _t0 = float(params.t_start)
+            _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
+            print(f"Restarting from {_ckpt_dir} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
+
+        if NUM_GPUS > 1:
+            # No-op data-movement-wise when the state was already restored onto
+            # the sharding above.
             initial_state = jax.device_put(initial_state, sharding)
             # Report the layout without indexing into the array: integer-indexing a
             # sharded axis (e.g. state[0, :, :, 0] when z is split) is a gather that
@@ -1804,8 +1842,6 @@ if __name__ == "__main__":
             print(f"Sharding {initial_state.shape} state over {NUM_GPUS} GPUs, split {SHARD_SPLIT}")
             print(f"  sharding:    {initial_state.sharding}")
             print(f"  shard shape: {initial_state.addressable_shards[0].data.shape}")
-        else:
-            sharding = None
 
         # Stream intermediate snapshots (2D slices + 1D vertical-flux profile) to disk
         # during the run, for the animation and the wind time-series. Each frame is
@@ -1827,7 +1863,7 @@ if __name__ == "__main__":
         _t0 = time.perf_counter()
         final_state = time_integration(
             initial_state, config, params, registered_variables, snapshot_callable,
-            sharding=sharding,
+            sharding=sharding, restart_state=restart_state,
         )
         jax.block_until_ready(final_state)
         _elapsed = time.perf_counter() - _t0

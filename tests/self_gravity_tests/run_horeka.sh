@@ -64,8 +64,10 @@ IC_FILE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
 [ -f "$IC_FILE" ] || CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py
 
 # Leg 2: job 4830581 banked 0-63% in 24h (TIMEOUT); continue from the last
-# rolling checkpoint (~60%). The fresh RUN_TAG keeps leg 1's frames/checkpoints
-# from being wiped by the startup cleanup. For a fresh full run, drop the two
-# CGOLS_RESTART_FROM / CGOLS_RUN_TAG variables again.
-CGOLS_RESTART_FROM="data/cgols_checkpoints/checkpoint_0036.npz" CGOLS_RUN_TAG="_leg2" \
+# rolling checkpoint (~60%). CGOLS_RESTART_FROM now names the Orbax checkpoint
+# *directory* (newest step by default; CGOLS_RESTART_STEP picks one). The fresh
+# RUN_TAG keeps leg 1's frames/checkpoints from being wiped by the startup
+# cleanup. For a fresh full run, drop the two CGOLS_RESTART_FROM /
+# CGOLS_RUN_TAG variables again.
+CGOLS_RESTART_FROM="data/cgols_checkpoints" CGOLS_RUN_TAG="_leg2" \
     CGOLS_SHARD_SPLIT="$PROD_SPLIT" python cgols.py
