@@ -1767,7 +1767,13 @@ if __name__ == "__main__":
             _ckpt_path = RESTART_FROM if os.path.isabs(RESTART_FROM) else _here(RESTART_FROM)
             _ckpt = np.load(_ckpt_path)
             _t0 = float(_ckpt["time_code"])
-            _restart_state = jnp.asarray(_ckpt["state"])
+            # Keep the checkpoint state on the host: jnp.asarray would materialize
+            # the full array (~40 GiB at 1024) on GPU 0, and the lingering reference
+            # pins it there for the whole run - rank 0 then OOMs before the first
+            # step and ranks 1-3 wait forever in the NCCL clique rendezvous
+            # (HoreKa jobs 4901231, 4905854). As host numpy, the sharded device_put
+            # below transfers only each device's shard.
+            _restart_state = _ckpt["state"]
             if _restart_state.shape != initial_state.shape:
                 raise ValueError(
                     f"checkpoint state {_restart_state.shape} does not match the "
@@ -1777,6 +1783,7 @@ if __name__ == "__main__":
             params = params._replace(t_start=_t0)
             _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
             print(f"Restarting from {_ckpt_path} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
+            del _restart_state, _ckpt
 
         # ---- Multi-GPU domain decomposition ----
         # When SHARD_SPLIT asks for more than one GPU, distribute the state over a
