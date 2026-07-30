@@ -2,8 +2,6 @@
 #SBATCH --job-name=cgols_1024
 #SBATCH --account=hk-project-pai00101
 #SBATCH --partition=accelerated-h200,accelerated-h200-8
-# The measured full run is ~61.5 h (see the cost table below), so it does NOT
-# fit one job even at HoreKa's 2-day cap
 #SBATCH --time=48:00:00
 
 #SBATCH --nodes=1
@@ -13,127 +11,83 @@
 #SBATCH --output=cgols_%j.out
 #SBATCH --error=cgols_%j.err
 
-# Production 1024^3 (512x512x1024 -> 1024x1024x2048 cells) CGOLS run on HoreKa:
-# 4x H200 on one node, 75 Myr, split (1, 2, 2, 1). Defaults here ARE the
-# production configuration - a bare `sbatch run_horeka_1024.sh` starts a fresh
-# run from t = 0; every other CGOLS_* knob defaults to the production values.
+# Production 1024^3 CGOLS run on HoreKa: 4x H200 on one node, 75 Myr,
+# split (1, 2, 2, 1). A bare sbatch starts a fresh run from t = 0; every
+# CGOLS_* knob not set here defaults to the production value.
 #
-# Usage info:
-# - run with: sbatch run_horeka_1024.sh   (from pytests/self_gravity/cgols/)
-# - check status with: squeue -u $USER
-# - estimate start time: squeue --start -j <job_id>
-# - read output: tail -f cgols_<job_id>.out
-# - cancel job: scancel <job_id>
+#   sbatch run_ic_horeka.sh       # build the ICs first (dev queue)
+#   sbatch run_horeka_1024.sh
 #
-# ---------------------------------------------------------------------------
-# MEASURED COST (completed run, 2026-07-15 -> 2026-07-29)
-# ---------------------------------------------------------------------------
-# 75 Myr does not fit one job: the run took 3 legs, each resumed from the last
-# rolling Orbax checkpoint (a resumed run is bit-identical to an uninterrupted
-# one, so the legs are only a scheduling artifact). Those legs were submitted
-# at --time=24:00:00; this script now asks for 48 h (see the header directive),
-# which should collapse the same work into 2 legs.
+# The run needs ~61.5 h, so it does not fit one job. Continue after a TIMEOUT
+# from the previous leg's Orbax checkpoint directory, with a fresh tag (the
+# startup cleanup wipes checkpoints/frames carrying the same tag):
 #
-#   leg  job      sim time         progress   wall clock   state
-#   1    4830581   0.0 -> 47.3 Myr   0 -> 63%   24:00:29    TIMEOUT
-#   2    4910533  45.0 -> 63.0 Myr  60 -> 84%   24:00:27    TIMEOUT
-#   3    4916508  63.0 -> 75.0 Myr  84 -> 100%  13:26:12    COMPLETED
-#                                              ---------
-#                                    TOTAL      61:27:08   (~61.5 h)
-#
-# => ~246 GPU-hours on H200, ~146 kWh (sum of the three jobs' reported energy).
-# Leg 3's solver-only time was 48245 s (13.40 h), i.e. setup/compile/IO is a
-# couple of minutes on top of the integration.
-#
-# Note the throughput is NOT linear in wall time - it degrades as the wind
-# develops and max|v| climbs (~12 -> ~25-50 code units), tightening the CFL
-# step: leg 1 banked ~2.6 %/h, leg 2 ~0.9 %/h, leg 3 ~1.2 %/h. Budget legs from
-# that decay, not by extrapolating leg 1 - at 48 h expect ~84% from a cold
-# start (not 100%), leaving a ~16 h finishing leg.
-#
-# Leg 2 re-did ~2.3 Myr (63% -> restart at 60%) because the newest checkpoint
-# lagged the last diag line; that is the expected CGOLS_CHECKPOINT_EVERY=3 loss.
-# Not counted above: two earlier aborted attempts (4675223 BFC-allocator OOM,
-# 4901231 restart-path rank-0 OOM misread as an NCCL hang) - both fixed, see
-# the allocator settings below and the watchdog at the bottom.
-#
-# To CONTINUE after a TIMEOUT, point the run at the previous leg's checkpoint
-# directory and give it a fresh tag (so the startup cleanup cannot wipe the
-# predecessor's frames/checkpoints):
-#
-#   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
+#   sbatch --time=16:00:00 \
+#          --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
 #          run_horeka_1024.sh
 #
-# (and _leg3 off data/cgols_checkpoints_leg2 if a third leg is still needed).
-# A finishing leg only needs ~16 h, so pair it with `--time=16:00:00` for much
-# better backfill priority than the 48 h default.
+# MEASURED COST of the completed run (jobs 4830581 / 4910533 / 4916508, at
+# --time=24:00:00, hence three legs; 48 h should need only two):
 #
-# CGOLS_RESTART_FROM names the Orbax checkpoint *directory* (newest step by
-# default; CGOLS_RESTART_STEP picks a specific one).
+#   leg  sim time          progress    wall clock   state
+#   1     0.0 -> 47.3 Myr   0 -> 63%    24:00:29     TIMEOUT
+#   2    45.0 -> 63.0 Myr  60 -> 84%    24:00:27     TIMEOUT
+#   3    63.0 -> 75.0 Myr  84 -> 100%   13:26:12     COMPLETED
+#                                       --------
+#                          TOTAL        61:27:08     ~246 GPU-h, ~146 kWh
+#
+# Throughput decays as the wind develops and max|v| climbs (~12 -> ~25-50),
+# tightening the CFL step: 2.6 %/h, then 0.9, then 1.2. Budget legs from that
+# decay, not from leg 1 - 48 h banks ~84% from a cold start, not 100%.
 
-# run configuration; every other CGOLS_* knob defaults to the production values
 export CGOLS_DIM=1024
 PROD_SPLIT="(1, 2, 2, 1)"   # (var,x,y,z) shard split, product = #GPUs
 
-# Fresh run by default. Both are honoured from the environment, so a
-# continuation leg only needs `sbatch --export=ALL,CGOLS_RESTART_FROM=...,
-# CGOLS_RUN_TAG=...` (see the header) - no edit to this file.
+# Empty unless overridden, so the default is a fresh run and a continuation
+# leg needs no edit to this file.
 export CGOLS_RESTART_FROM="${CGOLS_RESTART_FROM:-}"
 export CGOLS_RUN_TAG="${CGOLS_RUN_TAG:-}"
 
-# Load system CUDA
 module purge
 module load devel/cuda/12.9
 
-# activate env
 source ~/.bashrc
 micromamba activate astro
 
-# linker fixes: every pip-installed nvidia lib (incl. nccl, needed for
-# multi-GPU), independent of the env's python version
+# every pip-installed nvidia lib (incl. nccl), independent of python version
 PYSITE=$(python -c 'import site; print(site.getsitepackages()[0])')
 for d in "$PYSITE"/nvidia/*/lib; do export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"; done
 
-# jax-specific. cuda_async instead of the default BFC allocator: at 1024 the
-# compiled step needs a ~112 GB CONTIGUOUS temp arena, which BFC could not
-# place next to the resident arguments (job 4675223 OOM'd with the memory
-# nominally free); cuda_async has no contiguity requirement. 0.98 because the
-# program totals ~134 GB of the H200's ~151 GB.
+# cuda_async instead of the default BFC allocator: the compiled step needs a
+# ~112 GB CONTIGUOUS temp arena that BFC could not place next to the resident
+# arguments (job 4675223 OOM'd with the memory nominally free). 0.98 because
+# the program totals ~134 GB of the H200's ~151 GB.
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.98
 
-# bulk data (ICs/final/checkpoints, ~300 GB at 1024) must live on a workspace:
+# bulk data (~300 GB at 1024) must live on a workspace:
 #   ws_allocate cgols 60 && ln -s "$(ws_find cgols)" data
 cd "$SLURM_SUBMIT_DIR"
 [ -L data ] && [ -d data ] || { echo "ERROR: link ./data to a workspace first" >&2; exit 1; }
 
-# debugging
 echo "Running on node: $SLURM_JOB_NODELIST"
 echo "GPUs: $CUDA_VISIBLE_DEVICES"
 nvidia-smi -L
 
-# logging
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used \
     --format=csv -l 30 > "gpu_usage_${SLURM_JOB_ID}.csv" &
 trap 'kill %1 2>/dev/null || true' EXIT
 
-# ICs: PRE-BUILD THEM WITH run_ic1024.sh ON THE DEV QUEUE. The build is a
-# single-device eager step that transiently holds ~90 GB at 1024, so it must
-# not run on the GPU here - and doing it inside this job wastes production
-# allocation with 3 of the 4 GPUs idle, after a multi-day queue wait.
-#
-# The fallback below therefore mirrors run_ic1024.sh exactly (JAX_PLATFORMS=cpu
-# -> host RAM, 750 GB/node) rather than the eager GPU path: if the ICs are
-# missing we would rather spend some of the allocation than lose it to an OOM.
-# Both files are checked - a build interrupted between the two writes used to
-# pass a state-only guard and then fail minutes into the solver.
+# Fallback only - pre-build with run_ic_horeka.sh. Uses the CPU path, never the
+# eager GPU one (~90 GB transient), so a missing IC costs allocation time
+# rather than the whole job. Both files are checked: a build interrupted
+# between the two writes passes a state-only guard, then fails in the solver.
 IC_STATE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
 IC_POT="data/initial/cgols_initial_potential_d${CGOLS_DIM}.npy"
 if [ ! -f "$IC_STATE" ] || [ ! -f "$IC_POT" ]; then
-    echo "WARNING: ICs for d${CGOLS_DIM} missing - building them inside the" >&2
-    echo "         production allocation (CPU path). Pre-build with" >&2
-    echo "         'sbatch run_ic1024.sh' on the dev queue to avoid this." >&2
+    echo "WARNING: d${CGOLS_DIM} ICs missing, building them here - pre-build" >&2
+    echo "         with 'sbatch run_ic_horeka.sh' to avoid this." >&2
     JAX_PLATFORMS=cpu CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py \
         || { echo "ERROR: IC build failed, aborting before the solver" >&2; exit 1; }
 fi
@@ -141,16 +95,17 @@ fi
 if [ -n "$CGOLS_RESTART_FROM" ]; then
     echo "Continuation leg: restarting from '$CGOLS_RESTART_FROM' (tag '$CGOLS_RUN_TAG')"
 else
-    echo "Fresh run from t = 0 (48 h banks ~84%; expect a TIMEOUT, then a ~16 h leg-2 sbatch)"
+    echo "Fresh run from t = 0 (48 h banks ~84%; expect a TIMEOUT, then a ~16 h leg)"
 fi
 
-# Watchdog wrapper: job 4901231 deadlocked ~1 min in at the NCCL clique
-# rendezvous - a startup timing race (leg 1 passed the same spot after a 37 s
-# wobble). XLA only warns ("may be stuck"), it never aborts, so a hung job
-# silently burns its whole walltime. The hang strikes before any frame or
-# checkpoint exists, so killing and relaunching inside the same allocation is
-# safe and costs ~20 min instead of another multi-day queue wait. Healthy runs
-# pass untouched: warnings that resolve print a matching "unstuck" line.
+# Watchdog: job 4901231 deadlocked ~1 min in at the NCCL clique rendezvous.
+# XLA only warns ("may be stuck"), it never aborts, so a hung job silently
+# burns its whole walltime. The hang strikes before any frame or checkpoint
+# exists, so relaunching inside the same allocation is safe and costs ~20 min
+# instead of another multi-day queue wait. Healthy runs pass untouched:
+# warnings that resolve print a matching "unstuck" line.
+# NB "giving up after 4" has more than one cause - check .err for
+# RESOURCE_EXHAUSTED before blaming NCCL (job 4905854 was a rank-0 OOM).
 ERR_FILE="cgols_${SLURM_JOB_ID}.err"
 for attempt in 1 2 3 4; do
     stuck0=$(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true)

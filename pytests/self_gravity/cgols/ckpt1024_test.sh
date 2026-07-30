@@ -1,7 +1,7 @@
 #!/bin/bash
 # Validate the Orbax TO_DISK checkpointing at production scale: 1024x1024x2048
 # on 4 GPUs, production memory config (cuda_async allocator, 0.98 fraction, as
-# in run_horeka.sh). Leg 1 runs a short fresh window (4 checkpoints, keep 2);
+# in run_horeka_1024.sh). Leg 1 runs a short fresh window (4 checkpoints, keep 2);
 # leg 2 resumes from checkpoint step 3 over the identical remaining segment;
 # the resumed final state must be bit-identical to leg 1's. Peak GPU memory is
 # tracked in cgols_logs/ckpt1024_peakmem.log. Cleans up its ~200 GB of test
