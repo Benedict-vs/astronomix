@@ -3,13 +3,7 @@
 #SBATCH --account=hk-project-pai00101
 #SBATCH --partition=accelerated-h200,accelerated-h200-8
 # The measured full run is ~61.5 h (see the cost table below), so it does NOT
-# fit one job even at HoreKa's 2-day cap - but 24 h was leaving it at 63% and
-# forcing a THIRD leg. Ask for the 48 h maximum: one leg then reaches ~84% and
-# a single ~16 h continuation finishes it (2 legs instead of 3, one less
-# restart and one less queue wait). Billing is elapsed use, not requested
-# walltime, so the longer request costs nothing except backfill priority - if
-# the queue is bad, `scontrol update jobid=<id> TimeLimit=24:00:00` may SHRINK
-# a pending job (keeps its queue position) but never grow it.
+# fit one job even at HoreKa's 2-day cap
 #SBATCH --time=48:00:00
 
 #SBATCH --nodes=1
@@ -124,9 +118,25 @@ nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used \
     --format=csv -l 30 > "gpu_usage_${SLURM_JOB_ID}.csv" &
 trap 'kill %1 2>/dev/null || true' EXIT
 
-# build the ICs once, then run production
-IC_FILE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
-[ -f "$IC_FILE" ] || CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py
+# ICs: PRE-BUILD THEM WITH run_ic1024.sh ON THE DEV QUEUE. The build is a
+# single-device eager step that transiently holds ~90 GB at 1024, so it must
+# not run on the GPU here - and doing it inside this job wastes production
+# allocation with 3 of the 4 GPUs idle, after a multi-day queue wait.
+#
+# The fallback below therefore mirrors run_ic1024.sh exactly (JAX_PLATFORMS=cpu
+# -> host RAM, 750 GB/node) rather than the eager GPU path: if the ICs are
+# missing we would rather spend some of the allocation than lose it to an OOM.
+# Both files are checked - a build interrupted between the two writes used to
+# pass a state-only guard and then fail minutes into the solver.
+IC_STATE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
+IC_POT="data/initial/cgols_initial_potential_d${CGOLS_DIM}.npy"
+if [ ! -f "$IC_STATE" ] || [ ! -f "$IC_POT" ]; then
+    echo "WARNING: ICs for d${CGOLS_DIM} missing - building them inside the" >&2
+    echo "         production allocation (CPU path). Pre-build with" >&2
+    echo "         'sbatch run_ic1024.sh' on the dev queue to avoid this." >&2
+    JAX_PLATFORMS=cpu CGOLS_CREATE_IC=1 CGOLS_SHARD_SPLIT="(1, 1, 1, 1)" python cgols.py \
+        || { echo "ERROR: IC build failed, aborting before the solver" >&2; exit 1; }
+fi
 
 if [ -n "$CGOLS_RESTART_FROM" ]; then
     echo "Continuation leg: restarting from '$CGOLS_RESTART_FROM' (tag '$CGOLS_RUN_TAG')"
