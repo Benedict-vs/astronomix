@@ -18,7 +18,7 @@
 # sharding path. Exercises everything the real run needs (modules, env,
 # linker paths, autocvd under slurm, Pallas compile on Hopper, multi-GPU
 # NCCL, workspace I/O) without the multi-hour commit.
-# - run with: sbatch run_dev.sh   (from tests/self_gravity_tests/)
+# - run with: sbatch run_dev.sh   (from pytests/self_gravity/cgols/)
 # - success: per-device memory analysis + elapsed-time printout, exit 0
 #   (bench steps are fixed-dt, physically meaningless; no state is saved)
 

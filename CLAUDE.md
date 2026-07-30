@@ -19,9 +19,11 @@ python pytests/hydrodynamics/shock_tube1D.py
 python pytests/mhd/alfven_wave3D.py --convergence --scaling   # many take CLI flags (--sp, --dp, --scaling, ...)
 ```
 
-`tests/` holds a larger set of exploratory/research scripts organized by physics (self_gravity, turbulence,
-stellar_wind, multi_gpu, pallas, ...); `pytests/` holds the curated convergence/scaling checks with committed
-reference data under `pytests/*/data/`.
+Everything test-related lives under `pytests/`, organized by physics (`hydrodynamics/`, `mhd/`, `self_gravity/`,
+`viscosity/`, `differentiability/`), with committed reference data under `pytests/*/data/` and figures under
+`pytests/*/figures/`. The top-level `tests/` directory is gone — upstream retired it, and this fork's cgols
+research scripts now live in `pytests/self_gravity/cgols/` (see its `run_*.sh` for the HoreKa/dev batch jobs;
+its `data/` is a symlink to scratch and its `cgols_snapshots*` / `cgols_logs` outputs are gitignored).
 
 - Lint: `ruff check` (config in `.ruff.toml` / `pyproject.toml`; selects E,F,I,C,B,D,Q and ignores E402 because
   GPU selection via `autocvd` must run before imports).
@@ -66,7 +68,11 @@ stepping loop lives in `time_stepping/_time_loop.py` (`FIXED_STEP`, `ADAPTIVE_WH
 Each scheme directory mirrors the same substructure: `_state_evolution`, `_timestep_estimation`, `_magnetic_update`,
 and (FD) `_interface_fluxes` / (FV) `_riemann_solver`.
 
-### Two compute backends (`backend` in config)
+### Two compute backends (`config.backend_config.backend`)
+
+Backend choice and the Pallas/Triton kernel knobs live in the nested `BackendConfig` sub-struct
+(`SimulationConfig(backend_config=BackendConfig(backend=PALLAS, pallas_block_shape=(4, 4, 8), ...))`), alongside
+`PositivityConfig` / `GravityConfig`.
 
 - **`NATIVE_JAX`** — plain JAX/XLA.
 - **`PALLAS`** — fused Pallas kernels, dramatically lower memory and faster (see tables in

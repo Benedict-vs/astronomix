@@ -12,7 +12,7 @@
 #SBATCH --error=cgols_%j.err
 
 # Usage info:
-# - run with: sbatch run_horeka.sh   (from tests/self_gravity_tests/)
+# - run with: sbatch run_horeka.sh   (from pytests/self_gravity/cgols/)
 # - check status with: squeue -u $USER
 # - estimate start time: squeue --start -j <job_id>
 # - read output: tail -f cgols_<job_id>.out

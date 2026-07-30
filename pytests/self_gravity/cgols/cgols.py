@@ -140,6 +140,7 @@ from astronomix.option_classes.simulation_config import (
     XAXIS,
     YAXIS,
     ZAXIS,
+    BackendConfig,
     BoundarySettings,
     BoundarySettings1D,
     GravityConfig,
@@ -563,10 +564,12 @@ def build_config():
         # Staying on the memory-lean 2N-storage RK4_LSRK; stability at the sharp
         # wind/disk contacts is handled by the positivity backstops below.
         time_integrator=RK4_LSRK,
-        backend=PALLAS,
-        pallas_block_shape=(4, 4, 8),
-        pallas_use_triton=True,
-        pallas_interpret=False,
+        backend_config=BackendConfig(
+            backend=PALLAS,
+            pallas_block_shape=(4, 4, 8),
+            pallas_use_triton=True,
+            pallas_interpret=False,
+        ),
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
