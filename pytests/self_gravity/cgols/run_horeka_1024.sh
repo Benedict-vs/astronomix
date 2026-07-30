@@ -2,7 +2,15 @@
 #SBATCH --job-name=cgols_1024
 #SBATCH --account=hk-project-pai00101
 #SBATCH --partition=accelerated-h200,accelerated-h200-8
-#SBATCH --time=24:00:00
+# The measured full run is ~61.5 h (see the cost table below), so it does NOT
+# fit one job even at HoreKa's 2-day cap - but 24 h was leaving it at 63% and
+# forcing a THIRD leg. Ask for the 48 h maximum: one leg then reaches ~84% and
+# a single ~16 h continuation finishes it (2 legs instead of 3, one less
+# restart and one less queue wait). Billing is elapsed use, not requested
+# walltime, so the longer request costs nothing except backfill priority - if
+# the queue is bad, `scontrol update jobid=<id> TimeLimit=24:00:00` may SHRINK
+# a pending job (keeps its queue position) but never grow it.
+#SBATCH --time=48:00:00
 
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -26,10 +34,11 @@
 # ---------------------------------------------------------------------------
 # MEASURED COST (completed run, 2026-07-15 -> 2026-07-29)
 # ---------------------------------------------------------------------------
-# 75 Myr does NOT fit in HoreKa's 24 h walltime cap: the run took 3 legs, each
-# resumed from the last rolling Orbax checkpoint (a resumed run is
-# bit-identical to an uninterrupted one, so the legs are only a scheduling
-# artifact).
+# 75 Myr does not fit one job: the run took 3 legs, each resumed from the last
+# rolling Orbax checkpoint (a resumed run is bit-identical to an uninterrupted
+# one, so the legs are only a scheduling artifact). Those legs were submitted
+# at --time=24:00:00; this script now asks for 48 h (see the header directive),
+# which should collapse the same work into 2 legs.
 #
 #   leg  job      sim time         progress   wall clock   state
 #   1    4830581   0.0 -> 47.3 Myr   0 -> 63%   24:00:29    TIMEOUT
@@ -44,8 +53,9 @@
 #
 # Note the throughput is NOT linear in wall time - it degrades as the wind
 # develops and max|v| climbs (~12 -> ~25-50 code units), tightening the CFL
-# step: leg 1 banked ~2.6 %/h, leg 2 ~0.9 %/h, leg 3 ~1.2 %/h. Budget the
-# 24 h legs accordingly rather than extrapolating from leg 1.
+# step: leg 1 banked ~2.6 %/h, leg 2 ~0.9 %/h, leg 3 ~1.2 %/h. Budget legs from
+# that decay, not by extrapolating leg 1 - at 48 h expect ~84% from a cold
+# start (not 100%), leaving a ~16 h finishing leg.
 #
 # Leg 2 re-did ~2.3 Myr (63% -> restart at 60%) because the newest checkpoint
 # lagged the last diag line; that is the expected CGOLS_CHECKPOINT_EVERY=3 loss.
@@ -59,8 +69,10 @@
 #
 #   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
 #          run_horeka_1024.sh
-#   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints_leg2,CGOLS_RUN_TAG=_leg3 \
-#          run_horeka_1024.sh
+#
+# (and _leg3 off data/cgols_checkpoints_leg2 if a third leg is still needed).
+# A finishing leg only needs ~16 h, so pair it with `--time=16:00:00` for much
+# better backfill priority than the 48 h default.
 #
 # CGOLS_RESTART_FROM names the Orbax checkpoint *directory* (newest step by
 # default; CGOLS_RESTART_STEP picks a specific one).
@@ -119,7 +131,7 @@ IC_FILE="data/initial/cgols_initial_state_d${CGOLS_DIM}.npy"
 if [ -n "$CGOLS_RESTART_FROM" ]; then
     echo "Continuation leg: restarting from '$CGOLS_RESTART_FROM' (tag '$CGOLS_RUN_TAG')"
 else
-    echo "Fresh run from t = 0 (expect a TIMEOUT at ~63%; continue with a leg-2 sbatch)"
+    echo "Fresh run from t = 0 (48 h banks ~84%; expect a TIMEOUT, then a ~16 h leg-2 sbatch)"
 fi
 
 # Watchdog wrapper: job 4901231 deadlocked ~1 min in at the NCCL clique
