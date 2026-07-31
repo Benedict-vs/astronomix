@@ -58,7 +58,12 @@ from astronomix._finite_difference._timestep_estimation._timestep_estimator impo
     _cfl_time_step_fd,
     _cfl_time_step_fd_hydro
 )
-from astronomix._modules._iteration_level_updates import _iteration_level_updates
+from astronomix._modules._iteration_level_updates import (
+    _iteration_level_updates,
+    _post_step_updates,
+)
+from astronomix._modules._cooling._cooling import cooling_time_step_limit
+from astronomix._modules._cooling.cooling_options import COOLING_OPERATOR_SPLIT
 from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
 from astronomix._snapshotting._snapshot_diagnostics import (
     build_snapshot_store,
@@ -620,6 +625,22 @@ def _integrate_core(
                             primitive_state, config, params, registered_variables,
                         )
                     )
+
+                # Cooling-time constraint, applied after the estimator choice
+                # above so both the plain CFL and the source-term-aware
+                # estimator see it.
+                if (
+                    config.cooling_config.cooling
+                    and config.cooling_config.cooling_timestep_limit
+                ):
+                    dt = jnp.minimum(
+                        dt,
+                        jax.lax.stop_gradient(
+                            cooling_time_step_limit(
+                                primitive_state, config, params, registered_variables,
+                            )
+                        ),
+                    )
             elif config.solver_mode == FINITE_DIFFERENCE:
                 if config.mhd:
                     dt = jax.lax.stop_gradient(
@@ -636,6 +657,22 @@ def _integrate_core(
                             params.gamma, config, params, registered_variables,
                             params.C_cfl,
                         )
+                    )
+
+                # Cooling-time constraint. Applied here rather than inside the
+                # estimators so the native and the fast (Pallas) variants cannot
+                # end up with different dt.
+                if (
+                    config.cooling_config.cooling
+                    and config.cooling_config.cooling_timestep_limit
+                ):
+                    dt = jnp.minimum(
+                        dt,
+                        jax.lax.stop_gradient(
+                            cooling_time_step_limit(
+                                primitive_state, config, params, registered_variables,
+                            )
+                        ),
                     )
         else:
             dt = params.t_end / config.num_timesteps
@@ -668,6 +705,15 @@ def _integrate_core(
             primitive_state = _evolve_state_fd(
                 primitive_state, dt, params.gamma, config, params,
                 helper_data_pad, registered_variables, time,
+            )
+
+        # operator-split physics applied to the post-hydro state
+        if (
+            config.cooling_config.cooling
+            and config.cooling_config.cooling_placement == COOLING_OPERATOR_SPLIT
+        ):
+            primitive_state = _post_step_updates(
+                primitive_state, dt, config, params, registered_variables,
             )
 
         return dt, LoopState(primitive_state, key, forcing)

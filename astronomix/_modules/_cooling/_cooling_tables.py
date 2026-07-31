@@ -25,8 +25,51 @@ import astropy.constants as c
 from astropy.constants import m_p
 
 # astronomix containers
-from astronomix._modules._cooling.cooling_options import PiecewisePowerLawParams
+from astronomix._modules._cooling.cooling_options import (
+    CIEParabolicParams,
+    PiecewisePowerLawParams,
+)
 from astronomix.units.unit_helpers import CodeUnits
+
+
+def cie_parabolic_cooling(
+    code_units: CodeUnits,
+) -> CIEParabolicParams:
+    """Build the CGOLS piecewise-parabolic CIE cooling curve in code units.
+
+    The fit coefficients themselves (Eq. A4 of Schneider & Robertson 2018,
+    arXiv:1803.01008) are left at their published values — they are defined for
+    ``T`` in Kelvin and ``Lambda`` in erg s^-1 cm^3. Only the two additive log10
+    shifts are filled in here, so the unit conversion is applied *inside* the
+    ``10**(...)`` exponent and no 1e-22-scale intermediate is ever materialised
+    (which would flush to zero in float32).
+
+    Args:
+        code_units: The code-unit system the simulation runs in.
+
+    Returns:
+        A :class:`CIEParabolicParams` whose curve maps the module's rescaled
+        temperature ``T~ = T k_B / m_p`` to a rescaled cooling rate
+        ``Lambda~ = Lambda / m_p^2``, both in code units.
+    """
+
+    # T~ = 1 code_energy / code_mass corresponds to this many Kelvin.
+    T_scale = (
+        1.0 * code_units.code_energy / code_units.code_mass * c.m_p / c.k_B
+    ).to(u.K).value
+
+    # Lambda_cgs = 1 erg cm^3 / s corresponds to this many code units of Lambda~.
+    lambda_scale = (
+        1.0 * u.erg * u.cm ** 3 / u.s / c.m_p ** 2
+    ).to(
+        code_units.code_energy * code_units.code_length ** 3
+        / (code_units.code_time * code_units.code_mass ** 2)
+    ).value
+
+    return CIEParabolicParams(
+        log10_temperature_to_kelvin=float(np.log10(T_scale)),
+        log10_lambda_cgs_to_code=float(np.log10(lambda_scale)),
+    )
 
 
 def schure_cooling(

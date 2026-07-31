@@ -28,7 +28,10 @@ from astronomix.option_classes.simulation_config import (
     FINITE_VOLUME,
     STATE_TYPE,
 )
-from astronomix._modules._cooling.cooling_options import SIMPLE_MIXING_LAYER_COOLING
+from astronomix._modules._cooling.cooling_options import (
+    COOLING_IN_RK_STAGES,
+    SIMPLE_MIXING_LAYER_COOLING,
+)
 
 # astronomix containers
 from astronomix.data_classes.simulation_helper_data import HelperData
@@ -140,8 +143,15 @@ def _time_integrator_sources(
         )
 
     # Cooling (FD path): apply the cooling to the primitive pressure, then add
-    # the resulting conserved-state change as the source term.
-    if config.cooling_config.cooling and config.solver_mode == FINITE_DIFFERENCE:
+    # the resulting conserved-state change as the source term. Only when the
+    # cooling operator is configured to live inside the RK stages -- with
+    # COOLING_OPERATOR_SPLIT it is instead applied once per step, after the
+    # hydro update (see _iteration_level_updates._post_step_updates).
+    if (
+        config.cooling_config.cooling
+        and config.solver_mode == FINITE_DIFFERENCE
+        and config.cooling_config.cooling_placement == COOLING_IN_RK_STAGES
+    ):
         if not config.cooling_config.cooling_curve_config.cooling_curve_type == SIMPLE_MIXING_LAYER_COOLING:
             primitive_state = update_pressure_by_cooling(
                 primitive_state,
