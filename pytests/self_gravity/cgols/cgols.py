@@ -7,9 +7,12 @@ the full 75 Myr adiabatic nuclear-outflow simulation with astronomix. A bare
 ``python cgols.py`` reproduces the validated production configuration; the
 CGOLS_* environment knobs below only exist for experiments and scaling.
 
-This reproduces the *adiabatic* A-series setup of that paper, which by design
-uses NO radiative cooling. See the cooling section at the end of the file for
-the paper's cooling curve and notes on the radiative B/C series.
+By default this reproduces the *adiabatic* A-series setup of that paper, which by
+design uses NO radiative cooling. ``CGOLS_COOLING=1`` switches on the companion
+paper's radiative B-series (arXiv:1803.01005): the same ICs and wind injection
+plus the operator-split, sub-cycled CIE cooling described in the cooling section
+at the end of this file (outputs are tagged ``_B`` so the two series never
+collide).
 
 Fidelity vs Schneider & Robertson 2018
 --------------------------------------
@@ -153,6 +156,17 @@ from astronomix._modules._cgols_wind.cgols_wind_options import (
     CGOLSWindConfig,
     CGOLSWindParams,
 )
+from astronomix._modules._cooling._cooling_tables import cie_parabolic_cooling
+from astronomix._modules._cooling.cooling_options import (
+    CIE_PARABOLIC,
+    COOLING_FLOOR_CLIP,
+    COOLING_OPERATOR_SPLIT,
+    SUBCYCLED_EXPLICIT_COOLING,
+    TOTAL_NUMBER_DENSITY,
+    CoolingConfig,
+    CoolingCurveConfig,
+    CoolingParams,
+)
 
 jax.config.update("jax_enable_x64", False)
 
@@ -294,10 +308,52 @@ if BOUNDARY not in ("diode", "open"):
     raise ValueError(f"CGOLS_BOUNDARY must be 'diode' or 'open', got {BOUNDARY!r}")
 _BOUNDARY_TYPE = OPEN_BOUNDARY_DIODE if BOUNDARY == "diode" else OPEN_BOUNDARY
 
+# Radiative cooling. Default off: a bare `python cgols.py` stays the adiabatic
+# A-series of Schneider & Robertson 2018 (arXiv:1803.01008). CGOLS_COOLING=1
+# switches on the companion paper's radiative B-series setup (arXiv:1803.01005):
+# the piecewise-parabolic solar-metallicity CIE curve (Eq. A4 of CGOLS I,
+# rendered for reference in cooling_lambda_cgs at the bottom of this file),
+# applied as an operator-split, sub-cycled source term after each hydro step
+# with a 10^4 K floor and n^2 Lambda(T) at mu = 0.6 - the Cholla convention.
+COOLING = os.environ.get("CGOLS_COOLING", "0") == "1"
+# Cooling temperature floor in Kelvin. Below it Lambda = 0 anyway (the curve's
+# own cutoff); this is the hard clamp on the sub-cycled update.
+COOLING_FLOOR_K = float(os.environ.get("CGOLS_COOLING_FLOOR_K", "1e4"))
+# Fixed sub-cycle trip count. Each sub-cycle changes T by at most 1%, and the
+# dt limit below caps the per-step loss at 10%, so ~10-12 suffice; the loop
+# always runs all of them (it is a static-bound fori_loop, for
+# differentiability), so this is a direct cost knob.
+COOLING_SUBCYCLES = int(os.environ.get("CGOLS_COOLING_SUBCYCLES", "16"))
+# Largest fraction of a cell's thermal energy that may be radiated in one hydro
+# step (paper: "no cell loses more than 10% of its thermal energy in a given
+# hydrodynamic time step").
+COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
+
+# Whether that rule constrains the hydro timestep at all. ON is the paper's
+# scheme and the default; 0 falls back to pure CFL and lets the sub-cycling
+# absorb the stiffness instead.
+#
+# MEASURED (2026-07-31, 512^2x1024 on 2xH200): with the limit ON the run is
+# NOT AFFORDABLE at this resolution. dt pins at 1.15e-6 code (~11 yr) -> 6.7e6
+# steps ~ 44 days for 75 Myr, versus ~90k steps for the adiabatic A-series.
+# The binding cells are the dense disk core: n_c = 112 cm^-3 at T_c = 3.1e4 K
+# gives t_cool = 18 yr. This is a direct cost of deviation 3 in the fidelity
+# list above - the paper's SHARP disk sits at exactly 1e4 K, where Lambda = 0
+# and the rule is free, while our CGOLS_SMOOTHING_SIGMA disk starts a factor ~3
+# above the floor and cools furiously. It is also resolution-coupled: at
+# CGOLS_DIM=128 the smeared core is only 29 cm^-3 and the limited run is fine.
+# Where the B-series science actually lives - the shocked shell, T ~ 1e6 K,
+# n ~ 10 - t_cool ~ 6000 yr against a ~830 yr CFL step, i.e. dt/t_cool ~ 0.14,
+# comfortably inside what 16 sub-cycles resolve. So switching the limit off
+# costs accuracy only in the disk transient, which is itself a smoothing
+# artifact. Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
+COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "1") == "1"
+
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
-# other or the production outputs. Empty = the production filenames.
-RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "")
+# other or the production outputs. Defaults to "_B" for a radiative run, so the
+# A- and B-series never share snapshot / checkpoint / log / figure filenames.
+RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "_B" if COOLING else "")
 
 # Full-state checkpointing, via astronomix's Orbax TO_DISK mode: the run is
 # split into num_snapshots segments and after each one the full loop carry is
@@ -387,6 +443,50 @@ gamma = 5 / 3
 # (~7e-70) and m_p_code (~8e-64) both underflow to 0.0 in float32, which turns
 # T = P * mu * m_p_code / (rho * k_B_code) into 0/0 = NaN. Their ratio does not.
 T_factor = (mu * m_p / k_B * code_units.code_velocity**2).to(u.K).value
+
+
+def _kelvin_to_code_temperature(T_K):
+    """Convert a temperature in Kelvin to the cooling module's rescaled units.
+
+    The cooling module works in ``T~ = T k_B / m_p`` (code_energy / code_mass),
+    NOT in Kelvin and not in this file's ``P / rho`` code temperature - the two
+    differ by mu, i.e. ``T[K] = T~ * T_factor / mu``. 10^4 K comes out as
+    ~8.3e-3, so passing a literal 1e4 to ``CoolingParams.floor_temperature``
+    would put the floor at ~1.2e10 K and silently disable cooling everywhere.
+    Done via astropy so the conversion is auditable rather than a magic number.
+    """
+    return float(
+        (T_K * u.K * k_B / m_p).to(code_units.code_energy / code_units.code_mass).value
+    )
+
+
+# Cooling-curve parameters in code units (the published Eq. A4 coefficients plus
+# the two log10 unit shifts). Cheap to build, so do it unconditionally.
+_CIE_COOLING_PARAMS = cie_parabolic_cooling(code_units)
+
+
+def _cooling_params_kwargs():
+    """The ``cooling_params=`` kwarg for SimulationParams, or {} when adiabatic.
+
+    Kept as a conditional kwarg so the adiabatic run's params are byte-identical
+    to what they were before cooling existed.
+    """
+    if not COOLING:
+        return {}
+    return dict(
+        cooling_params=CoolingParams(
+            hydrogen_mass_fraction=0.76,
+            metal_mass_fraction=0.02,
+            # Pin mu = 0.6 as the paper prescribes ("we take mu = 0.6
+            # throughout the calculation"); X, Z alone would give 0.590, a 3.4%
+            # error in the cooling rate and an inconsistency with T_factor and
+            # every diagnostic in this file.
+            mean_molecular_weight=mu,
+            floor_temperature=_kelvin_to_code_temperature(COOLING_FLOOR_K),
+            max_thermal_energy_fraction=COOLING_DT_FRACTION,
+            cooling_curve_params=_CIE_COOLING_PARAMS,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +649,22 @@ def build_config():
 
     print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
 
+    if COOLING:
+        print(
+            f"Radiative cooling ON (B-series): CIE parabolic curve, n^2 Lambda at "
+            f"mu = {mu}, floor {COOLING_FLOOR_K:.3g} K "
+            f"(= {_kelvin_to_code_temperature(COOLING_FLOOR_K):.3e} code), "
+            f"{COOLING_SUBCYCLES} sub-cycles, "
+            + (
+                f"dt <= {COOLING_DT_FRACTION:.2g} t_cool; "
+                if COOLING_DT_LIMIT
+                else "cooling dt limit OFF (pure CFL); "
+            )
+            + f"outputs tagged {RUN_TAG!r}"
+        )
+    else:
+        print("Radiative cooling OFF (adiabatic A-series); set CGOLS_COOLING=1 for the B-series")
+
     config = SimulationConfig(
         memory_analysis=True,
         # Build the padded helper data (geometric_centers and friends) in host
@@ -638,6 +754,34 @@ def build_config():
                 snapshot_storage_path=_data(f"cgols_checkpoints{RUN_TAG}"),
             )
             if CHECKPOINT_EVERY and not BENCH_STEPS
+            else {}
+        ),
+        # Radiative cooling (CGOLS_COOLING=1, the paper's B-series). Conditional
+        # kwarg so the adiabatic static config stays byte-identical - it is a
+        # static_argnames member, so any change forces a recompile.
+        #   SUBCYCLED_EXPLICIT_COOLING + COOLING_OPERATOR_SPLIT reproduce
+        #   Cholla's scheme: forward Euler, <=1% dT per sub-cycle, applied once
+        #   per step to the post-hydro state.
+        #   TOTAL_NUMBER_DENSITY selects n^2 Lambda (n = rho / (mu m_p)) over
+        #   the module's default n_e n_H - a factor mu_e mu_H / mu^2 ~ 4.30.
+        #   COOLING_FLOOR_CLIP clamps to the 10^4 K floor rather than reverting.
+        **(
+            dict(
+                cooling_config=CoolingConfig(
+                    cooling=True,
+                    cooling_method=SUBCYCLED_EXPLICIT_COOLING,
+                    cooling_placement=COOLING_OPERATOR_SPLIT,
+                    floor_mode=COOLING_FLOOR_CLIP,
+                    max_subcycles=COOLING_SUBCYCLES,
+                    max_fractional_temperature_change=0.01,
+                    cooling_timestep_limit=COOLING_DT_LIMIT,
+                    cooling_curve_config=CoolingCurveConfig(
+                        cooling_curve_type=CIE_PARABOLIC,
+                        density_convention=TOTAL_NUMBER_DENSITY,
+                    ),
+                )
+            )
+            if COOLING
             else {}
         ),
     )
@@ -935,6 +1079,7 @@ def build_initial_conditions():
         positivity_max_pressure_over_density=TMAX_K / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
+        **_cooling_params_kwargs(),
     )
 
     jnp.save(_ic_potential_path(), Phi_total)
@@ -1002,6 +1147,7 @@ def load_initial_conditions():
         positivity_max_pressure_over_density=TMAX_K / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
+        **_cooling_params_kwargs(),
     )
     return initial_state, config, params, registered_variables
 
@@ -1722,22 +1868,44 @@ def plot_paper_slices(
 
 
 # ---------------------------------------------------------------------------
-# Reference: radiative cooling (NOT applied here)
+# Reference implementation: the radiative cooling curve
 #
-# The run above reproduces the paper's ADIABATIC A-series, which uses no cooling;
-# the paper reports those initial conditions are stable for >1 Gyr AT THEIR
-# RESOLUTION (dx ~ 5 pc, i.e. ~30 cells per 0.15 kpc disk scale height). At the
-# default 512^2x1024 (dx ~ 19.5 pc) the central gas scale height is ~1 cell,
-# which is why the ICs are smoothed (CGOLS_SMOOTHING_SIGMA) and the central
-# disk sits slightly warmer/puffier than Fig. 4 - a resolution issue, not a
-# missing-cooling one.
+# By default (CGOLS_COOLING=0) the run above reproduces the paper's ADIABATIC
+# A-series, which uses no cooling; the paper reports those initial conditions are
+# stable for >1 Gyr AT THEIR RESOLUTION (dx ~ 5 pc, i.e. ~30 cells per 0.15 kpc
+# disk scale height). At the default 512^2x1024 (dx ~ 19.5 pc) the central gas
+# scale height is ~1 cell, which is why the ICs are smoothed
+# (CGOLS_SMOOTHING_SIGMA) and the central disk sits slightly warmer/puffier than
+# Fig. 4 - a resolution issue, not a missing-cooling one.
 #
-# Cooling is used only in the radiative B/C series (companion paper). For those,
-# the paper applies an operator-split CIE cooling source term with the analytic
-# solar-metallicity fit below (Appendix A.3, Eq. A4) and a 10^4 K temperature
-# floor. The volumetric cooling rate is n^2 * Lambda(T). This function is
-# provided for reference; it would attach as a post-hydro-step source term if you
-# move to a radiative run (check astronomix for a cooling / source-term hook).
+# Cooling is used in the radiative B/C series (companion paper arXiv:1803.01005),
+# which CGOLS_COOLING=1 activates: astronomix's CIE_PARABOLIC curve, applied
+# operator-split and sub-cycled after each hydro step with a 10^4 K floor and
+# n^2 Lambda(T) at mu = 0.6 (see build_config / _cooling_params_kwargs above).
+#
+# The function below is the exact analytic rendering of the published fit
+# (Appendix A.3, Eq. A4 of CGOLS I) in plain Kelvin/cgs. It is the REFERENCE
+# IMPLEMENTATION the wired-in CIE_PARABOLIC curve is validated against - see
+# pytests/cooling/cie_cooling.py, which imports it as ground truth - not dead
+# code, and not what the run itself calls.
+#
+# Interactions with the positivity clips, for reading the B-series diagnostics:
+#   - temperature_clip (CGOLS_TMAX_K, 5e9 K) never conflicts with cooling, which
+#     only lowers T. Fidelity note: paper-era Cholla caps T at 1e9 K INSIDE its
+#     cooling kernel (unmentioned in either paper). Our 5e9 was chosen to fix the
+#     adiabatic per-stage-clipping runaway; CGOLS_TMAX_K=1e9 is a legitimate
+#     maximally-Cholla-faithful experiment. With cooling on the hottest gas
+#     self-limits, so the difference should be small - the default is unchanged.
+#   - minimum_pressure = 1e-5 is a hard per-step/per-stage floor. The 10^4 K
+#     cooling floor is P = 1.4e-2 * rho, so for rho >~ 7e-4 the cooling floor
+#     binds first; in the most rarefied cavity cells (rho -> 1e-4) the pressure
+#     floor is the hotter of the two and parks them near ~7e4 K. Harmless, but
+#     do not mistake it for a cooling bug.
+#   - The disk starts at 10^4 K, i.e. already at the floor, so cooling is a no-op
+#     there by construction. The B-series signal appears at the wind/shell
+#     contact and in the shocked shell.
+#   - Expect a smaller dt: the 10% thermal-energy constraint
+#     (CGOLS_COOLING_DT_FRACTION) can beat CFL at the dense hot shell.
 # ---------------------------------------------------------------------------
 def cooling_lambda_cgs(T):
     """CIE cooling function Lambda(T) [erg s^-1 cm^3], Schneider & Robertson 2018 Eq. A4.
