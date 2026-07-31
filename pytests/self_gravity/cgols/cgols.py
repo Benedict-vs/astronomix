@@ -356,14 +356,41 @@ COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 # NO NaN EVER APPEARED - the positivity clips masked the divergence, so watch
 # max_rho, not the NaN flag. Control: the adiabatic A-series peaked at
 # max_rho = 3.5e4 over the full 75 Myr.
-# The dt/t_cool ~ 0.14 estimate above is evaluated in the wrong place: the
-# runaway is at the CONTACT, denser and cooler than the shell interior, where
-# Lambda peaks. Forensics: cgols_logs/archive_B_blowup_20260731/.
-# NB this does NOT prove the limit would have saved it - the limited run only
-# ever reached t = 1.577e-3, far short of the 5 Myr wind onset, so that path is
-# untested through the starburst.
+# Forensics: cgols_logs/archive_B_blowup_20260731/.
+#
+# *** RESOLVED (2026-07-31): the blow-up was NOT the cooling operator and NOT
+# the missing dt limit - it was the un-blended WENO interface flux at the
+# cooling-sharpened contact. Radiative cooling collapses the shocked shell to
+# a ~1-cell, 1e5:1 contrast contact; there the 5th-order flux reconstruction
+# overshoots so hard that a single step can move more mass out of the donor
+# cell than it contains. The donor is clamped back up by the density floor
+# (mass created from nothing), the receiver's density jumps ~100x in ONE step
+# (2.6e3 -> 2.9e5 seen at CGOLS_DIM=128), and the floors + velocity/temperature
+# clips then lock the region into a mass-pumping runaway. The chain of fixes
+# that did NOT work, for the record: sigma=0 sharp ICs (worse - the 1-cell disk
+# dies pre-onset), CFL 0.3 (blew up anyway), a 3.2e4 K cooling floor (delayed
+# it to the high state only). The fix that works is CGOLS_PRESERVING_FLUX=1,
+# the Hu-Adams-Shu/Zalesak FCT positivity flux limiter - with it the full
+# 75 Myr B-series at 128 runs with ZERO temperature-ceiling and ZERO
+# velocity-clip engagements (vs 24k/24.5k steps before) and peak max_rho
+# ~3.2e4, same scale as the adiabatic A-series. NB the limiter was silently
+# a no-op on the fused Pallas RK4_LSRK path until the matching astronomix fix
+# (_finite_difference/_time_integrators/_ssprk.py) that forces the explicit
+# flux path when blending is requested.
 # Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
 COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "1") == "1"
+
+# Positivity-preserving flux blending (see _finite_difference/_interface_fluxes/
+# _flux_blending.py). PRESERVING_FLUX is the Hu-Adams-Shu / Zalesak-FCT limiter:
+# per interface, blend the WENO flux toward first-order LLF by the smallest
+# weight that keeps the LF-updated density AND pressure above their floors.
+# DEEPVOID_BLEND ramps toward LLF near the density floor. Both default OFF so a
+# bare run stays the production A-series numerics; the radiative B-series needs
+# PRESERVING_FLUX (see the blow-up notes above - the brute-force clips rectify
+# WENO oscillations at the cooling-sharpened contact into a density runaway,
+# while the FCT blend makes the offending interface locally diffusive instead).
+PRESERVING_FLUX = os.environ.get("CGOLS_PRESERVING_FLUX", "0") == "1"
+DEEPVOID_BLEND = os.environ.get("CGOLS_DEEPVOID_BLEND", "0") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
@@ -724,6 +751,11 @@ def build_config():
             nan_safe=True,
             velocity_clip=True,
             temperature_clip=True,
+            # FCT positivity flux limiter / deep-void LLF blending, env-gated
+            # (CGOLS_PRESERVING_FLUX / CGOLS_DEEPVOID_BLEND); default OFF so the
+            # bare adiabatic A-series numerics are unchanged.
+            preserving_flux=PRESERVING_FLUX,
+            deepvoid_blend=DEEPVOID_BLEND,
         ),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.

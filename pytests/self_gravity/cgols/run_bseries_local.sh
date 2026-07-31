@@ -42,6 +42,12 @@ export NCCL_NVLS_ENABLE=0
 export CGOLS_COOLING=1
 export CGOLS_COOLING_DT_LIMIT=0     # see the note above
 export CGOLS_COOLING_SUBCYCLES=32   # cheap insurance for intermediate dt/t_cool
+# REQUIRED for the radiative series: FCT positivity flux limiter. Cooling
+# collapses the wind/disk contact to a ~1-cell 1e5:1 contrast where the raw
+# WENO flux overshoots catastrophically (the 2026-07-31 blow-up); the blend
+# makes the offending interfaces locally diffusive instead. Costs the fused
+# WENO+divergence Pallas path (see cgols.py notes).
+export CGOLS_PRESERVING_FLUX=1
 export CGOLS_DIM=512
 export CGOLS_SHARD_SPLIT="(1, 2, 1, 1)"   # x-split over 2 GPUs; 512/2 = 256, divisible by the (4,4,8) Pallas block
 export CGOLS_NUM_SNAPSHOTS=60       # matches the 61-frame A-series reference
