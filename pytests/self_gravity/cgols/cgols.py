@@ -344,9 +344,25 @@ COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 # CGOLS_DIM=128 the smeared core is only 29 cm^-3 and the limited run is fine.
 # Where the B-series science actually lives - the shocked shell, T ~ 1e6 K,
 # n ~ 10 - t_cool ~ 6000 yr against a ~830 yr CFL step, i.e. dt/t_cool ~ 0.14,
-# comfortably inside what 16 sub-cycles resolve. So switching the limit off
-# costs accuracy only in the disk transient, which is itself a smoothing
-# artifact. Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
+# comfortably inside what 16 sub-cycles resolve.
+#
+# *** WARNING: RUNNING WITH THE LIMIT OFF BLEW UP AT 512^2x1024 (2026-07-31). ***
+# The argument above - that switching the limit off costs accuracy only in the
+# disk transient - is WRONG, and the run that tested it diverged at t = 0.593
+# code (5.8 Myr), 0.8 Myr after the wind steps on. Density ran away at ~400-430
+# pc from centre (just outside the 300 pc injection sphere, i.e. the wind/disk
+# contact), 1e5 -> 1e12 in ~20 steps, ending with max_rho ~ 1e35, |v| pinned at
+# 50*sqrt(3) in all three components and T at its ceiling on 98% of steps.
+# NO NaN EVER APPEARED - the positivity clips masked the divergence, so watch
+# max_rho, not the NaN flag. Control: the adiabatic A-series peaked at
+# max_rho = 3.5e4 over the full 75 Myr.
+# The dt/t_cool ~ 0.14 estimate above is evaluated in the wrong place: the
+# runaway is at the CONTACT, denser and cooler than the shell interior, where
+# Lambda peaks. Forensics: cgols_logs/archive_B_blowup_20260731/.
+# NB this does NOT prove the limit would have saved it - the limited run only
+# ever reached t = 1.577e-3, far short of the 5 Myr wind onset, so that path is
+# untested through the starburst.
+# Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
 COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
