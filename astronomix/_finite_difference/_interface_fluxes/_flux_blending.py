@@ -276,7 +276,13 @@ def _ppflux_blend_weight(dF_weno, F_llf, conserved_state, axis, dtdx, params,
         q1 = _internal_energy_residual(U_LF + dU, config, registered_variables, e_floor)
         lo = jnp.zeros_like(c)
         hi = jnp.ones_like(c)
-        for _ in range(30):  # bisect the per-cell admissible fraction
+        # Bisect the per-cell admissible fraction. 12 iterations resolve the
+        # blend weight to 2^-12 ~ 2.4e-4, far below any physically meaningful
+        # precision for a safety limiter; each iteration is a full-grid
+        # internal-energy evaluation per axis per RK stage, so the count is a
+        # direct hot-loop cost (30 -> 12 cut the 512^2x1024 cgols step from
+        # 5.8 s to 3.5 s on one H200; the no-blend step is 1.6 s).
+        for _ in range(12):
             mid = 0.5 * (lo + hi)
             qmid = _internal_energy_residual(
                 U_LF + mid[None, ...] * dU, config, registered_variables, e_floor)

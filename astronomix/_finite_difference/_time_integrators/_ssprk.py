@@ -515,9 +515,16 @@ def _lsrk4_hydro(
         # rhs/``L(q)``-sized scratch register is never materialised, which is
         # what gets us below the 3-buffer floor of the explicit
         # rhs-then-update path.
+        # The flux blending (deep-void ramp and/or FCT positivity) must
+        # post-process the standalone per-axis flux array before the
+        # divergence, so it forces the explicit ``_hydro_step_rhs`` fallback —
+        # same exclusion as in ``_hydro_step_rhs``'s own fused gate (without
+        # it the blend flags would be silently ignored on this path).
         use_fused_pallas = (
             _hydro_pallas_flux_supported(q, config)
             and not density_fluxes_needed
+            and not config.positivity_config.deepvoid_blend
+            and not config.positivity_config.preserving_flux
         )
 
         if use_fused_pallas:
@@ -665,11 +672,19 @@ def _lsrk4_with_ct(
         mz = registered_variables.magnetic_index.z
         di = registered_variables.density_index
 
+        # Unified flux blending (deep-void density ramp and/or FCT positivity):
+        # apply to the full interface flux BEFORE the transverse magnetic-flux
+        # slices are extracted, so CT consumes the blended (locally-diffusive)
+        # induction flux — same pattern as ``_ssprk4_with_ct`` above.
+        blend = config.positivity_config.deepvoid_blend or config.positivity_config.preserving_flux
+
         # x-axis: fold the LSRK4 ``a_coef * dq + ...`` step into the
         # first axis's div kernel via ``scale_in`` so ``rhs_q`` is never
         # materialised; subsequent axes accumulate (scale_in = 1.0).  The
         # native fallback path keeps the explicit ``rhs_q`` register.
         dF_x = _weno_flux_x(current_q, params, config, registered_variables)
+        if blend:
+            dF_x = _blend_interface_flux(dF_x, current_q, 0, dtdx, params, config, registered_variables)
         By_flux_x = dF_x[my]
         Bz_flux_x = dF_x[mz]
         density_flux_x = dF_x[di]
@@ -704,6 +719,8 @@ def _lsrk4_with_ct(
         if config.dimensionality >= 2:
             mx = registered_variables.magnetic_index.x
             dF_y = _weno_flux_y(current_q, params, config, registered_variables)
+            if blend:
+                dF_y = _blend_interface_flux(dF_y, current_q, 1, dtdy, params, config, registered_variables)
             Bx_flux_y = dF_y[mx]
             Bz_flux_y = dF_y[mz]
             density_flux_y = dF_y[di]
@@ -729,6 +746,8 @@ def _lsrk4_with_ct(
         if config.dimensionality == 3:
             mx = registered_variables.magnetic_index.x
             dF_z = _weno_flux_z(current_q, params, config, registered_variables)
+            if blend:
+                dF_z = _blend_interface_flux(dF_z, current_q, 2, dtdz, params, config, registered_variables)
             Bx_flux_z = dF_z[mx]
             By_flux_z = dF_z[my]
             density_flux_z = dF_z[di]
