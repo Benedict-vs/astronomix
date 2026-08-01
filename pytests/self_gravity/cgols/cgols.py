@@ -319,19 +319,25 @@ COOLING = os.environ.get("CGOLS_COOLING", "0") == "1"
 # Cooling temperature floor in Kelvin. Below it Lambda = 0 anyway (the curve's
 # own cutoff); this is the hard clamp on the sub-cycled update.
 COOLING_FLOOR_K = float(os.environ.get("CGOLS_COOLING_FLOOR_K", "1e4"))
-# Fixed sub-cycle trip count. Each sub-cycle changes T by at most 1%, and the
-# dt limit below caps the per-step loss at 10%, so ~10-12 suffice; the loop
+# Fixed sub-cycle trip count. Each sub-cycle changes T by at most 1%; the loop
 # always runs all of them (it is a static-bound fori_loop, for
-# differentiability), so this is a direct cost knob.
-COOLING_SUBCYCLES = int(os.environ.get("CGOLS_COOLING_SUBCYCLES", "16"))
+# differentiability), so this is a direct cost knob. 32 is the
+# production-validated value for the pure-CFL scheme (the default, see
+# CGOLS_COOLING_DT_LIMIT below); any residual dt is consumed in one clipped
+# Euler step that lands stiff cells exactly on the floor, Cholla-like.
+COOLING_SUBCYCLES = int(os.environ.get("CGOLS_COOLING_SUBCYCLES", "32"))
 # Largest fraction of a cell's thermal energy that may be radiated in one hydro
 # step (paper: "no cell loses more than 10% of its thermal energy in a given
 # hydrodynamic time step").
 COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 
-# Whether that rule constrains the hydro timestep at all. ON is the paper's
-# scheme and the default; 0 falls back to pure CFL and lets the sub-cycling
-# absorb the stiffness instead.
+# Whether that rule constrains the hydro timestep at all. The 10% rule is the
+# paper's STATED scheme, but it is absent from both public Cholla branches,
+# unaffordable at 512^2x1024 (see below), and - after the FCT resolution below
+# - unnecessary: the default is now OFF (pure CFL, sub-cycling absorbs the
+# stiffness), which is the production-validated configuration. Set
+# CGOLS_COOLING_DT_LIMIT=1 to reproduce the paper's stated scheme and expect
+# the run to take weeks at 512.
 #
 # MEASURED (2026-07-31, 512^2x1024 on 2xH200): with the limit ON the run is
 # NOT AFFORDABLE at this resolution. dt pins at 1.15e-6 code (~11 yr) -> 6.7e6
@@ -378,18 +384,21 @@ COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 # (_finite_difference/_time_integrators/_ssprk.py) that forces the explicit
 # flux path when blending is requested.
 # Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
-COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "1") == "1"
+COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 
 # Positivity-preserving flux blending (see _finite_difference/_interface_fluxes/
 # _flux_blending.py). PRESERVING_FLUX is the Hu-Adams-Shu / Zalesak-FCT limiter:
 # per interface, blend the WENO flux toward first-order LLF by the smallest
 # weight that keeps the LF-updated density AND pressure above their floors.
-# DEEPVOID_BLEND ramps toward LLF near the density floor. Both default OFF so a
-# bare run stays the production A-series numerics; the radiative B-series needs
-# PRESERVING_FLUX (see the blow-up notes above - the brute-force clips rectify
-# WENO oscillations at the cooling-sharpened contact into a density runaway,
-# while the FCT blend makes the offending interface locally diffusive instead).
-PRESERVING_FLUX = os.environ.get("CGOLS_PRESERVING_FLUX", "0") == "1"
+# DEEPVOID_BLEND ramps toward LLF near the density floor.
+# PRESERVING_FLUX defaults ON whenever cooling is on - the radiative B-series
+# is NOT viable without it (see the blow-up notes above: the brute-force clips
+# rectify WENO oscillations at the cooling-sharpened contact into a density
+# runaway, while the FCT blend makes the offending interface locally diffusive
+# instead; costs the fused Pallas path, ~2.2x per step). It defaults OFF for an
+# adiabatic run, so a bare `python cgols.py` keeps the production A-series
+# numerics bit-identically.
+PRESERVING_FLUX = os.environ.get("CGOLS_PRESERVING_FLUX", "1" if COOLING else "0") == "1"
 DEEPVOID_BLEND = os.environ.get("CGOLS_DEEPVOID_BLEND", "0") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
@@ -702,6 +711,11 @@ def build_config():
                 f"dt <= {COOLING_DT_FRACTION:.2g} t_cool; "
                 if COOLING_DT_LIMIT
                 else "cooling dt limit OFF (pure CFL); "
+            )
+            + (
+                "FCT preserving flux ON; "
+                if PRESERVING_FLUX
+                else "FCT preserving flux OFF - EXPECT THE CONTACT RUNAWAY; "
             )
             + f"outputs tagged {RUN_TAG!r}"
         )
