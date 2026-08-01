@@ -1262,6 +1262,18 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     dy = config.box_size.y / dim_y
     code_mdot_to_msun_per_yr = (code_mass / code_units.code_time).to(u.M_sun / u.yr).value
 
+    # Radial-velocity slice support (the middle panels of Figs 1/2 in
+    # arXiv:1803.01005): unit vectors r_hat on the edge-on plane. The y = 0
+    # plane sits half a cell off the axis, so the y-contribution to v_r there
+    # is O(dy/2r) and is dropped; r is clamped to half a cell so the origin
+    # cell stays finite.
+    code_velocity_kms = (1 * code_units.code_velocity).to(u.km / u.s).value
+    x_c = (jnp.arange(dim_x) + 0.5) * dx - config.box_size.x / 2
+    z_c = (jnp.arange(dim_z) + 0.5) * (config.box_size.z / dim_z) - config.box_size.z / 2
+    X_plane = x_c[:, None]
+    Z_plane = z_c[None, :]
+    R_plane = jnp.maximum(jnp.sqrt(X_plane**2 + Z_plane**2), 0.5 * dx)
+
     # Orbax full-state checkpoints are multi-GB, so they go to the bulk-data
     # dir (scratch), separate from the small frame files.
     ckpt_dir = _data(f"cgols_checkpoints{RUN_TAG}")
@@ -1289,7 +1301,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     # and the loader sorts by it.
     counter = {"i": 0}
 
-    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z):
+    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz):
         i = counter["i"]
         counter["i"] += 1
         # np.savez (uncompressed) keeps the per-frame write cheap; the per-run
@@ -1301,6 +1313,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
             T_xz=np.asarray(T_xz, dtype=np.float32),
             n_xy=np.asarray(n_xy, dtype=np.float32),
             mdot_z=np.asarray(mdot_z, dtype=np.float32),
+            vr_xz=np.asarray(vr_xz, dtype=np.float32),
         )
 
     # Rolling retention for the Orbax checkpoints (CGOLS_CHECKPOINT_EVERY > 0):
@@ -1316,6 +1329,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     def snapshot_callable(time, state, registered_variables):
         rho = state[registered_variables.density_index]
         P = state[registered_variables.pressure_index]
+        vx = state[registered_variables.velocity_index.x]
         vz = state[registered_variables.velocity_index.z]
 
         if CHECKPOINT_EVERY:
@@ -1330,6 +1344,14 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
         T_xz = P_xz / rho_xz * T_factor
         n_xy = rho_xy * n_factor
 
+        # Edge-on radial velocity v_r = v . r_hat in km/s (paper Figs 1/2
+        # middle panels).
+        vr_xz = (
+            (vx[g:hi, my, g:hi] * X_plane + vz[g:hi, my, g:hi] * Z_plane)
+            / R_plane
+            * code_velocity_kms
+        )
+
         # Net vertical mass flux per z-plane, Mdot(z) = sum_xy(rho*v_z)*dx*dy, in
         # Msun/yr. Reduces the interior over (x, y) -> a length-dim_z line; XLA
         # fuses the slice*multiply*reduce so no full 3D temporary is materialised.
@@ -1339,7 +1361,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
             * code_mdot_to_msun_per_yr
         )
 
-        jax.debug.callback(_save_frame, time, n_xz, T_xz, n_xy, mdot_z)
+        jax.debug.callback(_save_frame, time, n_xz, T_xz, n_xy, mdot_z, vr_xz)
 
     return snapshot_callable
 
@@ -1357,13 +1379,18 @@ def load_snapshots(out_dir=SNAPSHOTS_DIR):
     frames = [np.load(f) for f in files]
     order = np.argsort([float(fr["time_myr"]) for fr in frames])
     frames = [frames[i] for i in order]
-    return {
+    out = {
         "time_myr": np.array([float(fr["time_myr"]) for fr in frames], dtype=np.float32),
         "n_xz": np.stack([fr["n_xz"] for fr in frames]),
         "T_xz": np.stack([fr["T_xz"] for fr in frames]),
         "n_xy": np.stack([fr["n_xy"] for fr in frames]),
         "mdot_z": np.stack([fr["mdot_z"] for fr in frames]),
     }
+    # Frames written since the callable also stores the edge-on radial
+    # velocity carry vr_xz; older frame sets simply do not have the key.
+    if all("vr_xz" in fr.files for fr in frames):
+        out["vr_xz"] = np.stack([fr["vr_xz"] for fr in frames])
+    return out
 
 
 # ---------------------------------------------------------------------------
