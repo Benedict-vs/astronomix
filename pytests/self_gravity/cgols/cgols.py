@@ -1467,7 +1467,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     )
     fig.suptitle(suptitle)
     plt.tight_layout()
-    plt.savefig(_fig("cgols_static_check.png"), dpi=300)
+    plt.savefig(_fig(f"cgols_static_check{RUN_TAG}.png"), dpi=300)
     plt.close(fig)
     del n_mid_f, n_z_f, T_mid_f, T_z_f
     if have_initial:
@@ -1520,7 +1520,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     plt.colorbar(im, ax=axb, label=r"$v_z$ [km s$^{-1}$]")
 
     plt.tight_layout()
-    plt.savefig(_fig("cgols_vz_diagnostic.png"), dpi=300)
+    plt.savefig(_fig(f"cgols_vz_diagnostic{RUN_TAG}.png"), dpi=300)
     plt.close(fig)
 
     # ---- Final-state morphology, phase diagram, vertical mass flux ----
@@ -1634,7 +1634,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     axD.legend()
 
     plt.tight_layout()
-    plt.savefig(_fig("cgols_extras.png"), dpi=300)
+    plt.savefig(_fig(f"cgols_extras{RUN_TAG}.png"), dpi=300)
     plt.close(fig)
 
 
@@ -1660,7 +1660,7 @@ def _snapshot_grid(config):
     return x, y, z, extent_xz, extent_xy
 
 
-def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_animation.gif", fps=12):
+def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_animation{RUN_TAG}.gif", fps=12):
     """Animate the intermediate snapshots: edge-on n, edge-on T, face-on n.
 
     Builds a GIF with matplotlib's FuncAnimation + PillowWriter (the codebase's
@@ -1730,7 +1730,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_
     print(f"Wrote {out} ({n_frames} frames, t = {t[0]:.1f} -> {t[-1]:.1f} Myr)")
 
 
-def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out="cgols_wind_timeseries.png"):
+def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_timeseries{RUN_TAG}.png"):
     """Quantitative wind diagnostics from the 1D vertical mass-flux snapshots.
 
     Left: net mass OUTflow rate through z = +/-H planes vs time (outward = +z above
@@ -1791,7 +1791,7 @@ def plot_paper_slices(
     config,
     snapshots_dir=SNAPSHOTS_DIR,
     target_times_myr=(10.0, 25.0, 50.0, 60.0),
-    out="cgols_paper_slices.png",
+    out=f"cgols_paper_slices{RUN_TAG}.png",
     n_range=(1e-4, 1e3),
     T_range=(1e3, 10 ** 7.5),
     x_half=5.0,
