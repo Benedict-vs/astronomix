@@ -78,8 +78,11 @@ nodes have 4 GPUs; the Teal `accelerated-h200-8` node has 8). Sharding is a
    identical value, but it gathers each host's value as the canonical **fp32**
    and compares it to the raw **fp64** Python scalar (e.g. `gamma = 5/3`),
    failing with *"not the same on each process"* on dtype alone. Fix:
-   `jax.device_put(jnp.asarray(leaf), replicated)` so all hosts present fp32
-   (in `time_integration.py`, guarded by `sharding is not None`).
+   `jax.device_put(jnp.asarray(leaf), replicated)` so all hosts present fp32.
+   Lives in `time_integration.py::_place_params_on_mesh`, which is the single
+   place both the one-shot and the TO_DISK per-segment path call (the segment
+   loop previously re-replicated `params` itself, which would have undone any
+   fix applied only at the first site).
 
 6. **Build-then-reshard memory cap.** Building the full IC on one device and
    then `device_put`-ing to the mesh caps *even multi-GPU* runs at
@@ -92,6 +95,32 @@ nodes have 4 GPUs; the Teal `accelerated-h200-8` node has 8). Sharding is a
    reference NaN too. On jax 0.9.2, sharded Pallas matches the 1-GPU result
    bit-for-bit (`_mgpu_pallas_probe.py`). Always check finiteness with a
    stable `dt` before blaming the halo exchange.
+
+8. **Global-sized `params` / `helper_data` leaves must be sharded, not
+   replicated.** Two fields are the size of a whole state variable:
+   `params.gravitational_potential` (69 GB at 2048² × 4096) and
+   `helper_data.r`. Replicated they are merely wasteful at 1024 and fatal at
+   2048; and `r` used to fall through to a bare `jax.device_put(value)`, which
+   commits it to ONE device — a multi-process pjit cannot consume that at all.
+   Both are now placed on `PartitionSpec(*sharding.spec[1:4])`
+   (`_place_params_on_mesh`, `simulation_helper_data._field_sharding`). Gate a
+   potential-like leaf on `ndim == dimensionality and size > 1`, never
+   generically: in a 1D run a `(6,)` schedule array passes both tests.
+
+9. **Host-side side effects run on EVERY rank.** Prints, log appends,
+   `makedirs`, `glob`+`remove`, `rmtree`, `np.savez` in a `jax.debug.callback`
+   — all of them fire `process_count` times. Guard them with
+   `astronomix.parallel.is_primary()` and follow with `barrier(name)`; the
+   barrier name is mandatory and must be unique per wait site. **Never** guard
+   a *collective* this way (an Orbax `save`/`restore`, `latest_step`, a
+   `sync_global_devices`) — that deadlocks every other rank. And never make
+   `config` rank-dependent (e.g. `progress_bar=RANK0`): `config` is a static
+   argument, so that compiles a different program on rank 0 than elsewhere.
+
+10. **Sharded operands of `jax.debug.callback` reach the host as ONE SHARD.**
+    Wrap each operand in `with_sharding_constraint(x, NamedSharding(mesh, P()))`
+    immediately before the callback so the all-gather happens inside the jit.
+    Symptom without it: a frame whose planes are half real data, half zeros.
 
 ## Runner hygiene (bit us, now standard)
 

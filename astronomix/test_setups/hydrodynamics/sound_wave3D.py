@@ -226,7 +226,7 @@ def _build_sound_wave_fields(
     if sharding is not None:
         # Stack axis (leading) replicated; X/Y/Z mapped to the same mesh axes
         # as the primitive state (drop the leading vars entry of the state
-        # spec, as in simulation_helper_data._apply_sharding).
+        # spec, as in simulation_helper_data._field_sharding).
         spatial_sharding = jax.NamedSharding(
             sharding.mesh, PartitionSpec(None, *sharding.spec[1:4])
         )

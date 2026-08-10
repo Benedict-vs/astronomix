@@ -12,6 +12,30 @@ import os
 import shutil
 import sys
 
+# Rank guard for the host-side output below. Both the status line and the
+# ASTRONOMIX_DIAG_LOG append are driven from inside the jitted loop via
+# jax.debug.callback, which fires on EVERY process: at 32 ranks the log file
+# becomes 32 interleaved copies of the same lines on a shared filesystem, and
+# stdout is 32x duplicated. The values reported are global reductions and are
+# therefore identical on every rank, so this is purely duplicated I/O and rank
+# 0's copy is the complete record.
+#
+# Resolved on first use and then cached: the rank never changes during a run,
+# and a per-callback jax.process_index() would sit in the per-step host path.
+# Deliberately NOT resolved at import time — that would create the JAX backend
+# as a side effect of importing astronomix, before a driver had the chance to
+# call jax.distributed.initialize().
+_is_primary_cache = []
+
+
+def _is_primary() -> bool:
+    """True on rank 0 (and always, single-process)."""
+    if not _is_primary_cache:
+        from astronomix.parallel import is_primary
+
+        _is_primary_cache.append(is_primary())
+    return _is_primary_cache[0]
+
 # Percent-bucket throttle for non-interactive stdout (slurm/batch log files).
 # The in-place "\r" status line only works on a terminal; in a redirected log
 # nothing is overwritten, so every step would append a full line and a long
@@ -79,6 +103,11 @@ def _show_diagnostics(
     ``progress_bar`` config flag — without it every step still prints). NaN
     lines and the per-step ``ASTRONOMIX_DIAG_LOG`` file are never throttled.
     """
+    if not _is_primary():
+        # Every rank runs this callback with the same (globally reduced)
+        # values; only rank 0 writes them out. See the _is_primary note above.
+        return
+
     nan = bool(has_nan)
     flag = "  <-- NaN/inf!" if nan else ""
 
@@ -138,6 +167,10 @@ def _show_progress(
         fill: Character used for the filled portion of the bar.
         printEnd: Line terminator; ``"\\r"`` keeps overwriting the same line.
     """
+    if not _is_primary():
+        # One bar, not process_count of them interleaved. See _is_primary above.
+        return
+
     # On a blow-up the simulation time goes non-finite, and ``int(NaN)`` would
     # raise and abort the whole run. Clamp to ``total`` so the bar finishes
     # cleanly instead of crashing; the diagnostics elsewhere report the NaN.

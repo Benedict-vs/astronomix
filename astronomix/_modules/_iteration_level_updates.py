@@ -38,6 +38,14 @@ from astronomix.variable_registry.registered_variables import RegisteredVariable
 # astronomix functions
 from astronomix._modules._cnn_mhd_corrector._cnn_mhd_corrector import _cnn_mhd_corrector
 from astronomix._modules._cooling._cooling import update_pressure_by_cooling
+from astronomix._modules._cooling._simple_mixing_cooling import (
+    update_pressure_by_cooling_mixing,
+)
+from astronomix._modules._cooling.cooling_options import (
+    COOLING_IN_RK_STAGES,
+    COOLING_OPERATOR_SPLIT,
+    SIMPLE_MIXING_LAYER_COOLING,
+)
 from astronomix._modules._cosmic_rays.cr_injection import inject_crs_at_strongest_shock
 from astronomix._modules._frame_tracking._frame_tracking import _frame_tracking
 from astronomix._modules._neural_net_force._neural_net_force import _neural_net_force
@@ -49,6 +57,79 @@ from astronomix._modules._turbulent_forcing._turbulent_forcing import (
 )
 from astronomix._modules._viscosity._viscosity import fv_viscosity_update
 from astronomix.shock_finder.shock_finder import shock_criteria
+
+
+def _apply_cooling(
+    primitive_state: STATE_TYPE,
+    dt: Float[Array, ""],
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """Apply the cooling operator to the primitive state for one step ``dt``.
+
+    Dispatches the mixing-layer curve to its own driver, exactly as the
+    finite-difference source-term path in ``_time_integrator_sources`` does.
+    """
+    if (
+        config.cooling_config.cooling_curve_config.cooling_curve_type
+        == SIMPLE_MIXING_LAYER_COOLING
+    ):
+        return update_pressure_by_cooling_mixing(
+            primitive_state,
+            registered_variables,
+            config.cooling_config,
+            params,
+            dt,
+        )
+
+    return update_pressure_by_cooling(
+        primitive_state,
+        registered_variables,
+        config.cooling_config,
+        params,
+        dt,
+    )
+
+
+@partial(jax.jit, static_argnames=["config", "registered_variables"])
+def _post_step_updates(
+    primitive_state: STATE_TYPE,
+    dt: Float[Array, ""],
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """Apply the operator-split physics that runs *after* the hydro update.
+
+    The counterpart of ``_iteration_level_updates`` (which runs *before* the
+    hydro update) and of ``_time_integrator_sources`` (which enters the RK
+    stages). Currently this holds only cooling with
+    ``cooling_placement == COOLING_OPERATOR_SPLIT``, i.e. the true Lie splitting
+    Cholla / CGOLS use: one cooling application per hydro step, on the state the
+    hydro update just produced. Solver-mode agnostic, so FV and FD get identical
+    splitting.
+
+    Args:
+        primitive_state: The primitive state array, post hydro update.
+        dt: The time step just taken.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        registered_variables: The registered variables.
+
+    Returns:
+        The primitive state with the operator-split updates applied.
+    """
+
+    if (
+        config.cooling_config.cooling
+        and config.cooling_config.cooling_placement == COOLING_OPERATOR_SPLIT
+    ):
+        primitive_state = _apply_cooling(
+            primitive_state, dt, config, params, registered_variables
+        )
+
+    return primitive_state
 
 
 @partial(jax.jit, static_argnames=["config", "registered_variables"])
@@ -135,14 +216,15 @@ def _iteration_level_updates(
 
     # Cooling.
     # In the finite-difference case this is instead handled as a source term
-    # inside the hydro integrator.
-    if config.cooling_config.cooling and config.solver_mode == FINITE_VOLUME:
-        primitive_state = update_pressure_by_cooling(
-            primitive_state,
-            registered_variables,
-            config.cooling_config,
-            params,
-            dt,
+    # inside the hydro integrator; with COOLING_OPERATOR_SPLIT it runs once per
+    # step after the hydro update instead (see _post_step_updates below).
+    if (
+        config.cooling_config.cooling
+        and config.solver_mode == FINITE_VOLUME
+        and config.cooling_config.cooling_placement == COOLING_IN_RK_STAGES
+    ):
+        primitive_state = _apply_cooling(
+            primitive_state, dt, config, params, registered_variables
         )
 
     # Neural-network body force.

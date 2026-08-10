@@ -26,6 +26,7 @@ from functools import partial
 
 # typing
 from typing import Tuple
+from jaxtyping import Array, Float
 
 # jax
 import jax
@@ -36,13 +37,17 @@ import equinox as eqx
 
 # astronomix constants
 from astronomix._modules._cooling.cooling_options import (
+    CIE_PARABOLIC,
     COOLING_CURVE_TYPE,
+    COOLING_FLOOR_CLIP,
     EXPLICIT_COOLING,
     IMPLICIT_COOLING,
     NEURAL_NET_COOLING,
     NEURAL_NET_COOLING_WITH_DENSITY,
     PIECEWISE_POWER_LAW,
     SIMPLE_POWER_LAW,
+    SUBCYCLED_EXPLICIT_COOLING,
+    TOTAL_NUMBER_DENSITY,
 )
 from astronomix.option_classes.simulation_config import FIELD_TYPE, STATE_TYPE
 
@@ -64,11 +69,16 @@ from astronomix._finite_volume._state_evolution.limited_gradients import _calcul
 def get_effective_molecular_weights(
     hydrogen_mass_fraction: float,  # X
     metal_mass_fraction: float,  # Z
+    mean_molecular_weight: float = 0.0,
 ) -> Tuple[float, float, float]:
     """
     Calculate the mean molecular weight (mu)
     and the effective molecular weights for
     electrons (mu_e), hydrogen (mu_H)
+
+    A positive ``mean_molecular_weight`` overrides the mu derived from X and Z
+    (CGOLS, for instance, prescribes mu = 0.6 while X = 0.76, Z = 0.02 give
+    0.590); mu_e and mu_H are always the composition-derived ones.
     """
 
     # mean molecular weight
@@ -77,6 +87,10 @@ def get_effective_molecular_weights(
         + 3 * (1 - hydrogen_mass_fraction - metal_mass_fraction) / 4
         + metal_mass_fraction / 2
     )
+
+    # An explicitly prescribed mu wins. jnp.where rather than a Python ``if``:
+    # the override is a traced runtime value.
+    mu = jnp.where(mean_molecular_weight > 0.0, mean_molecular_weight, mu)
 
     # effective molecular weight for electrons
     mu_e = 2 * 1.0 / (1 + hydrogen_mass_fraction)
@@ -99,6 +113,7 @@ def get_pressure_from_temperature(
     temperature: FIELD_TYPE,
     hydrogen_mass_fraction: float,
     metal_mass_fraction: float,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
     """
     P = n * \tilde{T}
@@ -108,6 +123,7 @@ def get_pressure_from_temperature(
     mu, _, _ = get_effective_molecular_weights(
         hydrogen_mass_fraction,
         metal_mass_fraction,
+        mean_molecular_weight,
     )
 
     # calculate the particle number density
@@ -122,6 +138,7 @@ def get_temperature_from_pressure(
     pressure: FIELD_TYPE,
     hydrogen_mass_fraction: float,
     metal_mass_fraction: float,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
     """
     \tilde{T} = P / \tilde{n}
@@ -129,7 +146,7 @@ def get_temperature_from_pressure(
 
     # calculate the effective molecular weights
     mu, _, _ = get_effective_molecular_weights(
-        hydrogen_mass_fraction, metal_mass_fraction
+        hydrogen_mass_fraction, metal_mass_fraction, mean_molecular_weight
     )
 
     # calculate the particle number density
@@ -149,6 +166,76 @@ def cooling_rate_power_law(
     return factor * (temperature / reference_temperature) ** exponent
 
 
+def cooling_rate_cie_parabolic(
+    temperature: FIELD_TYPE,
+    params,
+) -> FIELD_TYPE:
+    """Piecewise-parabolic CIE cooling curve (CGOLS Eq. A4 / Cholla ``CIE_cool``).
+
+    ``temperature`` is the module's rescaled temperature; the fit coefficients
+    are the published Kelvin/cgs ones and the unit conversion enters as the two
+    additive log10 shifts carried in ``params`` (see
+    :class:`CIEParabolicParams`). Both shifts are applied inside the exponent,
+    so no 1e-22-scale intermediate is ever formed and the curve is safe in
+    float32.
+
+    The fit is genuinely discontinuous at log10 T = 5.9 (by ~1.6 %); that is a
+    property of the published curve, not of this implementation.
+    """
+
+    log_T = (
+        jnp.log10(jnp.maximum(temperature, 1e-30))
+        + params.log10_temperature_to_kelvin
+    )
+
+    low = params.a_low * (log_T - params.t_low) ** 2 + params.c_low
+    mid = params.a_mid * (log_T - params.t_mid) ** 2 + params.c_mid
+    high = params.s_high * log_T + params.c_high
+
+    # All three branches are finite everywhere, so this where-chain is safe to
+    # differentiate through in reverse mode.
+    log_lambda = jnp.where(
+        log_T < params.log10_T_break_1,
+        low,
+        jnp.where(log_T < params.log10_T_break_2, mid, high),
+    )
+
+    return jnp.where(
+        log_T < params.log10_T_floor,
+        0.0,
+        10.0 ** (log_lambda + params.log10_lambda_cgs_to_code),
+    )
+
+
+def _volumetric_cooling_prefactor(
+    cooling_curve_config: CoolingCurveConfig,
+    mu: float,
+    mu_e: float,
+    mu_H: float,
+):
+    """Return the prefactor turning ``rho^2 Lambda(T)`` into the volumetric rate.
+
+    The volumetric cooling rate is ``n_a n_b Lambda(T)`` for some pair of number
+    densities. In the module's rescaled units (rho carries the mass units), that
+    is ``rho^2 Lambda~ * prefactor`` with
+
+      * ``ELECTRON_HYDROGEN_DENSITY``: ``n_e n_H``, prefactor ``mu / (mu_e mu_H)``
+        after the ``(gamma - 1) / mu`` that converts an energy rate into a
+        temperature rate — i.e. the historical behaviour of this module;
+      * ``TOTAL_NUMBER_DENSITY``: ``n^2`` with ``n = rho / (mu m_p)``, prefactor
+        ``1 / mu``, which is what Cholla / CGOLS use.
+
+    The two differ by ``mu_e mu_H / mu^2`` (~4.30 for X = 0.76, Z = 0.02), so
+    picking the wrong one cools 4.3x too slowly. Keeping it here — rather than
+    folding it into the curve's unit scaling — leaves the stored Lambda equal to
+    the published one and lets :func:`cooling_time` pick up the same convention.
+    """
+    if cooling_curve_config.density_convention == TOTAL_NUMBER_DENSITY:
+        return 1.0 / mu
+    else:
+        return mu / (mu_e * mu_H)
+
+
 # t_cool
 @partial(jax.jit, static_argnames=("cooling_curve_config",))
 def cooling_time(
@@ -159,15 +246,21 @@ def cooling_time(
     gamma: float,
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
     """
-    t_cool = (k * mu_e * mu_H * T) / ((gamma - 1) * rho * mu * Lambda(T))
+    t_cool = T / |dT/dt| = T / ((gamma - 1) * rho * Lambda(T) * prefactor)
+
+    with the prefactor set by the configured density convention (see
+    :func:`_volumetric_cooling_prefactor`). Cells that do not cool (Lambda = 0,
+    which the CIE curve returns exactly below its floor) get ``inf``.
     """
 
     # calculate the effective molecular weights
     mu, mu_e, mu_H = get_effective_molecular_weights(
         hydrogen_mass_fraction,
         metal_mass_fraction,
+        mean_molecular_weight,
     )
 
     # calculate the cooling rate
@@ -178,8 +271,17 @@ def cooling_time(
         cooling_curve_params,
     )
 
-    # calculate the cooling time
-    return (mu_e * mu_H * temperature) / ((gamma - 1) * density * mu * cooling_rate)
+    prefactor = _volumetric_cooling_prefactor(cooling_curve_config, mu, mu_e, mu_H)
+
+    # Non-cooling cells have an infinite cooling time. The denominator inside
+    # the where is kept safe so neither the value nor its tangent goes NaN.
+    denominator = jnp.where(
+        cooling_rate > 0.0,
+        (gamma - 1) * density * cooling_rate * prefactor,
+        1.0,
+    )
+
+    return jnp.where(cooling_rate > 0.0, temperature / denominator, jnp.inf)
 
 
 # Y(T)
@@ -374,6 +476,8 @@ def _cooling_rate(
             10**cooling_curve_params.log10_Lambda_table,
             cooling_curve_params.alpha_table,
         )
+    elif cooling_curve_config.cooling_curve_type == CIE_PARABOLIC:
+        return cooling_rate_cie_parabolic(temperature, cooling_curve_params)
     elif cooling_curve_config.cooling_curve_type == NEURAL_NET_COOLING:
         neural_net_params = cooling_curve_params.network_params
         neural_net_static = cooling_curve_config.cooling_net_config.network_static
@@ -515,10 +619,12 @@ def dtemperature_dt(
     gamma: float,
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
     r"""
-    T_new = T - (gamma - 1) * rho * \mu / (mu_e * mu_H * k) * Lambda(T) * delta_t
-    (units absorbed in Lambda)
+    dT/dt = -(gamma - 1) * rho * Lambda(T) * prefactor
+    (units absorbed in Lambda; the prefactor carries the density convention,
+    see :func:`_volumetric_cooling_prefactor`)
     """
 
     # calculate the cooling rate
@@ -529,9 +635,12 @@ def dtemperature_dt(
     mu, mu_e, mu_H = get_effective_molecular_weights(
         hydrogen_mass_fraction,
         metal_mass_fraction,
+        mean_molecular_weight,
     )
 
-    return -(cooling_rate * (gamma - 1) * density * mu) / (mu_e * mu_H)
+    prefactor = _volumetric_cooling_prefactor(cooling_curve_config, mu, mu_e, mu_H)
+
+    return -cooling_rate * (gamma - 1) * density * prefactor
 
 
 @partial(jax.jit, static_argnames=("cooling_curve_config",))
@@ -544,9 +653,10 @@ def update_temperature_explicit(
     gamma: float,
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
     r"""
-    T_new = T - (gamma - 1) * rho * \mu / (mu_e * mu_H * k) * Lambda(T) * delta_t
+    T_new = T + dT/dt * delta_t, one forward-Euler step
     (units absorbed in Lambda)
     """
 
@@ -560,9 +670,123 @@ def update_temperature_explicit(
             gamma,
             cooling_curve_config,
             cooling_curve_params,
+            mean_molecular_weight,
         )
         * time_step
     )
+
+
+@partial(
+    jax.jit,
+    static_argnames=("cooling_curve_config", "max_subcycles"),
+)
+def update_temperature_subcycled(
+    density: FIELD_TYPE,
+    temperature: FIELD_TYPE,
+    time_step: float,
+    hydrogen_mass_fraction: float,
+    metal_mass_fraction: float,
+    gamma: float,
+    cooling_curve_config: CoolingCurveConfig,
+    cooling_curve_params: COOLING_CURVE_TYPE,
+    floor_temperature: float,
+    max_subcycles: int = 16,
+    max_fractional_temperature_change: float = 0.01,
+    mean_molecular_weight: float = 0.0,
+) -> FIELD_TYPE:
+    r"""Sub-cycled forward-Euler cooling over one hydro time step.
+
+    Each cell carries its own remaining time; a sub-cycle advances it by at most
+    ``max_fractional_temperature_change * T / |dT/dt|`` (Cholla's 1 % rule), so
+    stiff cells take many small steps while cold or slowly-cooling cells finish
+    immediately. A cell that has run out of time, has reached the floor, or is
+    not cooling at all is inactive and is left untouched.
+
+    The loop is a **fixed-trip-count** :func:`jax.lax.fori_loop` rather than a
+    ``lax.while_loop``: ``while_loop`` is not reverse-mode differentiable, and
+    this code sits in the per-step physics of an end-to-end differentiable
+    solver. A ``fori_loop`` lowers to ``scan`` and differentiates fine. The cost
+    is ``max_subcycles`` full array passes; with the cooling-time step limit in
+    place ~10 sub-cycles suffice, so the default 16 is generous.
+
+    Any residual time left after ``max_subcycles`` (a cell so stiff it did not
+    converge) is consumed in one final clipped Euler step, so the operator
+    always advances the full ``time_step``.
+
+    Args:
+        density: The density field.
+        temperature: The (rescaled) temperature field.
+        time_step: The time step to advance over.
+        hydrogen_mass_fraction: The hydrogen mass fraction X.
+        metal_mass_fraction: The metal mass fraction Z.
+        gamma: The adiabatic index.
+        cooling_curve_config: The static cooling-curve configuration.
+        cooling_curve_params: The cooling-curve parameters.
+        floor_temperature: The (rescaled) temperature floor.
+        max_subcycles: The fixed number of sub-cycles.
+        max_fractional_temperature_change: Largest fractional change per
+            sub-cycle.
+        mean_molecular_weight: Optional mean-molecular-weight override.
+
+    Returns:
+        The temperature after one full ``time_step`` of cooling, never below the
+        floor.
+    """
+
+    def _rate(T):
+        return dtemperature_dt(
+            density,
+            T,
+            hydrogen_mass_fraction,
+            metal_mass_fraction,
+            gamma,
+            cooling_curve_config,
+            cooling_curve_params,
+            mean_molecular_weight,
+        )
+
+    def body(_, carry):
+        T, dt_left = carry
+
+        rate = _rate(T)  # <= 0
+
+        active = (dt_left > 0.0) & (T > floor_temperature) & (rate < 0.0)
+
+        # A safe stand-in rate in the inactive cells keeps both the value and
+        # the tangent of the division finite.
+        safe_rate = jnp.where(active, rate, -1.0)
+        dt_limit = max_fractional_temperature_change * T / jnp.abs(safe_rate)
+
+        dt_sub = jnp.where(active, jnp.minimum(dt_left, dt_limit), 0.0)
+
+        T = jnp.where(
+            active, jnp.maximum(T + rate * dt_sub, floor_temperature), T
+        )
+
+        return T, jnp.where(active, dt_left - dt_sub, 0.0)
+
+    temperature, dt_left = jax.lax.fori_loop(
+        0,
+        max_subcycles,
+        body,
+        (temperature, jnp.full_like(temperature, time_step)),
+    )
+
+    # Consume whatever time is left in one clipped step, so the operator is
+    # always applied over the full dt even where the sub-cycles ran out.
+    residual_rate = _rate(temperature)
+    residual_active = (dt_left > 0.0) & (temperature > floor_temperature)
+    temperature = jnp.where(
+        residual_active,
+        jnp.maximum(
+            temperature + residual_rate * jnp.where(residual_active, dt_left, 0.0),
+            floor_temperature,
+        ),
+        temperature,
+    )
+
+    return temperature
+
 
 @partial(jax.jit, static_argnames=("cooling_curve_config",))
 def update_temperature_implicit(
@@ -574,6 +798,7 @@ def update_temperature_implicit(
     gamma: float,
     cooling_curve_config: CoolingCurveConfig,
     cooling_curve_params: COOLING_CURVE_TYPE,
+    mean_molecular_weight: float = 0.0,
 ) -> FIELD_TYPE:
 
     def implicit_eq(T_new):
@@ -586,6 +811,7 @@ def update_temperature_implicit(
             gamma,
             cooling_curve_config,
             cooling_curve_params,
+            mean_molecular_weight,
         ) * time_step)
 
     # use a simple fixed point iteration
@@ -640,6 +866,7 @@ def update_pressure_by_cooling(
     cooling_params = simulation_params.cooling_params
     hydrogen_mass_fraction = cooling_params.hydrogen_mass_fraction
     metal_mass_fraction = cooling_params.metal_mass_fraction
+    mean_molecular_weight = cooling_params.mean_molecular_weight
     gamma = simulation_params.gamma
 
     # get the density and pressure
@@ -652,6 +879,7 @@ def update_pressure_by_cooling(
         pressure,
         hydrogen_mass_fraction,
         metal_mass_fraction,
+        mean_molecular_weight,
     )
 
     if cooling_config.cooling_method == IMPLICIT_COOLING:
@@ -664,6 +892,7 @@ def update_pressure_by_cooling(
             gamma,
             cooling_curve_config,
             cooling_params.cooling_curve_params,
+            mean_molecular_weight,
         )
     elif cooling_config.cooling_method == EXPLICIT_COOLING:
         new_temperature = update_temperature_explicit(
@@ -675,15 +904,41 @@ def update_pressure_by_cooling(
             gamma,
             cooling_curve_config,
             cooling_params.cooling_curve_params,
+            mean_molecular_weight,
+        )
+    elif cooling_config.cooling_method == SUBCYCLED_EXPLICIT_COOLING:
+        new_temperature = update_temperature_subcycled(
+            density,
+            temperature,
+            time_step,
+            hydrogen_mass_fraction,
+            metal_mass_fraction,
+            gamma,
+            cooling_curve_config,
+            cooling_params.cooling_curve_params,
+            cooling_params.floor_temperature,
+            cooling_config.max_subcycles,
+            cooling_config.max_fractional_temperature_change,
+            mean_molecular_weight,
+        )
+    else:
+        raise ValueError(
+            f"Unknown cooling method: {cooling_config.cooling_method}"
         )
 
-    # Never let cooling push the temperature below the configured floor; where
-    # it would, keep the original temperature instead.
-    new_temperature = jnp.where(
-        (new_temperature > cooling_params.floor_temperature),
-        new_temperature,
-        temperature,
-    )
+    # Never let cooling push the temperature below the configured floor: either
+    # clamp to it, or (the historical default) keep the original temperature in
+    # the cells that would undershoot.
+    if cooling_config.floor_mode == COOLING_FLOOR_CLIP:
+        new_temperature = jnp.maximum(
+            new_temperature, cooling_params.floor_temperature
+        )
+    else:
+        new_temperature = jnp.where(
+            (new_temperature > cooling_params.floor_temperature),
+            new_temperature,
+            temperature,
+        )
 
     # update the pressure
     new_pressure = get_pressure_from_temperature(
@@ -691,6 +946,7 @@ def update_pressure_by_cooling(
         new_temperature,
         hydrogen_mass_fraction,
         metal_mass_fraction,
+        mean_molecular_weight,
     )
 
     # set the new pressure
@@ -700,6 +956,72 @@ def update_pressure_by_cooling(
 
     # return the updated primitive state
     return primitive_state
+
+@partial(jax.jit, static_argnames=("config", "registered_variables"))
+def cooling_time_step_limit(
+    primitive_state: STATE_TYPE,
+    config: SimulationConfig,
+    simulation_params: SimulationParams,
+    registered_variables: RegisteredVariables,
+) -> Float[Array, ""]:
+    """Timestep bound from the cooling time.
+
+    Returns ``max_thermal_energy_fraction * min(t_cool)`` over the grid, i.e.
+    the largest step in which no cell loses more than that fraction of its
+    thermal energy — the constraint Schneider & Robertson 2018 state for their
+    radiative runs ("no cell loses more than 10% of its thermal energy in a
+    given hydrodynamic time step").
+
+    Cells that do not cool contribute ``inf`` (see :func:`cooling_time`), so an
+    entirely non-cooling grid returns ``inf`` and the caller's ``jnp.minimum``
+    is a no-op.
+
+    Args:
+        primitive_state: The primitive state array.
+        config: The simulation configuration.
+        simulation_params: The simulation parameters.
+        registered_variables: The registered variables.
+
+    Returns:
+        The cooling-time bound on the hydro time step.
+    """
+
+    cooling_params = simulation_params.cooling_params
+
+    density = primitive_state[registered_variables.density_index]
+    pressure = primitive_state[registered_variables.pressure_index]
+
+    if config.positivity_config.clamp_in_estimates:
+        density = jnp.maximum(density, simulation_params.minimum_density)
+        pressure = jnp.maximum(pressure, simulation_params.minimum_pressure)
+
+    temperature = get_temperature_from_pressure(
+        density,
+        pressure,
+        cooling_params.hydrogen_mass_fraction,
+        cooling_params.metal_mass_fraction,
+        cooling_params.mean_molecular_weight,
+    )
+
+    t_cool = cooling_time(
+        density,
+        temperature,
+        cooling_params.hydrogen_mass_fraction,
+        cooling_params.metal_mass_fraction,
+        simulation_params.gamma,
+        config.cooling_config.cooling_curve_config,
+        cooling_params.cooling_curve_params,
+        cooling_params.mean_molecular_weight,
+    )
+
+    # Cells already at (or below) the floor are not cooled by the operator
+    # either, so they must not constrain the step.
+    t_cool = jnp.where(
+        temperature > cooling_params.floor_temperature, t_cool, jnp.inf
+    )
+
+    return cooling_params.max_thermal_energy_fraction * jnp.min(t_cool)
+
 
 # CURRENTLY NOT USED, THEREFORE WE DO NOT REQUIRE
 # HELPER_DATA FOR THE COOLING AT ALL

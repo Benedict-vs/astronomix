@@ -24,6 +24,21 @@ The PRNG key is stored as raw key data (``jax.random.key_data`` -> a plain
 uint32 array tensorstore can serialise) and rebuilt with
 ``jax.random.wrap_key_data`` on load. The OU forcing field is only written when
 present; its absence on load is reported as ``forcing = None``.
+
+Multi-process contract
+----------------------
+``Checkpointer.save`` / ``.restore`` are **collectives**: orbax runs the
+multihost handshake itself (save_start / save / finalize barriers via
+``multihost.sync_global_processes``, with the ``force=True`` rmtree and the
+atomic commit performed by the primary host only), and the barrier keys include
+a global operation-id counter. Every process must therefore reach every
+``save`` / ``restore`` / :func:`latest_step`, in the same order and the same
+number of times. **Never put these calls behind a rank guard** — a guard on one
+process deadlocks all the others. Rank-guard only the surrounding
+astronomix-side bookkeeping (directory cleanup, retention pruning, logging),
+and follow such a guard with a named barrier so it cannot race the collective.
+Every one of these barriers is a no-op at ``process_count == 1``, so
+single-process behaviour is unchanged.
 """
 
 # general
@@ -149,16 +164,35 @@ def save_loop_checkpoint(
 
 
 def latest_step(directory) -> Optional[int]:
-    """The most recent checkpoint step in ``directory``, or ``None`` if empty."""
-    root = Path(directory)
-    if not root.exists():
-        return None
-    steps = [
-        int(child.name)
-        for child in root.iterdir()
-        if child.is_dir() and child.name.isdigit()
-    ]
-    return max(steps) if steps else None
+    """The most recent checkpoint step in ``directory``, or ``None`` if empty.
+
+    Multi-process safe: the directory listing is taken on rank 0 and broadcast,
+    so a prune / write racing the listing on another rank cannot make two ranks
+    pick *different* steps — which would silently restore two different states
+    into one run, or number two segments' checkpoints differently.
+
+    This is a collective (a broadcast): every process must call it, in the same
+    order. Do NOT wrap it in a rank guard.
+    """
+    from astronomix.parallel import barrier, broadcast_from_primary, is_primary
+
+    def _scan() -> int:
+        root = Path(directory)
+        if not root.exists():
+            return -1
+        steps = [
+            int(child.name)
+            for child in root.iterdir()
+            if child.is_dir() and child.name.isdigit()
+        ]
+        return max(steps) if steps else -1
+
+    # Let every rank finish whatever it was doing to the directory before the
+    # scan, so the listing reflects a settled state on all of them.
+    barrier(f"astronomix:latest_step:enter:{directory}")
+    step = broadcast_from_primary(_scan() if is_primary() else -1)
+    step = int(step)
+    return None if step < 0 else step
 
 
 def _abstract_pytree(tree_metadata, sharding):
