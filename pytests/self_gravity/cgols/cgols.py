@@ -53,71 +53,218 @@ turbulence/mixing) and a slightly warmer, puffier central disk.
 # TODO: move all cgols related code and artifacts into tests/self_gravity_tests/cgols/
 # with seperate folder for benchmarks etc. everything neatly organised.
 
-# ==== GPU selection / multi-GPU domain decomposition ====
-from autocvd import autocvd
-
-# Domain decomposition across GPUs. SHARD_SPLIT is the number of shards along each
-# of the four state axes (variables, x, y, z); its product is the number of GPUs
-# used. 
-# (1, 1, 1, 1) is the original single-GPU path (no sharding)
-# (1, 2, 1, 1) splits the x-axis across 2 GPUs, roughly halving the ~28 GB/device peak;
-# (1, 1, 1, 2) splits z instead
-# Only split spatial axes (leave VARAXIS = 1). The split axis's cell count must
-# divide evenly by its shard count AND the per-device slice must stay divisible
-# by pallas_block_shape (4, 4, 8): e.g. x = 512 / 2 = 256 and 256 / 4 is exact,
-# so (1, 2, 1, 1) on the 512x512x1024 grid is valid.
-
-# All of the knobs below default to their literal values, so a plain
-# `python cgols.py` is unchanged; the scaling driver (cgols_scaling.py) sets the
-# CGOLS_* environment variables to sweep resolution / sharding / a short
-# fixed-step benchmark without editing this file.
-import ast
-import os
-import time
-
-SHARD_SPLIT = ast.literal_eval(os.environ.get("CGOLS_SHARD_SPLIT", "(1, 1, 1, 1)"))
-NUM_GPUS = SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3]
-
-# By default autocvd waits (indefinitely) for completely free GPUs. On a busy
-# shared node that can block forever; CGOLS_GPU_LEAST_USED=1 instead takes the
-# least-used GPU(s) right away. Meant for small runs (e.g. the 256^2x512 A/B
-# experiments, ~4 GB) that comfortably fit next to other jobs - don't use it to
-# squeeze the 512 production run (~28.5 GB) onto a partially occupied card.
-autocvd(
-    num_gpus=NUM_GPUS,
-    least_used=os.environ.get("CGOLS_GPU_LEAST_USED", "0") == "1",
-)
-# ruff: noqa: E402
-# =========================================================
-
+# ==== JAX runtime knobs (must precede EVERY jax import) ====
 # At 512x512x1024 the compiled solver peaks at ~28.5 GB/device, which fits on a
 # 40 GB A100 but exceeds JAX's default 0.75 preallocation (~30 GB) once BFC
 # fragmentation is accounted for. Raise the fraction so a ~20 GB intermediate
 # buffer can be placed. This fraction is applied PER DEVICE, so in a multi-GPU
 # (SHARD_SPLIT) run every visible GPU independently preallocates 0.95 of its own
 # memory - it is not a shared budget. setdefault lets a command-line override win.
+import ast
+import math
 import os
+import time
+
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+# ruff: noqa: E402
 
-import glob
-import shutil
+# ==== GPU selection / multi-GPU domain decomposition ====
+# Two launch models, auto-detected:
+#
+#   ONE PROCESS, N DEVICES (the default; `python cgols.py`). autocvd picks
+#     NUM_GPUS free GPUs on the node and jax drives all of them from one
+#     process. This is what the validated 512 / 1024 production runs used.
+#
+#   ONE PROCESS PER GPU (multi-node; `srun --gpu-bind=none python cgols.py`).
+#     Required from 2048 on, which no single node holds. Detected from
+#     SLURM_NTASKS > 1, or forced with CGOLS_DISTRIBUTED=1. autocvd is skipped
+#     (Slurm already assigned the GPUs) and jax.distributed.initialize() runs
+#     BEFORE astronomix is imported - see the _init_distributed note below.
+#
+# SHARD_SPLIT is the number of shards along each of the four state axes
+# (variables, x, y, z); its product is the number of GPUs used.
+#   (1, 1, 1, 1) is the original single-GPU path (no sharding)
+#   (1, 2, 1, 1) splits the x-axis across 2 GPUs, roughly halving the ~28 GB/device peak
+#   (1, 1, 1, 2) splits z instead
+# Only split spatial axes (leave VARAXIS = 1), and KEEP Z UNSHARDED: the IC's
+# vertical HSE integral is a cumsum along z, and a z-split lowers it to a
+# cross-device scan. Two constraints, both asserted in _validate_shard_split():
+# the split axis's cell count must divide evenly by its shard count, AND the
+# per-device slice must stay divisible by pallas_block_shape (4, 4, 8). Since
+# 2048/gx must be divisible by 4 and 4096/gz by 8, every shard count has to
+# divide 512 - i.e. it must be a power of two. That rules out 48 GPUs (the
+# accelerated-h200 12-node cap) and any 12/24/192-GPU configuration.
+#
+# Sizing for CGOLS_DIM=2048 (2048 x 2048 x 4096), A-series, no cooling; the
+# 1024/4xH200 run measured 140.2 GB/device and ~3.13 s/step:
+#
+#   GPUs  nodes    split          per-device slice   per-device cells   est. GB/device
+#     32  8 x 4    (1, 8, 4, 1)   256 x 512 x 4096   1.013x (padded)      ~127-129
+#     64  16 x 4   (1, 8, 8, 1)   256 x 256 x 4096   0.51x                 ~64-65
+#    128  32 x 4   (1, 16, 8, 1)  128 x 256 x 4096   0.26x                 ~32-34
+#
+# Production target: accelerated-h200, 8 nodes / 32 GPUs, (1, 8, 4, 1) - the
+# per-device memory and per-device work then nearly match the already-validated
+# 1024/4-GPU run. Prefer near-square gx ~ gy: the halo overhead
+# (nx+8)(ny+8)(nz+8)/(nx ny nz) is 4.9% at 256x512 but 19.8% at 64x128, so ~512
+# GPUs is the practical ceiling.
+#
+# All of the knobs below default to their literal values, so a plain
+# `python cgols.py` is unchanged; the scaling driver (cgols_scaling.py) sets the
+# CGOLS_* environment variables to sweep resolution / sharding / a short
+# fixed-step benchmark without editing this file.
 
-import jax
-import jax.numpy as jnp
-from jax.sharding import AxisType, PartitionSpec as P
-import numpy as np
+#: Per-device Pallas block shape; the per-device slice must stay a multiple
+#: of it on every axis (see _validate_shard_split and build_config).
+PALLAS_BLOCK_SHAPE = (4, 4, 8)
+
+# One process per GPU? Auto-detected, so a bare `python cgols.py` is unchanged
+# and any srun-launched run does the right thing without an extra knob.
+DISTRIBUTED = (
+    os.environ.get("CGOLS_DISTRIBUTED", "") == "1"
+    or int(os.environ.get("SLURM_NTASKS", "1")) > 1
+)
+
+_SHARD_SPLIT_ENV = os.environ.get("CGOLS_SHARD_SPLIT", "")
+
+
+def _auto_shard_split(num_devices):
+    """A near-square (1, gx, gy, 1) split of ``num_devices``, z unsharded.
+
+    Used when a distributed run does not set CGOLS_SHARD_SPLIT, so the runner
+    only has to choose nodes x tasks-per-node and the script is portable across
+    machines. ``num_devices`` must be a power of two (see the note above);
+    the halves are handed to x first, so 32 -> (1, 8, 4, 1).
+    """
+    gx = gy = 1
+    for _ in range(num_devices.bit_length()):
+        if gx * gy == num_devices:
+            break
+        if gx <= gy:
+            gx *= 2
+        else:
+            gy *= 2
+    return (1, gx, gy, 1)
+
+
+if DISTRIBUTED:
+    # jax.distributed.initialize() must run before ANY call that creates the
+    # JAX backend - and `import astronomix` creates it (some option NamedTuples
+    # have jnp.array defaults). So bootstrap with RAW jax here, inline, rather
+    # than via astronomix.parallel.init_distributed: importing that goes
+    # through astronomix/__init__.py, after which initialize() fails with
+    # "must be called before any JAX calls". (The same warning is in
+    # astronomix/parallel/distributed.py's own NOTE.)
+    import jax
+
+    def _init_distributed():
+        """Bootstrap multi-process mode; a no-op when launched single-process.
+
+        Robust to both Slurm GPU-binding modes: with --gpu-bind=none all of a
+        node's GPUs are visible and this rank selects its device by node-local
+        rank (SLURM_LOCALID); with a single cgroup-bound GPU it falls back to
+        the only visible device (ordinal 0). Launch with --gpu-bind=none:
+        --gpus-per-task=1 breaks intra-node NCCL P2P and deadlocks the topology
+        exchange with "invalid device ordinal".
+        """
+        multiprocess = (
+            int(os.environ.get("SLURM_NTASKS", "1")) > 1
+            or int(os.environ.get("OMPI_COMM_WORLD_SIZE", "1")) > 1
+        )
+        if not multiprocess:
+            return
+        visible = [
+            d for d in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if d
+        ]
+        local_rank = int(
+            os.environ.get("SLURM_LOCALID")
+            or os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+            or "0"
+        )
+        local_device_ids = [local_rank] if len(visible) > 1 else [0]
+        jax.distributed.initialize(local_device_ids=local_device_ids)
+
+    _init_distributed()
+
+    # The allocation, not the split, decides how many devices there are; an
+    # explicit CGOLS_SHARD_SPLIT is validated against it below.
+    SHARD_SPLIT = (
+        ast.literal_eval(_SHARD_SPLIT_ENV)
+        if _SHARD_SPLIT_ENV
+        else _auto_shard_split(jax.device_count())
+    )
+else:
+    SHARD_SPLIT = ast.literal_eval(_SHARD_SPLIT_ENV or "(1, 1, 1, 1)")
+
+    # By default autocvd waits (indefinitely) for completely free GPUs. On a busy
+    # shared node that can block forever; CGOLS_GPU_LEAST_USED=1 instead takes the
+    # least-used GPU(s) right away. Meant for small runs (e.g. the 256^2x512 A/B
+    # experiments, ~4 GB) that comfortably fit next to other jobs - don't use it to
+    # squeeze the 512 production run (~28.5 GB) onto a partially occupied card.
+    from autocvd import autocvd
+
+    autocvd(
+        num_gpus=SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3],
+        least_used=os.environ.get("CGOLS_GPU_LEAST_USED", "0") == "1",
+    )
+    import jax
+
+NUM_GPUS = SHARD_SPLIT[0] * SHARD_SPLIT[1] * SHARD_SPLIT[2] * SHARD_SPLIT[3]
 
 # astronomix names its mesh axes with integers (VARAXIS=0, XAXIS=1, ...). jax
 # 0.10.1 defaults to the Shardy partitioner, whose sdy.MeshAxisAttr.get(name,
 # size) requires name to be a *str* and raises a TypeError on the integer axis
 # names. The older GSPMD partitioner accepts them, so disable Shardy for the
 # sharded run. (Harmless on the single-GPU path, which never builds a mesh.)
+# Set AFTER the distributed init - touching jax.config beforehand can create the
+# backend early. The runner also exports JAX_USE_SHARDY_PARTITIONER=false so this
+# holds regardless of import ordering.
 if NUM_GPUS > 1:
     jax.config.update("jax_use_shardy_partitioner", False)
+
+if NUM_GPUS != jax.device_count():
+    raise SystemExit(
+        f"CGOLS_SHARD_SPLIT={SHARD_SPLIT} asks for NUM_GPUS={NUM_GPUS} devices but "
+        f"jax.device_count()={jax.device_count()} (global, across all "
+        f"{jax.process_count()} process(es)). Under srun the split's product must "
+        f"equal nodes x ntasks-per-node."
+    )
+
+#: True on the one process allowed to do host-side I/O (prints, figures, file
+#: cleanup). Always True in a single-process run, so nothing changes there.
+#: Never guard a COLLECTIVE with this (an Orbax save/restore, a barrier) - that
+#: deadlocks every other rank; guard only this script's own side effects.
+RANK0 = jax.process_index() == 0
+
+
+def rprint(*args, **kwargs):
+    """``print`` on rank 0 only.
+
+    Every rank runs this whole script, so an unguarded print is emitted
+    ``process_count`` times into one interleaved job log. Everything printed
+    here is either a global reduction or a config echo, i.e. identical on all
+    ranks, so rank 0's copy is the complete record. Single-process runs are
+    unaffected.
+    """
+    if RANK0:
+        print(*args, **kwargs)
+
+
+import glob
+import shutil
+
+import jax.numpy as jnp
+from jax.sharding import AxisType, PartitionSpec as P
+import numpy as np
 
 import astropy.constants as const
 from astropy import units as u
 
+import matplotlib
+
+# Headless by construction: batch ranks have no display, and importing pyplot
+# with an interactive backend under srun can hang on the X/Qt probe.
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from astronomix import (
@@ -126,7 +273,6 @@ from astronomix import (
     SimulationConfig,
     SimulationParams,
     construct_primitive_state,
-    get_helper_data,
     get_registered_variables,
     restart_from_latest_checkpoint,
     time_integration,
@@ -167,8 +313,63 @@ from astronomix._modules._cooling.cooling_options import (
     CoolingCurveConfig,
     CoolingParams,
 )
+from astronomix.parallel import barrier
 
 jax.config.update("jax_enable_x64", False)
+
+if jax.process_count() > 1:
+    rprint(
+        f"[distributed] processes={jax.process_count()} "
+        f"global_devices={jax.device_count()} "
+        f"local_devices/proc={jax.local_device_count()} "
+        f"split={SHARD_SPLIT}"
+        + ("" if _SHARD_SPLIT_ENV else " (auto)"),
+        flush=True,
+    )
+
+
+def _validate_shard_split(split, num_cells):
+    """Check SHARD_SPLIT against the grid and the Pallas block shape.
+
+    ``num_cells`` is the (nx, ny, nz) global cell count. Two hard constraints
+    per spatial axis: the axis must divide evenly by its shard count, and the
+    resulting per-device slice must stay a multiple of ``PALLAS_BLOCK_SHAPE`` -
+    the Pallas kernels are compiled for whole blocks, and a ragged remainder
+    silently produces wrong halo values rather than an error. Together these
+    force every shard count to be a power of two at the production grid sizes,
+    which is why 48 GPUs (the accelerated-h200 12-node cap) cannot be used.
+
+    Raises SystemExit with the offending axis named; called before any device
+    memory is committed so a bad launch fails in seconds, not after an hour of
+    queueing plus a compile.
+    """
+    if split[0] != 1:
+        raise SystemExit(
+            f"CGOLS_SHARD_SPLIT={split}: the variable axis must not be split "
+            "(the solver's per-variable kernels assume all variables are local)."
+        )
+    if split[3] != 1:
+        raise SystemExit(
+            f"CGOLS_SHARD_SPLIT={split}: keep z unsharded - the IC's vertical "
+            "HSE pressure integral is a cumsum along z, which a z-split lowers "
+            "to a cross-device scan."
+        )
+    for axis, name in enumerate("xyz"):
+        shards = split[axis + 1]
+        cells = num_cells[axis]
+        block = PALLAS_BLOCK_SHAPE[axis]
+        if shards < 1 or cells % shards:
+            raise SystemExit(
+                f"CGOLS_SHARD_SPLIT={split}: {name} has {cells} cells, which is "
+                f"not divisible by its {shards} shards."
+            )
+        if (cells // shards) % block:
+            raise SystemExit(
+                f"CGOLS_SHARD_SPLIT={split}: the per-device {name} slice is "
+                f"{cells // shards} cells, not a multiple of the Pallas block "
+                f"size {block} (pallas_block_shape={PALLAS_BLOCK_SHAPE}). "
+                f"{name} shard counts must divide {cells // block}."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -190,11 +391,23 @@ def _here(name):
     return os.path.join(SCRIPT_DIR, name)
 
 
+_CREATED_DIRS = set()
+
+
 def _in_dir(subdir, name):
     """Resolve ``name`` against ``SCRIPT_DIR/subdir`` (created on demand);
-    pass-through if ``name`` is absolute."""
+    pass-through if ``name`` is absolute.
+
+    The ``makedirs`` runs on rank 0 only, and at most once per directory: every
+    rank calls these path helpers, so an unguarded version fires 32 simultaneous
+    ``mkdir``s per directory at every call site on a Lustre filesystem. Rank 0
+    is also the only rank that writes into these directories (see RANK0 /
+    rprint), so there is nothing for the others to wait for.
+    """
     out_dir = _here(subdir)
-    os.makedirs(out_dir, exist_ok=True)
+    if RANK0 and out_dir not in _CREATED_DIRS:
+        os.makedirs(out_dir, exist_ok=True)
+        _CREATED_DIRS.add(out_dir)
     return os.path.join(out_dir, name)
 
 
@@ -279,6 +492,27 @@ CREATE_IC = os.environ.get("CGOLS_CREATE_IC", "0") == "1"  # build the initial c
 
 # Resolution
 RESOLUTION = int(os.environ.get("CGOLS_DIM", "512"))  # cells along the x/y axes; z is always 2x this
+
+# Now that the grid is known, check the split. Done here rather than at parse
+# time so the error names the actual cell counts.
+_validate_shard_split(SHARD_SPLIT, (RESOLUTION, RESOLUTION, 2 * RESOLUTION))
+
+# How the initial conditions are obtained:
+#   "file"   - build once with CGOLS_CREATE_IC=1, then jnp.load the .npy pair.
+#              The validated path for every run up to 1024.
+#   "insitu" - build them in-process, inside a jit with out_shardings, every
+#              run. At 2048 the .npy pair would be 344 + 69 GB, jnp.load
+#              materialises them on ONE host, there is no sharded loader, and
+#              the eager builder would need ~720 GB of host RAM. The build is
+#              cheap next to a 48 h leg.
+# Defaults to insitu exactly where the file path stops working, so DIM <= 1024,
+# run_ic_horeka.sh and every analysis script are untouched.
+IC_MODE = os.environ.get(
+    "CGOLS_IC_MODE", "insitu" if (RESOLUTION >= 2048 or DISTRIBUTED) else "file"
+)
+if IC_MODE not in ("file", "insitu"):
+    raise SystemExit(f"CGOLS_IC_MODE must be 'file' or 'insitu', got {IC_MODE!r}")
+INSITU_IC = IC_MODE == "insitu"
 
 # Suffix for the IC .npy filenames. Defaults to the resolution (_d512, _d1024,
 # ...), so runs at different resolutions never overwrite each other's initial
@@ -699,10 +933,10 @@ def build_config():
     dim_x = dim_y = RESOLUTION
     dim_z = dim_x * 2
 
-    print(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
+    rprint(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
 
     if COOLING:
-        print(
+        rprint(
             f"Radiative cooling ON (B-series): CIE parabolic curve, n^2 Lambda at "
             f"mu = {mu}, floor {COOLING_FLOOR_K:.3g} K "
             f"(= {_kelvin_to_code_temperature(COOLING_FLOOR_K):.3e} code), "
@@ -720,16 +954,25 @@ def build_config():
             + f"outputs tagged {RUN_TAG!r}"
         )
     else:
-        print("Radiative cooling OFF (adiabatic A-series); set CGOLS_COOLING=1 for the B-series")
+        rprint("Radiative cooling OFF (adiabatic A-series); set CGOLS_COOLING=1 for the B-series")
 
     config = SimulationConfig(
         memory_analysis=True,
-        # Build the padded helper data (geometric_centers and friends) in host
-        # RAM and transfer it sharded. Built eagerly on GPU 0 instead, the
-        # (3, 1032, 1032, 2056) meshgrid + its moveaxis copy are 2 x 24.5 GiB
-        # on ONE device before the solver even starts - that OOM'd the 1024
-        # production run on a 141 GB H200 (job 4635570).
-        host_helper_data=True,
+        # Build the padded helper data (here: only `r`, the cell-to-box-center
+        # distance the CGOLS wind needs) in host RAM and transfer it sharded.
+        # Built eagerly on GPU 0 instead, the (3, 1032, 1032, 2056) meshgrid +
+        # its moveaxis copy were 2 x 24.5 GiB on ONE device before the solver
+        # even started - that OOM'd the 1024 production run on a 141 GB H200
+        # (job 4635570).
+        #
+        # In the insitu regime this flips to False: `r` is then built inside a
+        # jit with out_shardings, so each PROCESS only materialises its own
+        # shard. At 2048 the host path would put a full 69 GB `r` in every
+        # rank's host RAM (~276 GB per 4-GPU node) - and the meshgrid blow-up
+        # is gone anyway, since get_helper_data now derives `r` from broadcast
+        # 1D axes. Left True below 2048 so every validated run keeps its exact
+        # (eagerly built, bit-identical) geometry.
+        host_helper_data=not INSITU_IC,
         geometry=CARTESIAN,
         solver_mode=FINITE_DIFFERENCE,
         # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven shocks,
@@ -739,7 +982,7 @@ def build_config():
         time_integrator=RK4_LSRK,
         backend_config=BackendConfig(
             backend=PALLAS,
-            pallas_block_shape=(4, 4, 8),
+            pallas_block_shape=PALLAS_BLOCK_SHAPE,
             pallas_use_triton=True,
             pallas_interpret=False,
         ),
@@ -777,6 +1020,12 @@ def build_config():
         fixed_timestep=bool(BENCH_STEPS),
         num_timesteps=(BENCH_STEPS if BENCH_STEPS else 1000),
         print_elapsed_time=bool(BENCH_STEPS),
+        # NB deliberately NOT `and RANK0`: config is a static argument to the
+        # jitted solver, so a rank-dependent flag would compile a *different*
+        # program on rank 0 than on the other ranks - invalid under
+        # multi-process pjit. The duplicate output is suppressed inside the
+        # library instead (time_stepping/_progress_bar.py rank-guards the host
+        # side of both callbacks), which keeps every rank's program identical.
         progress_bar=(not BENCH_STEPS),
         monitor_diagnostics=(not BENCH_STEPS),
         # Outflow-only ("diode") boundaries on all six faces, as in the paper:
@@ -847,21 +1096,137 @@ def build_config():
             else {}
         ),
     )
+    # Derive the scalar grid spacing HERE. finalize_config does it too, but only
+    # once the state shape is known - until then the field still holds the
+    # SimulationConfig default (0.0025), which is nothing like this box's
+    # 10 kpc / dim. Everything in this file that reads config.grid_spacing (the
+    # analytic IC coordinates in _ic_axes, the IC diagnostics) necessarily runs
+    # BEFORE finalize_config, and silently building the IC on a 0.0025 grid
+    # produces a plausible-looking but completely wrong initial state.
+    config = config._replace(grid_spacing=(config.box_size / config.num_cells).x)
+
     registered_variables = get_registered_variables(config)
     return config, registered_variables
 
 
-def build_initial_conditions():
-    """Build the simulation IC and return the four objects time_integration needs.
+def _replicate(x, sharding):
+    """Pin ``x`` to a fully replicated sharding (no-op without a sharding).
 
-    Memory layout: at any moment only a handful of 3D fields are alive on the GPU.
-    Intermediates (cutoff, Sigma, exp_factor, bracket, Phi_disk_sph, Phi_sph, the
-    pressure components, the pressure gradients, ...) are deleted as soon as
-    their last consumer is done. The 3D Phi_disk / Phi_halo arrays are never
-    materialised - the rotation-curve diagnostic is computed on a 1D midplane
-    line instead.
+    Used on the small 1D/scalar outputs of the jitted IC build: the all-gather
+    then happens INSIDE the jit, where it is legal, and the host gets the
+    global array rather than one device's shard.
     """
-    config, registered_variables = build_config()
+    if sharding is None:
+        return x
+    return jax.lax.with_sharding_constraint(x, jax.NamedSharding(sharding.mesh, P()))
+
+
+def _ic_axes(config):
+    """The three box-centered 1D cell-center axes, in code units.
+
+    Reproduces the unpadded (``ngc = 0``) 3D-Cartesian branch of astronomix's
+    ``_build_helper_data``, so an in-situ IC stays bit-comparable with one built
+    from ``get_helper_data(config).geometric_centers``. These arrays are tiny
+    (``N``, not ``N^3``) and stay replicated; every diagnostic line below is
+    taken from them rather than by indexing a sharded 3D field.
+    """
+    gs = config.grid_spacing
+    nx, ny, nz = config.num_cells.x, config.num_cells.y, config.num_cells.z
+    L_x, L_y, L_z = config.box_size.x, config.box_size.y, config.box_size.z
+    # Guard against an un-normalised config reaching here: SimulationConfig's
+    # grid_spacing default is 0.0025, and a wrong spacing does not fail loudly -
+    # it silently builds the disk on the wrong grid. build_config() sets it, and
+    # finalize_config re-derives the same value.
+    if not math.isclose(gs, L_x / nx, rel_tol=1e-6):
+        raise ValueError(
+            f"config.grid_spacing={gs} does not match box_size/num_cells="
+            f"{L_x / nx} - the config was not normalised (see build_config)."
+        )
+    return (
+        jnp.linspace(gs / 2, L_x + gs / 2, nx, endpoint=False) - L_x / 2,
+        jnp.linspace(gs / 2, L_y + gs / 2, ny, endpoint=False) - L_y / 2,
+        jnp.linspace(gs / 2, L_z + gs / 2, nz, endpoint=False) - L_z / 2,
+    )
+
+
+def _ic_coordinates(config, sharding):
+    """The box-centered ``(X_c, Y_c, Z_c)`` meshgrid, sharded like the state.
+
+    The sharding constraint is applied to the stacked coordinates *immediately*,
+    before any field is evaluated, so the global meshgrid is never formed on one
+    device and (multi-process) each process only materialises its own shard.
+    This is the ``test_setups/hydrodynamics/sound_wave3D.py`` pattern.
+    """
+    x1, y1, z1 = _ic_axes(config)
+    X_c, Y_c, Z_c = jnp.meshgrid(x1, y1, z1, indexing="ij")
+    if sharding is not None:
+        # Leading stack axis replicated; X/Y/Z onto the same mesh axes as the
+        # primitive state (drop its leading vars entry).
+        X_c, Y_c, Z_c = jax.lax.with_sharding_constraint(
+            jnp.stack([X_c, Y_c, Z_c]),
+            jax.NamedSharding(sharding.mesh, P(None, *sharding.spec[1:4])),
+        )
+    return X_c, Y_c, Z_c
+
+
+def _external_potential_fields(config, sharding):
+    """``Phi_total`` on the full grid — the static Miyamoto-Nagai + NFW potential."""
+    X_c, Y_c, Z_c = _ic_coordinates(config, sharding)
+    dx = config.grid_spacing
+    R_cyl = jnp.maximum(jnp.sqrt(X_c**2 + Y_c**2), 0.25 * dx)
+    r_sph = jnp.maximum(jnp.sqrt(X_c**2 + Y_c**2 + Z_c**2), 0.25 * dx)
+    return Phi_disk_function(R_cyl, Z_c) + Phi_halo_function(r_sph)
+
+
+def build_external_potential(config, sharding=None):
+    """The external potential alone, built (optionally) straight into its shards.
+
+    This is all a RESTART leg needs: the state comes from the Orbax checkpoint,
+    so building the full IC only to throw it away costs ~344 GB of pointless
+    work at 2048.
+    """
+    if sharding is None:
+        return _external_potential_fields(config, None)
+    spatial = jax.NamedSharding(sharding.mesh, P(*sharding.spec[1:4]))
+    return jax.jit(
+        lambda: _external_potential_fields(config, sharding), out_shardings=spatial
+    )()
+
+
+def _build_ic_fields(config, registered_variables, Phi_total, sharding):
+    """Assemble the initial primitive state and the IC diagnostics.
+
+    ``Phi_total`` is passed in rather than recomputed so that the potential a
+    RESTART leg builds (via :func:`build_external_potential` alone) is
+    bit-identical to the one a fresh leg used: two different jits computing the
+    same expression get fused differently by XLA and agree only to ~1e-7, which
+    would silently break "a resumed run reproduces an uninterrupted one".
+    Splitting the build in two also keeps either jit's live set smaller.
+
+    Pure and jittable: no prints, no plots, no host syncs — every diagnostic is
+    returned as a (replicated) array instead, so this whole function can run
+    inside one ``jax.jit`` with ``out_shardings`` and each device builds only
+    its own shard of a 344 GB state. See :func:`build_initial_conditions` for
+    the driver and :func:`plot_ic_diagnostics` for the eager, rank-0 rendering.
+
+    Memory layout: at any moment only a handful of 3D fields are alive.
+    Intermediates (cutoff, Sigma, exp_factor, bracket, Phi_sph, the pressure
+    components, the pressure gradients, ...) are deleted as soon as their last
+    consumer is done — which matters on the eager path and is a no-op under jit,
+    where XLA does its own liveness analysis. The 3D Phi_disk / Phi_halo arrays
+    are never materialised.
+
+    Sharding notes for the operations that are not plain elementwise maps:
+      * ``vertical_hse_pressure``'s ``jnp.gradient`` / ``jnp.cumsum`` run along
+        z, which is why z must stay UNSHARDED (a z-split lowers the cumsum to a
+        cross-device scan).
+      * ``_gaussian_smooth_3d`` needs a 6-cell halo on the split x/y axes;
+        GSPMD inserts it, the same machinery as the solver's WENO halo. It is
+        the deepest stencil in the codebase.
+      * ``Phi_total[:, :, mid_z]`` indexes only the unsharded z axis - safe.
+      * every 1D diagnostic line is built from the replicated axis arrays, not
+        by indexing into a sharded 3D field.
+    """
     L_x = config.box_size.x
     L_y = config.box_size.y
     L_z = config.box_size.z
@@ -869,17 +1234,14 @@ def build_initial_conditions():
     dim_y = config.num_cells.y
     dim_z = config.num_cells.z
 
-    helper_data = get_helper_data(config)
-    centers = helper_data.geometric_centers  # shape (dim_x, dim_y, dim_z, 3)
+    x1, y1, z1 = _ic_axes(config)
+    X_c, Y_c, Z_c = _ic_coordinates(config, sharding)
 
-    # Shift origin to box center; derive scalar cell sizes; drop the unshifted views.
-    X_c = centers[..., 0] - L_x / 2
-    Y_c = centers[..., 1] - L_y / 2
-    Z_c = centers[..., 2] - L_z / 2
-    dx = float(X_c[1, 0, 0] - X_c[0, 0, 0])
-    dy = float(Y_c[0, 1, 0] - Y_c[0, 0, 0])
-    dz = float(Z_c[0, 0, 1] - Z_c[0, 0, 0])
-    del centers, helper_data
+    # The exact fp64 cell size, not an fp32 difference of two coordinates.
+    # finalize_config asserts the spacing is equal on all three axes in 3D
+    # (simulation_config.py), and reading it here avoids a host sync plus a
+    # gather on what is now a sharded axis.
+    dx = dy = dz = config.grid_spacing
 
     # Cylindrical and spherical radii (code units), floored to avoid divide-by-zero.
     R_cyl = jnp.maximum(jnp.sqrt(X_c**2 + Y_c**2), 0.25 * dx)
@@ -888,9 +1250,6 @@ def build_initial_conditions():
     mid_x = dim_x // 2
     mid_y = dim_y // 2
     mid_z = dim_z // 2
-
-    # ---- Total potential (full 3D Phi_disk / Phi_halo never materialised) ----
-    Phi_total = Phi_disk_function(R_cyl, Z_c) + Phi_halo_function(r_sph)
 
     # ---- Constants needed for both gas components ----
     k_B_code = k_B.to(code_units.code_energy / u.K).value
@@ -951,14 +1310,19 @@ def build_initial_conditions():
     del bracket, r_sph
 
     # ---- Vertical resolution diagnostic (only needs Phi_total + scalars) ----
-    phi_col = Phi_total[mid_x, mid_y, :]
+    # Recomputed analytically on the central column rather than sliced out of
+    # Phi_total: Phi_total[mid_x, mid_y, :] is an integer index into TWO sharded
+    # axes. Identical arithmetic on identical inputs, so identical values - the
+    # central column sits at (dx/2, dy/2), half a cell off the axis, exactly as
+    # the 3D field has it.
+    R_cyl_col = jnp.maximum(jnp.sqrt(x1[mid_x] ** 2 + y1[mid_y] ** 2), 0.25 * dx)
+    r_sph_col = jnp.maximum(
+        jnp.sqrt(x1[mid_x] ** 2 + y1[mid_y] ** 2 + z1**2), 0.25 * dx
+    )
+    phi_col = Phi_disk_function(R_cyl_col, z1) + Phi_halo_function(r_sph_col)
     d2Phi_dz2_mid = jnp.gradient(jnp.gradient(phi_col, dz), dz)[mid_z]
     H_gas = c_s_d / jnp.sqrt(jnp.maximum(d2Phi_dz2_mid, 1e-30))
-    pc_per_code = code_length.to(u.pc).value
-    print(f"Cell size dz               = {dz * pc_per_code:8.1f} pc")
-    print(f"Central gas scale height H = {float(H_gas) * pc_per_code:8.1f} pc")
-    print(f"Cells per gas scale height = {float(H_gas) / dz:8.2f}")
-    del phi_col
+    del phi_col, R_cyl_col, r_sph_col
 
     # ---- Branch on smoothing: build (rho_total, P_total, v_phi, ux, uy, uz) ----
     # Smoothed path: linear smoothing of rho_total (= smooth(rho_disk)+smooth(rho_halo)),
@@ -992,8 +1356,6 @@ def build_initial_conditions():
         del dPhi_dR, dP_dR
         v_phi = jnp.sqrt(jnp.maximum(a_phi * R_cyl, 0.0))
         del a_phi
-
-        print(f"Applied HSE-preserving smoothing: sigma = {SMOOTHING_SIGMA_CELLS} cells")
     else:
         rho_total = rho_disk + rho_halo
         # Build P_total without ever holding both 3D pressure components.
@@ -1035,13 +1397,94 @@ def build_initial_conditions():
     ux = -v_phi * Y_c / R_cyl
     uy = v_phi * X_c / R_cyl
     uz = jnp.zeros_like(ux)
-    del v_phi, R_cyl
+    del v_phi, R_cyl, X_c, Y_c, Z_c
 
-    print(f"P_total min: {P_total.min():.3e} code units")
-    print(f"P_total max: {P_total.max():.3e} code units")
+    # ---- Diagnostics: 1D profile lines + reduction scalars ----------------
+    # Returned instead of printed/plotted, so this function stays jittable.
+    # Each is forced to a replicated sharding, i.e. the all-gather happens here,
+    # inside the jit, rather than being an illegal gather on the host.
+    code_density_cgs = (code_mass / code_length**3).to(u.g / u.cm**3).value
+    m_p_cgs = m_p.to(u.g).value
+    n_factor = code_density_cgs / (mu * m_p_cgs)
+
+    rho_mid = rho_total[mid_x:, mid_y, mid_z]
+    rho_zax = rho_total[mid_x, mid_y, mid_z:]
+    P_mid = P_total[mid_x:, mid_y, mid_z]
+    P_zax = P_total[mid_x, mid_y, mid_z:]
+
+    diagnostics = {
+        "H_gas": H_gas,
+        "P_total_min": P_total.min(),
+        "P_total_max": P_total.max(),
+        "density_min": rho_total.min(),
+        "density_max": rho_total.max(),
+        "velocity_x_min": ux.min(),
+        "velocity_x_max": ux.max(),
+        "velocity_y_min": uy.min(),
+        "velocity_y_max": uy.max(),
+        "velocity_z_min": uz.min(),
+        "velocity_z_max": uz.max(),
+        "pressure_min": P_total.min(),
+        "pressure_max": P_total.max(),
+        "n_midplane": rho_mid * n_factor,
+        "n_zaxis": rho_zax * n_factor,
+        "T_midplane": P_mid / rho_mid * T_factor,
+        "T_zaxis": P_zax / rho_zax * T_factor,
+    }
+    diagnostics = {k: _replicate(v, sharding) for k, v in diagnostics.items()}
+    del rho_mid, rho_zax, P_mid, P_zax
+
+    initial_state = construct_primitive_state(
+        config=config,
+        registered_variables=registered_variables,
+        density=rho_total,
+        velocity_x=ux,
+        velocity_y=uy,
+        velocity_z=uz,
+        gas_pressure=P_total,
+        sharding=sharding,
+    )
+    del rho_total, ux, uy, uz, P_total
+
+    return initial_state, diagnostics
+
+
+def plot_ic_diagnostics(config, diagnostics):
+    """Print the IC summary and render the two IC figures. Rank 0, eager.
+
+    Takes the (already gathered, host-resident) diagnostics returned by
+    :func:`_build_ic_fields`; the rotation curve is analytic and is simply
+    recomputed here rather than carried out of the jit.
+    """
+    if not RANK0:
+        return
+
+    x1, _, z1 = _ic_axes(config)
+    dx = dz = config.grid_spacing
+    mid_x = config.num_cells.x // 2
+    mid_z = config.num_cells.z // 2
+    pc_per_code = code_length.to(u.pc).value
+    H_gas = float(diagnostics["H_gas"])
+
+    rprint(f"Cell size dz               = {dz * pc_per_code:8.1f} pc")
+    rprint(f"Central gas scale height H = {H_gas * pc_per_code:8.1f} pc")
+    rprint(f"Cells per gas scale height = {H_gas / dz:8.2f}")
+    if SMOOTHING_SIGMA_CELLS > 0:
+        rprint(
+            f"Applied HSE-preserving smoothing: sigma = {SMOOTHING_SIGMA_CELLS} cells"
+        )
+    rprint(f"P_total min: {float(diagnostics['P_total_min']):.3e} code units")
+    rprint(f"P_total max: {float(diagnostics['P_total_max']):.3e} code units")
+    for name in ("density", "velocity_x", "velocity_y", "velocity_z", "pressure"):
+        rprint(
+            f"Initial {name + ' min:':<15} {float(diagnostics[name + '_min']):.3e}"
+        )
+        rprint(
+            f"Initial {name + ' max:':<15} {float(diagnostics[name + '_max']):.3e}"
+        )
 
     # ---- Diagnostic plot: rotation curve (midplane), from 1D potential slices ----
-    x_full = X_c[:, mid_y, mid_z]
+    x_full = x1
     r_line = jnp.maximum(jnp.abs(x_full), 0.25 * dx)
     z_zero = jnp.zeros_like(r_line)
     Phi_disk_line = Phi_disk_function(r_line, z_zero)
@@ -1071,25 +1514,15 @@ def build_initial_conditions():
     plt.tight_layout()
     plt.savefig(_fig(f"cgols_rotation_curve{IC_TAG}.png"), dpi=300)
     plt.close(fig)
-    del r_line, z_zero, Phi_disk_line, Phi_halo_line
-    del dPhi_disk_dx, dPhi_halo_dx, dPhi_total_dx
-    del v_disk_rot, v_halo_rot, v_total_rot
 
     # ---- Diagnostic plot: density and temperature profiles ----
-    code_density_cgs = (code_mass / code_length**3).to(u.g / u.cm**3).value
-    m_p_cgs = m_p.to(u.g).value
-
-    R_kpc = jnp.sqrt(X_c[mid_x:, mid_y, mid_z] ** 2 + Y_c[mid_x:, mid_y, mid_z] ** 2)
-    z_kpc = Z_c[mid_x, mid_y, mid_z:]
-
-    n_midplane = rho_total[mid_x:, mid_y, mid_z] * code_density_cgs / (mu * m_p_cgs)
-    n_zaxis = rho_total[mid_x, mid_y, mid_z:] * code_density_cgs / (mu * m_p_cgs)
-    T_midplane = P_total[mid_x:, mid_y, mid_z] / rho_total[mid_x:, mid_y, mid_z] * T_factor
-    T_zaxis = P_total[mid_x, mid_y, mid_z:] / rho_total[mid_x, mid_y, mid_z:] * T_factor
+    y_mid = _ic_axes(config)[1][config.num_cells.y // 2]
+    R_kpc = jnp.sqrt(x1[mid_x:] ** 2 + y_mid**2)
+    z_kpc = z1[mid_z:]
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 10))
-    ax1.plot(R_kpc, n_midplane, "b--", linewidth=2, label="xy-plane")
-    ax1.plot(z_kpc, n_zaxis, "r:", linewidth=2, label="z-axis")
+    ax1.plot(R_kpc, diagnostics["n_midplane"], "b--", linewidth=2, label="xy-plane")
+    ax1.plot(z_kpc, diagnostics["n_zaxis"], "r:", linewidth=2, label="z-axis")
     ax1.set_xscale("log")
     ax1.set_yscale("log")
     ax1.set_xlim(1e-2, 1e1)
@@ -1099,8 +1532,8 @@ def build_initial_conditions():
     ax1.legend()
     ax1.set_title("Density profiles")
 
-    ax2.plot(R_kpc, T_midplane, "b--", linewidth=2, label="xy-plane")
-    ax2.plot(z_kpc, T_zaxis, "r:", linewidth=2, label="z-axis")
+    ax2.plot(R_kpc, diagnostics["T_midplane"], "b--", linewidth=2, label="xy-plane")
+    ax2.plot(z_kpc, diagnostics["T_zaxis"], "r:", linewidth=2, label="z-axis")
     ax2.set_xscale("log")
     ax2.set_yscale("log")
     ax2.set_xlim(1e-2, 1e1)
@@ -1113,18 +1546,19 @@ def build_initial_conditions():
     plt.tight_layout()
     plt.savefig(_fig(f"cgols_initial_profiles{IC_TAG}.png"), dpi=300)
     plt.close(fig)
-    del R_kpc, z_kpc, n_midplane, n_zaxis, T_midplane, T_zaxis
-    del X_c, Y_c, Z_c
 
-    # ---- Simulation setup ----
-    t_end = END_TIME.to(code_units.code_time).value
 
-    params = SimulationParams(
-        t_end=t_end,
+def build_simulation_params(Phi_total):
+    """The SimulationParams shared by the in-situ and file IC paths."""
+    return SimulationParams(
+        t_end=END_TIME.to(code_units.code_time).value,
         C_cfl=CFL,
         gamma=gamma,
-        # See load_initial_conditions() for the rationale: floors ~2 orders below
-        # the ambient minimums, not the dynamically-zero 1e-14 default.
+        # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
+        # min_P~3e-3), not the dynamically-zero 1e-14 default: a wind-cavity
+        # cell floored to 1e-14 next to a 3e-3 neighbour is a ~1e11 pressure
+        # ratio, whose flux evacuates the cell in one step -> NaN. These floors
+        # cap that gradient while leaving the rarefied cavity room to form.
         minimum_density=1e-4,
         minimum_pressure=1e-5,
         # Global velocity ceiling for positivity_velocity_clip (50 code = 5000
@@ -1144,33 +1578,51 @@ def build_initial_conditions():
         **_cooling_params_kwargs(),
     )
 
-    jnp.save(_ic_potential_path(), Phi_total)
 
-    initial_state = construct_primitive_state(
-        config=config,
-        registered_variables=registered_variables,
-        density=rho_total,
-        velocity_x=ux,
-        velocity_y=uy,
-        velocity_z=uz,
-        gas_pressure=P_total,
-    )
-    del rho_total, ux, uy, uz, P_total, Phi_total
+def build_initial_conditions(sharding=None, save_potential=None):
+    """Build the simulation IC and return the four objects time_integration needs.
 
-    print(f"Initial density min:    {initial_state[registered_variables.density_index].min():.3e}")
-    print(f"Initial density max:    {initial_state[registered_variables.density_index].max():.3e}")
-    print(f"Initial velocity_x min: {initial_state[registered_variables.velocity_index.x].min():.3e}")
-    print(f"Initial velocity_x max: {initial_state[registered_variables.velocity_index.x].max():.3e}")
-    print(f"Initial velocity_y min: {initial_state[registered_variables.velocity_index.y].min():.3e}")
-    print(f"Initial velocity_y max: {initial_state[registered_variables.velocity_index.y].max():.3e}")
-    print(f"Initial velocity_z min: {initial_state[registered_variables.velocity_index.z].min():.3e}")
-    print(f"Initial velocity_z max: {initial_state[registered_variables.velocity_index.z].max():.3e}")
-    print(f"Initial pressure min:   {initial_state[registered_variables.pressure_index].min():.3e}")
-    print(f"Initial pressure max:   {initial_state[registered_variables.pressure_index].max():.3e}")
+    With a ``sharding`` the whole field build runs inside ONE jit with
+    ``out_shardings``, so every device (and, multi-process, every process) only
+    ever materialises its own shard: at 2048^2 x 4096 the state is 344 GB and the
+    potential 69 GB, neither of which fits on a device or in a node's RAM.
+    Without a sharding this is the original eager single-device build.
+
+    ``save_potential`` defaults to the file-IC mode (CGOLS_IC_MODE=file), where
+    the .npy pair is the artefact the solver run later loads.
+    """
+    config, registered_variables = build_config()
+    if save_potential is None:
+        save_potential = not INSITU_IC
+
+    # Two jits, not one: see _build_ic_fields on why the potential must come
+    # out of its own (identically-compiled) build.
+    Phi_total = build_external_potential(config, sharding)
+
+    def _build(Phi):
+        return _build_ic_fields(config, registered_variables, Phi, sharding)
+
+    if sharding is None:
+        initial_state, diagnostics = _build(Phi_total)
+    else:
+        replicated = jax.NamedSharding(sharding.mesh, P())
+        struct = jax.eval_shape(_build, Phi_total)
+        out_shardings = (sharding, jax.tree.map(lambda _: replicated, struct[1]))
+        initial_state, diagnostics = jax.jit(_build, out_shardings=out_shardings)(
+            Phi_total
+        )
+
+    plot_ic_diagnostics(config, diagnostics)
+
+    params = build_simulation_params(Phi_total)
+    if save_potential:
+        jnp.save(_ic_potential_path(), Phi_total)
+    del Phi_total
 
     config = finalize_config(config, initial_state.shape)
 
     return initial_state, config, params, registered_variables
+
 
 def load_initial_conditions():
     """Load the initial state and config from disk, for post-processing without re-running the IC build."""
@@ -1190,28 +1642,7 @@ def load_initial_conditions():
             f"CGOLS_DIM={RESOLUTION} expects {expected} - wrong CGOLS_IC_TAG?"
         )
     config = finalize_config(config, initial_state.shape)
-    params = SimulationParams(
-        t_end=END_TIME.to(code_units.code_time).value,
-        C_cfl=CFL,
-        gamma=gamma,
-        # Floors ~2 orders below the ambient box minimums (min_rho~8e-3,
-        # min_P~3e-3). The 1e-14 default is dynamically zero: a wind-cavity cell
-        # floored to 1e-14 next to a 3e-3 neighbour is a ~1e11 pressure ratio,
-        # whose flux evacuates the cell in one step -> NaN. These floors cap that
-        # gradient while leaving the rarefied cavity room to form.
-        minimum_density=1e-4,
-        minimum_pressure=1e-5,
-        # See build_initial_conditions(): global velocity ceiling for
-        # positivity_velocity_clip (50 code = 5000 km/s).
-        positivity_max_velocity=50.0,
-        # Temperature ceiling for positivity_temperature_clip; see the
-        # CGOLS_TMAX_K knob comment and build_initial_conditions().
-        positivity_max_pressure_over_density=TMAX_K / T_factor,
-        gravitational_potential=Phi_total,
-        cgols_wind_params=build_cgols_wind_params(),
-        **_cooling_params_kwargs(),
-    )
-    return initial_state, config, params, registered_variables
+    return initial_state, config, build_simulation_params(Phi_total), registered_variables
 
 
 # ---------------------------------------------------------------------------
@@ -1220,10 +1651,14 @@ def load_initial_conditions():
 SNAPSHOTS_DIR = _here(f"cgols_snapshots{RUN_TAG}")
 
 
-def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
+def make_snapshot_callable(
+    config, registered_variables, out_dir=SNAPSHOTS_DIR, sharding=None
+):
     """Build the snapshot callable that streams frames to disk during the run.
 
     Returns the callable; pass it as the 5th argument to ``time_integration``.
+    Pass the run's ``sharding`` so the operands handed to the host callback are
+    explicitly all-gathered (see ``_replicated``) and only rank 0 writes.
     Each frame is written to ``out_dir/frame_NNNN.npz`` *immediately* inside the
     callback - it is NOT accumulated in host RAM and flushed at the end. Two
     reasons:
@@ -1284,17 +1719,25 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     # leftover steps would make the TO_DISK driver continue their numbering and
     # skip the t=0 frame. On a resume (CGOLS_RESTART_FROM) the history must
     # stay - the numbering continues from it.
-    os.makedirs(out_dir, exist_ok=True)
-    for f in glob.glob(os.path.join(out_dir, "frame_*.npz")):
-        os.remove(f)
-    if CHECKPOINT_EVERY:
-        os.makedirs(ckpt_dir, exist_ok=True)
-        if not RESTART_FROM:
-            for entry in glob.glob(os.path.join(ckpt_dir, "*")):
-                if os.path.isdir(entry):
-                    shutil.rmtree(entry, ignore_errors=True)
-                else:
-                    os.remove(entry)
+    #
+    # Rank 0 only, with a barrier after: unguarded, rank 5 would rmtree the
+    # checkpoint directory rank 0 is already writing into. The barrier is a
+    # collective, so it sits OUTSIDE the RANK0 branch - every rank must reach
+    # it - and it must happen before the TO_DISK driver's first latest_step()
+    # read, which is itself a collective over this directory.
+    if RANK0:
+        os.makedirs(out_dir, exist_ok=True)
+        for f in glob.glob(os.path.join(out_dir, "frame_*.npz")):
+            os.remove(f)
+        if CHECKPOINT_EVERY:
+            os.makedirs(ckpt_dir, exist_ok=True)
+            if not RESTART_FROM:
+                for entry in glob.glob(os.path.join(ckpt_dir, "*")):
+                    if os.path.isdir(entry):
+                        shutil.rmtree(entry, ignore_errors=True)
+                    else:
+                        os.remove(entry)
+    barrier("cgols:output-dirs-ready")
 
     # Host-side frame counter for the filename. The callback may fire unordered, so
     # filenames are not assumed to be time-ordered; each file stores its own time
@@ -1302,6 +1745,11 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     counter = {"i": 0}
 
     def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz):
+        # jax.debug.callback fires on every process with the same (explicitly
+        # all-gathered, see _replicated below) global planes; one writer only,
+        # or 32 ranks race on frame_NNNN.npz.
+        if not RANK0:
+            return
         i = counter["i"]
         counter["i"] += 1
         # np.savez (uncompressed) keeps the per-frame write cheap; the per-run
@@ -1322,13 +1770,37 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
     # frame - the driver saves the checkpoint synchronously BEFORE invoking the
     # callable, so the newest step is always complete when we prune.
     def _prune_checkpoints():
+        # Rank 0 only. NB this prunes *older* steps while the newest one has
+        # already been committed by the (collective) Orbax save, so it never
+        # races that save. It must stay outside any barrier pairing, since it
+        # runs inside a debug callback whose ordering across ranks is not
+        # guaranteed.
+        if not RANK0:
+            return
         steps = sorted(int(d) for d in os.listdir(ckpt_dir) if d.isdigit())
         for step in steps[:-CHECKPOINT_KEEP]:
             shutil.rmtree(os.path.join(ckpt_dir, str(step)), ignore_errors=True)
 
+    def _replicated(x):
+        """Force an all-gather so the host callback sees the GLOBAL array.
+
+        ``jax.debug.callback`` fires once per device, and what the host
+        receives for a *sharded* operand is that device's shard, not the global
+        array - a frame would silently contain a half-plane of real data next
+        to garbage. An explicit replication constraint makes the all-gather
+        happen inside the jit, where it is legal. The planes are small (three
+        2048x4096 @ 33.5 MB + one 2048x2048 @ 16.8 MB ~ 117 MB per frame,
+        ~7 GB over a 61-frame run), so the gather is not a cost concern.
+        """
+        if sharding is None:
+            return x
+        return jax.lax.with_sharding_constraint(
+            x, jax.NamedSharding(sharding.mesh, P())
+        )
+
     def snapshot_callable(time, state, registered_variables):
         rho = state[registered_variables.density_index]
-        P = state[registered_variables.pressure_index]
+        P_gas = state[registered_variables.pressure_index]
         vx = state[registered_variables.velocity_index.x]
         vz = state[registered_variables.velocity_index.z]
 
@@ -1337,7 +1809,7 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
 
         # Edge-on (x-z, y=0) and face-on (x-y, z=0) physical slices.
         rho_xz = rho[g:hi, my, g:hi]   # (dim_x, dim_z)
-        P_xz = P[g:hi, my, g:hi]
+        P_xz = P_gas[g:hi, my, g:hi]
         rho_xy = rho[g:hi, g:hi, mz]   # (dim_x, dim_y)
 
         n_xz = rho_xz * n_factor
@@ -1355,13 +1827,23 @@ def make_snapshot_callable(config, registered_variables, out_dir=SNAPSHOTS_DIR):
         # Net vertical mass flux per z-plane, Mdot(z) = sum_xy(rho*v_z)*dx*dy, in
         # Msun/yr. Reduces the interior over (x, y) -> a length-dim_z line; XLA
         # fuses the slice*multiply*reduce so no full 3D temporary is materialised.
+        # Already a full reduction over both split axes, but constrained too so
+        # every callback operand is explicitly replicated.
         mdot_z = (
             jnp.sum(rho[g:hi, g:hi, g:hi] * vz[g:hi, g:hi, g:hi], axis=(0, 1))
             * (dx * dy)
             * code_mdot_to_msun_per_yr
         )
 
-        jax.debug.callback(_save_frame, time, n_xz, T_xz, n_xy, mdot_z, vr_xz)
+        jax.debug.callback(
+            _save_frame,
+            time,
+            _replicated(n_xz),
+            _replicated(T_xz),
+            _replicated(n_xy),
+            _replicated(mdot_z),
+            _replicated(vr_xz),
+        )
 
     return snapshot_callable
 
@@ -1408,8 +1890,8 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     """
     have_initial = initial_state is not None
     
-    print(jax.devices()[0].memory_stats())
-    print({k: v.shape for k, v in zip(['rho','P'], (final_state[registered_variables.density_index], 
+    rprint(jax.devices()[0].memory_stats())
+    rprint({k: v.shape for k, v in zip(['rho','P'], (final_state[registered_variables.density_index], 
                                                     final_state[registered_variables.pressure_index]))})
 
     # ---- Recompute the grid we need for the plots ----
@@ -1417,13 +1899,10 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     L_y = config.box_size.y
     L_z = config.box_size.z
 
-    helper_data = get_helper_data(config)
-    centers = helper_data.geometric_centers
-    X_c = centers[..., 0] - L_x / 2
-    Y_c = centers[..., 1] - L_y / 2
-    Z_c = centers[..., 2] - L_z / 2
+    # Same coordinates get_helper_data would build, without the (N, N, 2N, 3)
+    # meshgrid + its moveaxis copy (208 GB each at 2048).
+    X_c, Y_c, Z_c = _ic_coordinates(config, None)
     R_cyl = jnp.sqrt(X_c**2 + Y_c**2)
-    del centers, helper_data
 
     dim_x, dim_y, dim_z = final_state.shape[1:4]
     mid_x = dim_x // 2
@@ -1466,7 +1945,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
         rho_i = initial_state[registered_variables.density_index]
         rho_f = final_state[registered_variables.density_index]
         rel_drift = jnp.abs(rho_f - rho_i) / jnp.maximum(jnp.abs(rho_i), 1e-30)
-        print(f"Density drift over {END_TIME}: max = {rel_drift.max():.3e}, mean = {rel_drift.mean():.3e}")
+        rprint(f"Density drift over {END_TIME}: max = {rel_drift.max():.3e}, mean = {rel_drift.mean():.3e}")
         del rho_i, rho_f, rel_drift
 
     def _style_loglog(ax, xlabel, ylabel, ylim, title):
@@ -1522,15 +2001,15 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     # slice of the final v_z (blue/red = down/up flows) so vertical outflow off the
     # disk is visible.
     vz_f = final_state[registered_variables.velocity_index.z]
-    print(f"Final   |v_z| max: {float(jnp.abs(vz_f).max()) * v_to_kms:.3e} km/s")
-    print(f"Final   |v_z| mean: {float(jnp.abs(vz_f).mean()) * v_to_kms:.3e} km/s")
+    rprint(f"Final   |v_z| max: {float(jnp.abs(vz_f).max()) * v_to_kms:.3e} km/s")
+    rprint(f"Final   |v_z| mean: {float(jnp.abs(vz_f).mean()) * v_to_kms:.3e} km/s")
 
     vz_rms_f = jnp.sqrt(jnp.mean(vz_f**2, axis=(0, 1))) * v_to_kms
     z_line = Z_c[mid_x, mid_y, :]
 
     if have_initial:
         vz_i = initial_state[registered_variables.velocity_index.z]
-        print(f"Initial |v_z| max: {float(jnp.abs(vz_i).max()) * v_to_kms:.3e} km/s")
+        rprint(f"Initial |v_z| max: {float(jnp.abs(vz_i).max()) * v_to_kms:.3e} km/s")
         vz_rms_i = jnp.sqrt(jnp.mean(vz_i**2, axis=(0, 1))) * v_to_kms
 
     fig, (axa, axb) = plt.subplots(1, 2, figsize=(13, 5))
@@ -1715,7 +2194,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind
     snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
-        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
         return
 
     t = data["time_myr"]
@@ -1768,7 +2247,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind
     anim = FuncAnimation(fig, _update, frames=n_frames, blit=False)
     anim.save(out, writer=PillowWriter(fps=fps), dpi=90)
     plt.close(fig)
-    print(f"Wrote {out} ({n_frames} frames, t = {t[0]:.1f} -> {t[-1]:.1f} Myr)")
+    rprint(f"Wrote {out} ({n_frames} frames, t = {t[0]:.1f} -> {t[-1]:.1f} Myr)")
 
 
 def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_timeseries{RUN_TAG}.png"):
@@ -1786,7 +2265,7 @@ def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_t
     snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
-        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
         return
 
     t = data["time_myr"]
@@ -1825,7 +2304,7 @@ def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_t
     plt.savefig(out, dpi=200)
     plt.close(fig)
     peak = float(np.nanmax(np.abs(outflow_through(5.0))))
-    print(f"Wrote {out} (peak |outflow| through |z|=5 kpc: {peak:.2f} Msun/yr)")
+    rprint(f"Wrote {out} (peak |outflow| through |z|=5 kpc: {peak:.2f} Msun/yr)")
 
 
 def plot_paper_slices(
@@ -1868,7 +2347,7 @@ def plot_paper_slices(
     snapshots_dir, out = _here(snapshots_dir), _fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
-        print(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
+        rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
         return
 
     t = data["time_myr"]
@@ -1953,7 +2432,7 @@ def plot_paper_slices(
     plt.savefig(out, dpi=200)
     plt.close(fig)
     used = ", ".join(f"{tt:.0f}->{t[i]:.1f}" for tt, i in zip(target_times_myr, idxs))
-    print(f"Wrote {out} (requested->frame Myr: {used})")
+    rprint(f"Wrote {out} (requested->frame Myr: {used})")
 
 
 # ---------------------------------------------------------------------------
@@ -2020,22 +2499,27 @@ def cooling_lambda_cgs(T):
 if __name__ == "__main__":
 
     if CREATE_IC:
-        initial_state, config, params, registered_variables = build_initial_conditions()
+        initial_state, config, params, registered_variables = build_initial_conditions(
+            save_potential=True
+        )
 
         # Save BEFORE integration: donate_state=True consumes the initial buffer in-place,
         # so this device->host copy must happen while the buffer is still valid.
-        jnp.save(_ic_state_path(), initial_state)
+        if RANK0:
+            jnp.save(_ic_state_path(), initial_state)
+        barrier("cgols:ic-state-saved")
     else:
         # Per-step diagnostics history (the in-place [diag] status line keeps no
         # scrollback): default to cgols_logs/cgols_diag<RUN_TAG>.log, fresh per
         # run. Set ASTRONOMIX_DIAG_LOG to override the path, or to the empty
-        # string to disable logging.
+        # string to disable logging. The env var is set on every rank (only rank
+        # 0 ever writes the file - see _progress_bar), but only rank 0 truncates
+        # it, or 32 ranks race to unlink the file the others just opened.
         _default_diag_log = _log(f"cgols_diag{RUN_TAG}.log")
         if os.environ.setdefault("ASTRONOMIX_DIAG_LOG", _default_diag_log) == _default_diag_log:
-            if os.path.exists(_default_diag_log):
+            if RANK0 and os.path.exists(_default_diag_log):
                 os.remove(_default_diag_log)
-
-        initial_state, config, params, registered_variables = load_initial_conditions()
+        barrier("cgols:diag-log-truncated")
 
         # ---- Multi-GPU domain decomposition ----
         # When SHARD_SPLIT asks for more than one GPU, distribute the state over a
@@ -2043,8 +2527,10 @@ if __name__ == "__main__":
         # shards its helper data the same way and runs the inter-device halo exchange
         # itself. Only the initial state has to be device_put onto the sharding here.
         # SHARD_SPLIT == (1, 1, 1, 1) keeps the original single-GPU path (sharding=None).
-        # Built BEFORE the restart below so a checkpoint restores each device's
-        # shard directly onto the mesh (no single-device staging).
+        # Built BEFORE the IC and the restart below so both the in-situ build and a
+        # checkpoint restore land directly on the mesh (no single-device staging).
+        # jax.make_mesh uses the GLOBAL device list, so this is unchanged
+        # multi-process.
         if NUM_GPUS > 1:
             # axis_types=Auto is required: jax.make_mesh defaults to Explicit sharding
             # mode on jax >= 0.10, under which the ghost-cell padding inside the solver
@@ -2059,6 +2545,39 @@ if __name__ == "__main__":
             sharding = jax.NamedSharding(mesh, P(VARAXIS, XAXIS, YAXIS, ZAXIS))
         else:
             sharding = None
+
+        # ---- Initial conditions ----
+        # CGOLS_IC_MODE=file: load the .npy pair built by a CGOLS_CREATE_IC run.
+        # CGOLS_IC_MODE=insitu: build them here, inside one jit with
+        #   out_shardings, so no host ever holds the global 344 GB state.
+        # A restart leg needs only the external potential - the state comes from
+        # the checkpoint - so at 2048 skip the state build entirely rather than
+        # constructing 344 GB and immediately discarding it.
+        if not INSITU_IC:
+            initial_state, config, params, registered_variables = (
+                load_initial_conditions()
+            )
+        elif RESTART_FROM:
+            config, registered_variables = build_config()
+            params = build_simulation_params(
+                build_external_potential(config, sharding)
+            )
+            _expected_shape = (
+                registered_variables.num_vars,
+                RESOLUTION,
+                RESOLUTION,
+                2 * RESOLUTION,
+            )
+            config = finalize_config(config, _expected_shape)
+            initial_state = None
+            rprint(
+                "In-situ IC skipped on a restart leg: only the external "
+                "potential was built (the state comes from the checkpoint)."
+            )
+        else:
+            initial_state, config, params, registered_variables = (
+                build_initial_conditions(sharding=sharding)
+            )
 
         # Resume from an Orbax checkpoint (CGOLS_RESTART_FROM=latest for this
         # run-tag's checkpoint dir, or an explicit dir; CGOLS_RESTART_STEP picks
@@ -2081,15 +2600,18 @@ if __name__ == "__main__":
                 step=(int(RESTART_STEP) if RESTART_STEP else None),
                 sharding=sharding,
             )
-            if _restored.shape != initial_state.shape:
+            _want_shape = (
+                _expected_shape if initial_state is None else initial_state.shape
+            )
+            if _restored.shape != tuple(_want_shape):
                 raise ValueError(
                     f"checkpoint state {_restored.shape} does not match the "
-                    f"configured grid {initial_state.shape} - check CGOLS_DIM / CGOLS_IC_TAG"
+                    f"configured grid {tuple(_want_shape)} - check CGOLS_DIM / CGOLS_IC_TAG"
                 )
             initial_state = _restored
             _t0 = float(params.t_start)
             _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
-            print(f"Restarting from {_ckpt_dir} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
+            rprint(f"Restarting from {_ckpt_dir} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
 
         if NUM_GPUS > 1:
             # No-op data-movement-wise when the state was already restored onto
@@ -2099,9 +2621,9 @@ if __name__ == "__main__":
             # sharded axis (e.g. state[0, :, :, 0] when z is split) is a gather that
             # JAX cannot assign an output sharding to, so it raises. Printing the
             # sharding spec + per-device shard shape is safe for any SHARD_SPLIT.
-            print(f"Sharding {initial_state.shape} state over {NUM_GPUS} GPUs, split {SHARD_SPLIT}")
-            print(f"  sharding:    {initial_state.sharding}")
-            print(f"  shard shape: {initial_state.addressable_shards[0].data.shape}")
+            rprint(f"Sharding {initial_state.shape} state over {NUM_GPUS} GPUs, split {SHARD_SPLIT}")
+            rprint(f"  sharding:    {initial_state.sharding}")
+            rprint(f"  shard shape: {initial_state.addressable_shards[0].data.shape}")
 
         # Stream intermediate snapshots (2D slices + 1D vertical-flux profile) to disk
         # during the run, for the animation and the wind time-series. Each frame is
@@ -2113,7 +2635,11 @@ if __name__ == "__main__":
         # is False), so skip building the callable and skip saving the garbage
         # fixed-dt final state; we only care about the timing/memory printout.
         snapshot_callable = (
-            None if BENCH_STEPS else make_snapshot_callable(config, registered_variables)
+            None
+            if BENCH_STEPS
+            else make_snapshot_callable(
+                config, registered_variables, sharding=sharding
+            )
         )
 
         # Wall-clock timing of the full run (includes JAX compile time). JAX
@@ -2127,13 +2653,27 @@ if __name__ == "__main__":
         )
         jax.block_until_ready(final_state)
         _elapsed = time.perf_counter() - _t0
-        print(
+        rprint(
             f"time_integration wall time: {_elapsed:.1f} s "
             f"({_elapsed / 60:.1f} min, {_elapsed / 3600:.2f} h) "
             f"on {NUM_GPUS} GPU(s), split {SHARD_SPLIT}"
         )
-        if not BENCH_STEPS:
-            jnp.save(_data_final(f"cgols_final_state{RUN_TAG}.npy"), final_state)
+        # Dumping the final state gathers the WHOLE state to every process's
+        # host: 5 GB at 512, 43 GB at 1024, 344 GB at 2048 - times one copy per
+        # rank. From 2048 on the Orbax checkpoint (already written sharded, one
+        # shard per device) is the final artefact and this dump is skipped.
+        if not BENCH_STEPS and RESOLUTION <= 1024:
+            if RANK0:
+                jnp.save(_data_final(f"cgols_final_state{RUN_TAG}.npy"), final_state)
+            barrier("cgols:final-state-saved")
+        elif not BENCH_STEPS:
+            rprint(
+                f"Final .npy dump skipped at CGOLS_DIM={RESOLUTION} "
+                f"(the state is {final_state.size * 4 / 1024**3:.0f} GB); the "
+                "final artefact is the newest Orbax checkpoint in "
+                f"{config.snapshot_storage_path or '<checkpointing DISABLED - '
+                                                   'set CGOLS_CHECKPOINT_EVERY>'}."
+            )
 
         # Analysis runs in a separate process (cgols_analyse.py) on a fresh, empty GPU.
         # Doing it here would OOM: XLA still holds the sim's ~32 GB pool.

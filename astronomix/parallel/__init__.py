@@ -8,5 +8,20 @@ functions that need it.
 """
 
 from astronomix.parallel.distributed import DistInfo, init_distributed
+from astronomix.parallel.rank import (
+    barrier,
+    broadcast_from_primary,
+    is_primary,
+    process_count,
+    process_index,
+)
 
-__all__ = ["DistInfo", "init_distributed"]
+__all__ = [
+    "DistInfo",
+    "barrier",
+    "broadcast_from_primary",
+    "init_distributed",
+    "is_primary",
+    "process_count",
+    "process_index",
+]

@@ -9,7 +9,6 @@ shard / unpad them for the time integrator.
 """
 
 # general
-from contextlib import nullcontext
 import math
 
 # typing
@@ -273,10 +272,19 @@ def get_helper_data(
 
     With ``config.host_helper_data=True`` the arrays are built inside a
     CPU device context and only the requested fields are moved onto the
-    target device (respecting ``sharding`` for 3D Cartesian
-    ``geometric_centers``). Fields needed only as intermediates (e.g.
-    the full ``X, Y, Z`` meshgrid when only ``r`` is requested) never
-    materialise on the accelerator.
+    target device (respecting ``sharding`` for the 3D Cartesian spatial
+    fields).
+
+    Otherwise, when a ``sharding`` is supplied the build runs inside a
+    ``jax.jit`` with ``out_shardings``, so each device — and, in a
+    multi-process run, each process — materialises only its own shards
+    and the global field never has to fit anywhere. This is what makes
+    the 2048^2 x 4096 grid buildable: ``r`` alone is ~69 GB globally.
+    Note that a jitted build is not bit-identical to the eager one (XLA
+    fuses the coordinate arithmetic; measured ~1e-7 relative, 5 ulp on
+    ``r``), so a run that switches ``host_helper_data`` off changes the
+    last bits of the geometry — it is a float32 reassociation, not a
+    formula change.
     """
 
     config = _normalize_config_vectors(config)
@@ -299,18 +307,37 @@ def get_helper_data(
                 "host_helper_data=True requires a CPU device to be available."
             )
         build_ctx = jax.default_device(cpu_devices[0])
-    else:
-        build_ctx = nullcontext()
 
-    with build_ctx:
+        with build_ctx:
+            helper_data = _build_helper_data(config, requirements, ngc, grid_spacing)
+        helper_data = _move_helper_data_to_device(helper_data, sharding, config)
+    elif sharding is not None:
+        # Build straight into the target shards. Without the ``out_shardings``
+        # jit the builder would materialise every field globally on one device
+        # first and only then be constrained — at 2048^2 x 4096 the ``r`` field
+        # alone is ~69 GB, which no single device holds. Under a multi-process
+        # mesh this also means each process only ever computes its own shard.
+        def _build():
+            return _build_helper_data(config, requirements, ngc, grid_spacing)
+
+        out_shardings = _helper_data_shardings(
+            jax.eval_shape(_build), sharding, config
+        )
+        helper_data = jax.jit(_build, out_shardings=out_shardings)()
+        # The eager builder hands the SAME array to both center fields in
+        # Cartesian geometry; a jit returns them as two tuple elements, which
+        # XLA is not obliged to alias. Re-alias so the sharded path does not
+        # silently hold a second copy of a (Nx, Ny, Nz, 3) field.
+        if (
+            config.geometry == CARTESIAN
+            and helper_data.geometric_centers is not None
+            and helper_data.volumetric_centers is not None
+        ):
+            helper_data = helper_data._replace(
+                volumetric_centers=helper_data.geometric_centers
+            )
+    else:
         helper_data = _build_helper_data(config, requirements, ngc, grid_spacing)
-
-    if host_build:
-        helper_data = _move_helper_data_to_device(helper_data, sharding)
-    else:
-        # Match the original behaviour: apply sharding to the 3D Cartesian
-        # geometric_centers if requested.
-        helper_data = _apply_sharding(helper_data, sharding, config)
 
     return helper_data
 
@@ -404,7 +431,12 @@ def _build_helper_data(
     need_centers = requirements.needs_geometric_centers
     need_vol_centers = requirements.needs_volumetric_centers
     need_r = requirements.needs_r
-    need_meshgrid = need_centers or need_vol_centers or need_r
+    # ``r`` is deliberately NOT a meshgrid consumer: when it is the only field
+    # wanted (the CGOLS-wind case) it is assembled from broadcast 1D axes
+    # below, which avoids materialising the two ``(Nx, Ny, Nz, dim)`` coordinate
+    # arrays. At 2048^2 x 4096 those are ~208 GB each — building them just to
+    # take a norm is what made the field unbuildable at scale.
+    need_meshgrid = need_centers or need_vol_centers
 
     per_axis_requested = (
         requirements.needs_cell_centers_x,
@@ -413,8 +445,8 @@ def _build_helper_data(
     )[: config.dimensionality]
 
     # The 1D per-axis arrays are needed either when explicitly requested
-    # or as building blocks for the meshgrid.
-    axis_needed = [need_meshgrid or pa for pa in per_axis_requested]
+    # or as building blocks for the meshgrid / the analytic ``r``.
+    axis_needed = [need_meshgrid or need_r or pa for pa in per_axis_requested]
 
     axis_arrays = []
     for size, ncells, needed in zip(
@@ -442,6 +474,8 @@ def _build_helper_data(
         fields["cell_centers_z"] = axis_arrays[2]
 
     if not need_meshgrid:
+        if need_r:
+            fields["r"] = _radius_from_axes(axis_arrays, box_sizes, config)
         return HelperData(**fields)
 
     geometric_centers = jnp.array(jnp.meshgrid(*axis_arrays, indexing="ij"))
@@ -453,14 +487,11 @@ def _build_helper_data(
         # In Cartesian, volumetric centers coincide with geometric centers.
         fields["volumetric_centers"] = geometric_centers
     if need_r:
-        if config.dimensionality == 2:
-            box_center = jnp.array(
-                [config.box_size.x / 2, config.box_size.y / 2]
-            )
-        else:
-            box_center = jnp.array(
-                [config.box_size.x / 2, config.box_size.y / 2, config.box_size.z / 2]
-            )
+        # The meshgrid already exists here, so reuse it rather than rebuilding
+        # the coordinates; bit-identical to the _radius_from_axes branch.
+        box_center = jnp.array(
+            [size / 2 for size in box_sizes[: config.dimensionality]]
+        )
         fields["r"] = jnp.linalg.norm(
             geometric_centers - box_center, axis=-1
         )
@@ -468,48 +499,94 @@ def _build_helper_data(
     return HelperData(**fields)
 
 
-def _apply_sharding(
-    helper_data: HelperData,
-    sharding: Union[NoneType, NamedSharding],
+def _radius_from_axes(axis_arrays, box_sizes, config: SimulationConfig) -> jnp.ndarray:
+    """Cell-center-to-box-center distance, built from the 1D axis arrays.
+
+    Equivalent to ``norm(meshgrid(...) - box_center)`` but without ever forming
+    the ``(N_x, N_y, N_z, dim)`` coordinate array (two of them, counting the
+    ``moveaxis`` copy). Each axis is offset by its own half-box first and then
+    broadcast against the others, so under a jit with ``out_shardings`` XLA can
+    produce the result directly in its sharded layout.
+
+    ``jnp.broadcast_arrays`` is required: ``jnp.stack`` alone rejects the
+    unequal per-axis shapes.
+    """
+    dimensionality = config.dimensionality
+    offset_axes = []
+    for axis_index in range(dimensionality):
+        shape = [1] * dimensionality
+        shape[axis_index] = axis_arrays[axis_index].shape[0]
+        offset_axes.append(
+            axis_arrays[axis_index].reshape(shape) - box_sizes[axis_index] / 2
+        )
+    return jnp.linalg.norm(jnp.stack(jnp.broadcast_arrays(*offset_axes)), axis=0)
+
+
+def _field_sharding(
+    name: str,
+    ndim: int,
+    sharding: NamedSharding,
+    config: SimulationConfig,
+) -> NamedSharding:
+    """The target sharding for one :class:`HelperData` field.
+
+    The spatial fields co-locate with the primitive state; everything else
+    (the 1D per-axis arrays, the 1D curvilinear fields) is replicated.
+
+    primitive_state is (vars, X, Y, Z); geometric_centers is (X, Y, Z, vec) and
+    ``r`` is (X, Y, Z). Reusing the primitive-state PartitionSpec positionally
+    would put the vars-axis mesh assignment on the X-axis of the field and
+    shift the spatial assignments by one — i.e. Y would inherit XAXIS (split)
+    while X would inherit VARAXIS (replicated), breaking co-location with
+    primitive_state. Drop the leading vars entry, and pad with ``None`` for the
+    trailing vector index of the centers (``r`` has no such axis).
+    """
+    replicated = NamedSharding(sharding.mesh, PartitionSpec())
+    if config.geometry != CARTESIAN or config.dimensionality != 3:
+        return replicated
+    if name in ("geometric_centers", "volumetric_centers") and ndim == 4:
+        return NamedSharding(
+            sharding.mesh, PartitionSpec(*sharding.spec[1:4], None)
+        )
+    if name == "r" and ndim == 3:
+        return NamedSharding(sharding.mesh, PartitionSpec(*sharding.spec[1:4]))
+    return replicated
+
+
+def _helper_data_shardings(
+    struct: HelperData,
+    sharding: NamedSharding,
     config: SimulationConfig,
 ) -> HelperData:
-    """Apply the user-provided sharding to the 3D Cartesian geometric_centers."""
+    """``out_shardings`` pytree for a :func:`_build_helper_data` jit.
 
-    if sharding is None:
-        return helper_data
-    if config.geometry != CARTESIAN or config.dimensionality != 3:
-        return helper_data
-    if helper_data.geometric_centers is None:
-        return helper_data
-
-    # primitive_state is (vars, X, Y, Z); geometric_centers is (X, Y, Z, vec).
-    # Reusing the primitive-state PartitionSpec positionally would put the
-    # vars-axis mesh assignment on the X-axis of geometric_centers and shift
-    # the spatial assignments by one — i.e. Y would inherit XAXIS (split)
-    # while X would inherit VARAXIS (replicated), breaking co-location with
-    # primitive_state. Drop the leading vars entry and pad with None for
-    # the trailing vector index so the spatial axes line up.
-    spatial_spec = PartitionSpec(*sharding.spec[1:4], None)
-    centers_sharding = NamedSharding(sharding.mesh, spatial_spec)
-    centers = jax.lax.with_sharding_constraint(
-        helper_data.geometric_centers, centers_sharding
+    ``struct`` is the ``jax.eval_shape`` result, i.e. a :class:`HelperData`
+    whose materialised fields are ``ShapeDtypeStruct``s and whose unused fields
+    are ``None`` — so the returned struct has a leaf exactly where the built
+    helper data has one.
+    """
+    return HelperData(
+        **{
+            name: _field_sharding(name, value.ndim, sharding, config)
+            for name, value in struct._asdict().items()
+            if value is not None
+        }
     )
-    replaced = {"geometric_centers": centers}
-    if helper_data.volumetric_centers is not None:
-        # volumetric_centers points at the same array in Cartesian.
-        replaced["volumetric_centers"] = centers
-    return helper_data._replace(**replaced)
 
 
 def _move_helper_data_to_device(
     helper_data: HelperData,
     sharding: Union[NoneType, NamedSharding],
+    config: SimulationConfig,
 ) -> HelperData:
     """Move only materialised fields onto the target device.
 
-    With ``sharding`` provided, ``geometric_centers`` / ``volumetric_centers``
-    are placed with that sharding; the remaining 1D arrays are replicated
-    via ``jax.device_put``.
+    With ``sharding`` provided, the spatial fields (``geometric_centers`` /
+    ``volumetric_centers`` / ``r``) are placed with the matching spatial
+    sharding — see :func:`_field_sharding` for the axis correction — and the
+    remaining 1D arrays are replicated. ``r`` in particular MUST be placed
+    explicitly: a bare ``jax.device_put`` commits it to a single device, which
+    a multi-process pjit cannot consume at all.
     """
 
     moved = {}
@@ -522,18 +599,9 @@ def _move_helper_data_to_device(
         if id(value) in transferred:
             moved[name] = transferred[id(value)]
             continue
-        if (
-            sharding is not None
-            and name in ("geometric_centers", "volumetric_centers")
-            and value.ndim == 4
-        ):
-            # Same axis correction as _apply_sharding: the supplied sharding
-            # is for the (vars, X, Y, Z) primitive state, while the centers
-            # are (X, Y, Z, vec); drop the vars entry and keep the vector
-            # axis unsplit so the spatial shards co-locate with the state.
-            spatial_spec = PartitionSpec(*sharding.spec[1:4], None)
+        if sharding is not None:
             moved[name] = jax.device_put(
-                value, NamedSharding(sharding.mesh, spatial_spec)
+                value, _field_sharding(name, value.ndim, sharding, config)
             )
         else:
             moved[name] = jax.device_put(value)

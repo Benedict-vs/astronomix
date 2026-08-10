@@ -198,6 +198,77 @@ def _raise_with_time_integration_hint(error: Exception, config: SimulationConfig
     raise error
 
 
+def _place_params_on_mesh(
+    params: SimulationParams,
+    config: SimulationConfig,
+    sharding,
+) -> SimulationParams:
+    """Give every ``params`` leaf a concrete sharding on the supplied mesh.
+
+    A no-op when ``sharding`` is ``None`` (single-device runs).
+
+    When the user supplies a multi-device sharding, pjit dispatch needs every
+    JIT input leaf to carry a sharding compatible with the target mesh.
+    ``SimulationParams`` has both Python-scalar fields (gamma, t_end, C_cfl,
+    ...) and size-(0,) placeholder arrays (the default
+    ``fixed_boundary_state``); JAX converts those into numpy 0-d / empty arrays
+    for the JIT call and pjit cannot infer a sharding for them on a
+    multi-device mesh, surfacing as ``AttributeError: 'UnspecifiedValue'
+    object has no attribute '_addressable_device_assignment'`` at dispatch
+    time. So every leaf is promoted onto a fully-replicated
+    ``NamedSharding``…
+
+    …with ONE exception: ``gravitational_potential`` is a full 3D field the
+    size of one state variable (8.6 GB at 1024^2 x 2048, 68.7 GB at 2048^2 x
+    4096). Replicating that on every device is merely wasteful at 1024 and
+    fatal at 2048, so it is placed on the same spatial sharding as the state
+    instead. Every consumer is elementwise or a halo stencil
+    (``_modules/_gravity/_gravity.py``), and the padding routes through the
+    same ``_pad`` / boundary handler as the state, so sharding it is safe.
+
+    The gate on that one leaf is deliberately narrow — ``ndim ==
+    dimensionality and size > 1`` — so it distinguishes a populated potential
+    from the empty ``jnp.array([])`` default (ndim 1, size 0). It must NOT be
+    applied generically over all leaves: in a 1D run the (6,) CGOLS wind
+    schedule arrays would pass both conditions.
+
+    ``jnp.asarray`` on the replicated leaves is required, not cosmetic: a raw
+    Python float (``gamma = 5/3``) reaches ``device_put`` as an fp64 scalar,
+    is gathered as fp32, and the multi-process consistency check then fails
+    with *"not the same on each process"*. This only manifests at
+    ``process_count > 1``.
+    """
+    if sharding is None:
+        return params
+
+    replicated = jax.NamedSharding(sharding.mesh, PartitionSpec())
+    spatial = jax.NamedSharding(
+        sharding.mesh, PartitionSpec(*sharding.spec[1 : 1 + config.dimensionality])
+    )
+
+    potential = params.gravitational_potential
+    shard_potential = (
+        potential is not None
+        and hasattr(potential, "ndim")
+        and potential.ndim == config.dimensionality
+        and potential.size > 1
+    )
+    if shard_potential:
+        params = params._replace(gravitational_potential=None)
+
+    params = jax.tree.map(
+        lambda leaf: jax.device_put(jnp.asarray(leaf), replicated),
+        params,
+    )
+
+    if shard_potential:
+        params = params._replace(
+            gravitational_potential=jax.device_put(potential, spatial)
+        )
+
+    return params
+
+
 # @jaxtyped(typechecker=typechecker)
 def time_integration(
     primitive_state: STATE_TYPE,
@@ -268,23 +339,7 @@ def time_integration(
         requirements = requirements,
     )
 
-    # When the user supplies a multi-device sharding, pjit dispatch needs
-    # every JIT input leaf to carry a sharding compatible with the target
-    # mesh. SimulationParams has both Python-scalar fields (gamma, t_end,
-    # C_cfl, ...) and size-(0,) placeholder arrays (the default
-    # ``fixed_boundary_state``); JAX converts those into numpy 0-d /
-    # empty arrays for the JIT call and pjit cannot infer a sharding for
-    # them on a multi-device mesh, surfacing as
-    # ``AttributeError: 'UnspecifiedValue' object has no attribute
-    # '_addressable_device_assignment'`` at dispatch time. Promote every
-    # leaf of ``params`` onto a fully-replicated NamedSharding on the
-    # supplied mesh so pjit always sees a concrete sharding.
-    if sharding is not None:
-        replicated = jax.NamedSharding(sharding.mesh, PartitionSpec())
-        params = jax.tree.map(
-            lambda leaf: jax.device_put(leaf, replicated),
-            params,
-        )
+    params = _place_params_on_mesh(params, config, sharding)
 
     # Disk-checkpointing mode is driven on the host: it runs JIT'd segments
     # between snapshot times and streams each segment's loop carry to disk via
@@ -1112,11 +1167,6 @@ def _time_integration_to_disk(
 
     mesh_ctx = sharding.mesh if sharding is not None else nullcontext()
     pallas_mesh = sharding.mesh if sharding is not None else None
-    replicated = (
-        jax.NamedSharding(sharding.mesh, PartitionSpec())
-        if sharding is not None
-        else None
-    )
 
     # Continue step numbering after any checkpoints already in the output
     # directory, so resuming into the same path extends one run history
@@ -1156,13 +1206,13 @@ def _time_integration_to_disk(
                 primitive_state = jax.device_put(primitive_state, sharding)
 
             segment_params = params._replace(t_start=times[i], t_end=times[i + 1])
-            # Keep every params leaf on a concrete (replicated) sharding so pjit
-            # dispatch on a multi-device mesh sees a sharding for the freshly
-            # set t_start / t_end scalars too (see the note in time_integration).
-            if replicated is not None:
-                segment_params = jax.tree.map(
-                    lambda leaf: jax.device_put(leaf, replicated), segment_params
-                )
+            # Keep every params leaf on a concrete sharding so pjit dispatch on
+            # a multi-device mesh sees a sharding for the freshly set t_start /
+            # t_end scalars too. Routed through the same helper as the one-shot
+            # path so the external potential stays SHARDED here: a plain
+            # replicating tree.map would re-replicate it on every segment and
+            # undo the fix (68.7 GB per device at 2048^2 x 4096).
+            segment_params = _place_params_on_mesh(segment_params, config, sharding)
 
             with mesh_ctx, pallas_mesh_context(pallas_mesh):
                 t_final, primitive_state, key, forcing, num_iterations = run_segment_jit(
