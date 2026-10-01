@@ -1,68 +1,62 @@
-"""
-Minimal multi-process / multi-node jax.distributed sanity check.
+"""Minimal multi-process JAX sanity check: rendezvous + one collective.
 
-Validates the rendezvous + a cross-process collective before committing a big
-multi-node run.  Launch with srun, one task per GPU::
+Run under Slurm with one process per GPU and *no* GPU binding (all node GPUs
+visible to every task, each task picks its own by node-local rank)::
 
-    srun --gpu-bind=none python pytests/_dist_sanity.py
+    srun --ntasks=<G> --ntasks-per-node=4 --gpu-bind=none \
+        python pytests/_dist_sanity.py
 
-Use ``--gpu-bind=none`` (all of a node's GPUs visible to every task; each rank
-picks its own via ``SLURM_LOCALID``), and pass NO ``--ntasks`` so srun inherits
-the allocation.  ``--gpus-per-task=1`` cgroup-binds each task to a single GPU
-that appears as ordinal 0, which breaks intra-node NCCL peer-to-peer and
-DEADLOCKS the topology exchange with "invalid device ordinal" -- which is the
-very failure this script exists to catch, so do not reintroduce it here.
-
-Expected output on success: ``allgather = [0. 1. 2. ...]`` followed by ``PASS``.
+Expected output on rank 0: ``allgather = [0. 1. ... G-1.]`` followed by
+``PASS``.  This exercises exactly the paths that break first on a new
+machine: the coordinator rendezvous, intra-node NCCL P2P, and (from two
+nodes on) the inter-node network.
 """
 
+# general
 import os
 
+# third-party (raw jax only -- astronomix must NOT be imported before
+# jax.distributed.initialize(), because importing it creates the backend)
 import jax
 
-# Diagnostic: each rank's view of the GPUs, BEFORE touching the backend.
-print(
-    f"[pre-init procid={os.environ.get('SLURM_PROCID','?')} "
-    f"localid={os.environ.get('SLURM_LOCALID','?')}] "
-    f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES','<unset>')}",
-    flush=True,
-)
 
 def _local_device_ids():
-    """Pick this rank's local device id robustly for either Slurm GPU binding.
+    """This rank's local GPU, robust to either Slurm GPU binding mode.
 
-    - Cgroup-bound (--gpus-per-task=1): each task sees ONE GPU as ordinal 0 ->
-      use [0].  (But intra-node NCCL P2P then fails -- prefer --gpu-bind=none.)
-    - All-visible (--gpu-bind=none): each task sees ALL node GPUs -> select the
-      one matching this task's node-local rank, [SLURM_LOCALID].
+    With ``--gpu-bind=none`` every task sees all node GPUs and must pick its
+    own by node-local rank; with cgroup binding one GPU appears as ordinal 0.
     """
-    cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-    visible = [x for x in cvd.split(",") if x != ""]
-    localid = int(os.environ.get("SLURM_LOCALID", "0"))
-    return [localid] if len(visible) > 1 else [0]
+    visible = [
+        x for x in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if x
+    ]
+    local_rank = int(os.environ.get("SLURM_LOCALID", "0"))
+    return [local_rank] if len(visible) > 1 else [0]
 
 
-if "SLURM_PROCID" in os.environ and int(os.environ.get("SLURM_NTASKS", "1")) > 1:
+def main():
     jax.distributed.initialize(local_device_ids=_local_device_ids())
 
-import jax.numpy as jnp  # noqa: E402
-from jax.experimental import multihost_utils as mh  # noqa: E402
+    import jax.numpy as jnp
+    from jax.experimental import multihost_utils
 
-pc = jax.process_count()
-pi = jax.process_index()
-print(
-    f"[rank {pi}/{pc}] host={os.environ.get('SLURMD_NODENAME','?')} "
-    f"local_devices={jax.local_device_count()} global_devices={jax.device_count()} "
-    f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES','?')}",
-    flush=True,
-)
+    rank = jax.process_index()
+    world = jax.process_count()
+    print(
+        f"[rank {rank}/{world}] local={jax.local_devices()} "
+        f"global={jax.device_count()} host={os.uname().nodename}",
+        flush=True,
+    )
 
-# Cross-process collective: each rank contributes its index; all should agree.
-gathered = mh.process_allgather(jnp.array([float(pi)]))
-if pi == 0:
-    print(f"[rank 0] allgather = {gathered.ravel()}  (expect 0..{pc-1})", flush=True)
-    print(f"[rank 0] PASS distributed rendezvous: {pc} processes, "
-          f"{jax.device_count()} devices", flush=True)
+    gathered = multihost_utils.process_allgather(jnp.asarray(float(rank)))
+    if rank == 0:
+        print(f"allgather = {gathered}", flush=True)
 
-mh.sync_global_devices("dist_sanity_done")
-print(f"[rank {pi}] done", flush=True)
+    expected = jnp.arange(world, dtype=gathered.dtype)
+    assert (gathered == expected).all(), f"allgather mismatch: {gathered}"
+    multihost_utils.sync_global_devices("dist_sanity_done")
+    if rank == 0:
+        print("PASS", flush=True)
+
+
+if __name__ == "__main__":
+    main()

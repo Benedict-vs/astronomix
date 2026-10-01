@@ -1238,7 +1238,16 @@ def _time_integration_to_disk(
             if sharding is not None:
                 primitive_state = jax.device_put(primitive_state, sharding)
                 if forcing is not None:
-                    forcing = jax.device_put(forcing, sharding)
+                    # The full-grid OU field shards like the state; the coarse
+                    # spectral OU state (synthesis_resolution > 0) is a small
+                    # replicated array and must stay replicated -- its nc^3
+                    # axes generally do not divide the mesh.
+                    forcing_sharding = (
+                        jax.NamedSharding(sharding.mesh, PartitionSpec())
+                        if config.turbulent_forcing_config.synthesis_resolution > 0
+                        else sharding
+                    )
+                    forcing = jax.device_put(forcing, forcing_sharding)
 
             save_loop_checkpoint(
                 checkpointer,
