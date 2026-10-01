@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=cgols_distsanity
 #SBATCH --account=hk-project-pai00101
-#SBATCH --partition=dev_accelerated-h100
+#SBATCH --partition=dev-gpu-h100
+#SBATCH --exclusive
 #SBATCH --time=00:15:00
 
 #SBATCH --nodes=1
@@ -14,12 +15,14 @@
 # Ladder rungs 1 and 2: prove the multi-process rendezvous and a cross-process
 # collective BEFORE committing anything larger. Minutes, on the dev queue.
 #
-#   rung 1  (intra-node NCCL P2P under --gpu-bind=none):
+#   rung 1  (intra-node NCCL P2P under --gpu-bind=none), HoreKa 2 dev queue
+#           (dev-gpu-h100: 1 node, 1 h, one job at a time; there is no
+#           dev-gpu-h200, but the x86 env and the jax/NCCL stack are the same):
 #       sbatch run_dist_sanity.sh
-#   rung 2  (inter-node IB rendezvous - dev_accelerated-h100 caps at ONE node,
-#            so a 2-node test goes to dev_accelerated (A100, max 2 nodes) or a
-#            production GPU partition):
-#       sbatch --nodes=2 --partition=dev_accelerated run_dist_sanity.sh
+#   rung 2  (inter-node IB rendezvous - dev partitions cap at ONE node, so the
+#           2-node test goes to a short production-partition job, which
+#           backfills quickly):
+#       sbatch --nodes=2 --partition=gpu-h200 --time=00:10:00 run_dist_sanity.sh
 #
 # Expect, from rank 0:   allgather = [0. 1. 2. 3.]   then   PASS
 #

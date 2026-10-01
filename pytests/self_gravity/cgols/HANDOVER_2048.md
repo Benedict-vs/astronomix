@@ -11,6 +11,43 @@ HoreKa Jade (`gpu-b200`, expected 09/2026).** The reasoning is in §7.
 
 ---
 
+## 0. Status 2026-10-01 — retargeted to HoreKa 2 Ruby (supersedes §3, §5 commands)
+
+Jade (`gpu-b200`) is still "coming soon", so the campaign goes to **Ruby (`gpu-h200`,
+x86, 13 nodes, max 13/job, 2 days)** now, on the existing x86 stack. §3 is done:
+
+- All runners now target HoreKa 2 partitions and ask for `--exclusive`, since the GPU
+  partitions are **shared** by default. `_site_env.sh` has a `horeka2` branch, which is
+  now the default: no CUDA module, and nounset-safe `module`/`~/.bashrc`/micromamba.
+- `horeka2_setup.sh`: one-time env + workspace setup on the x86 login node, safe to re-run.
+- The watchdog now returns as soon as srun exits, so short dev jobs no longer sit out the
+  30-min settle window. It reads the real `.err` path from `scontrol`.
+- **There is no `dev-gpu-h200`.** Dev rungs run on `dev-gpu-h100` (1 node, 1 h, one job
+  at a time; same x86 env). Every multi-node rung needs a short `gpu-h200` job.
+- Login: `hk2-x86.scc.kit.edu`. Workspaces live at `/hfs2/work/workspace/scratch/…`
+  (GPFS, visible on every node, 250 TiB/user quota, no backup).
+
+Ladder on HoreKa 2. Submit everything from `pytests/self_gravity/cgols/`:
+
+| # | what | command |
+|---|---|---|
+| D1 | rung 1, intra-node NCCL | `sbatch run_dist_sanity.sh` |
+| D2 | 1-node smoke: in-situ IC, Pallas, frames, checkpoints, 4 ranks | `sbatch --partition=dev-gpu-h100 --nodes=1 --time=00:45:00 --export=ALL,CGOLS_DIM=256,CGOLS_END_FRACTION=0.03,CGOLS_NUM_SNAPSHOTS=6,CGOLS_RUN_TAG=_dev256 run_cgols_multinode.sh` |
+| D3 | multi-rank Orbax restore | `sbatch --partition=dev-gpu-h100 --nodes=1 --time=00:45:00 --export=ALL,CGOLS_DIM=256,CGOLS_END_FRACTION=0.05,CGOLS_NUM_SNAPSHOTS=4,CGOLS_RESTART_FROM=data/cgols_checkpoints_dev256,CGOLS_RUN_TAG=_dev256b run_cgols_multinode.sh` |
+| P1 | rung 2, inter-node IB | `sbatch --nodes=2 --partition=gpu-h200 --time=00:10:00 run_dist_sanity.sh` |
+| P2 | rung 4, 2-node I/O gate | `sbatch --nodes=2 --time=01:00:00 --export=ALL,CGOLS_DIM=256,CGOLS_END_FRACTION=0.05,CGOLS_NUM_SNAPSHOTS=6,CGOLS_RUN_TAG=_rung4 run_cgols_multinode.sh` |
+| P3 | rung 5, physics vs the 1024 run | `sbatch --nodes=2 --time=04:00:00 --export=ALL,CGOLS_DIM=1024,CGOLS_END_FRACTION=0.02,CGOLS_RUN_TAG=_rung5 run_cgols_multinode.sh` |
+| P4 | rung 6, calibration | `for n in 2 4 8; do sbatch --nodes=$n --export=ALL,CGOLS_DIM=1024 run_cgols_bench.sh; done` |
+| P5 | rung 7, go/no-go | `sbatch run_cgols_bench.sh` |
+| P6 | production | `sbatch run_horeka_2048.sh` |
+
+Wall estimate revised to **~120–150 h (3–4 legs)**. At 32 GPUs each device holds the
+same number of cells as in the 1024 run, so the open question is the inter-node halo
+cost. Leonard's GH200 FD-Pallas weak scaling (upstream 09c8266) lost ~20% going from
+1 to 8 nodes.
+
+---
+
 ## 1. What the run is
 
 Schneider & Robertson 2018 (arXiv:1803.01008) CGOLS galactic-wind replication,

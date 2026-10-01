@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=cgols_bench
 #SBATCH --account=hk-project-pai00101
-#SBATCH --partition=accelerated-h200
+#SBATCH --partition=gpu-h200
 #SBATCH --time=01:00:00
+#SBATCH --exclusive
 
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
@@ -27,7 +28,7 @@
 # EXTRAPOLATE - do not trust a single-measurement estimate. In particular, check
 # whether the ~112 GB contiguous temp arena scales linearly with per-device
 # cells or carries a fixed component: if it does, the 32-GPU H200 option is the
-# first to die and the 64-GPU H100 option has to absorb it.
+# first to die and the 64-GPU H100 option (gpu-h100, 16 nodes) has to absorb it.
 #
 # READING THE OUTPUT: the memory_analysis printer labels MiB as "MB"
 # (time_integration.py divides bytes by 1024^2). The 1024 run's
@@ -39,7 +40,7 @@ export CGOLS_BENCH_STEPS="${CGOLS_BENCH_STEPS:-20}"
 export CGOLS_DIM="${CGOLS_DIM:-2048}"
 # Leave the split unset to get the near-square auto-split of the allocation.
 export CGOLS_SHARD_SPLIT="${CGOLS_SHARD_SPLIT:-}"
-export CGOLS_SITE="${CGOLS_SITE:-horeka}"
+export CGOLS_SITE="${CGOLS_SITE:-horeka2}"
 # A bench must never resume or write into a production tag.
 export CGOLS_RESTART_FROM=""
 export CGOLS_RUN_TAG="${CGOLS_RUN_TAG:-_bench}"

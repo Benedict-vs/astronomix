@@ -1,8 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=cgols_2048
 #SBATCH --account=hk-project-pai00101
-#SBATCH --partition=accelerated-h200
+#SBATCH --partition=gpu-h200
 #SBATCH --time=48:00:00
+#SBATCH --exclusive
 
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
@@ -11,8 +12,9 @@
 #SBATCH --output=cgols_%j.out
 #SBATCH --error=cgols_%j.err
 
-# Production 2048^2 x 4096 CGOLS run on HoreKa: 32x H200 across 8 nodes, one
-# process per GPU, 75 Myr, adiabatic A-series, split (1, 8, 4, 1).
+# Production 2048^2 x 4096 CGOLS run on HoreKa 2 Ruby (gpu-h200): 32x H200
+# across 8 of its 13 nodes, one process per GPU, 75 Myr, adiabatic A-series
+# (pure hydro, no cooling), split (1, 8, 4, 1).
 #
 #   sbatch run_horeka_2048.sh                                      # leg 1, fresh
 #   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
@@ -28,7 +30,10 @@
 #   per-device slice   256 x 512 x 4096   = 1.013x the 1024 run's padded cells
 #   memory             ~127-129 GB/device vs the 147.7 GB cuda_async pool
 #   steps              ~133-140k          (step count scales with dim)
-#   wall               ~120-130 h         => 3 legs of 48 h, ~3,900-4,150 GPU-h
+#   wall               ~120-150 h         => 3-4 legs of 48 h, ~3,900-4,800 GPU-h
+#                      (the per-device load equals the 1024 run's, so the
+#                      unknown is the inter-node halo cost: Leonard's GH200
+#                      weak scaling lost ~20% going 1 -> 8 nodes, i.e. ~4 s/step)
 #   disk               ~344 GB/checkpoint; KEEP=4 + one in flight ~1.7 TB
 #
 # BEFORE COMMITTING THE SLOT, run the ladder (see the plan's section 5) - in
@@ -37,7 +42,7 @@
 # "MB": the 1024 run's "133,723.81 MB" was 140.2 GB. The estimate above rests on
 # a single measurement and sits only ~12 GB under the proven program size.
 #
-# Alternative if the Ruby queue is unobtainable: accelerated-h100, 16 nodes /
+# Alternative if the Ruby queue is unobtainable: gpu-h100 (Teal), 16 of 21 nodes /
 # 64 GPUs, split (1, 8, 8, 1) - ~65 of 94 GB/device, more headroom and fewer
 # legs, but slower cards and only 22 such nodes exist.
 #
@@ -46,7 +51,7 @@
 
 export CGOLS_DIM=2048
 export CGOLS_SHARD_SPLIT="(1, 8, 4, 1)"
-export CGOLS_SITE="${CGOLS_SITE:-horeka}"
+export CGOLS_SITE="${CGOLS_SITE:-horeka2}"
 
 # Empty unless overridden, so a bare sbatch is a fresh leg.
 export CGOLS_RESTART_FROM="${CGOLS_RESTART_FROM:-}"

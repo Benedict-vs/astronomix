@@ -4,9 +4,10 @@
 #   source "$(dirname "${BASH_SOURCE[0]}")/_site_env.sh"
 #
 # Everything that differs between clusters lives behind CGOLS_SITE
-# (horeka | jupiter | local), so run_cgols_multinode.sh / run_cgols_bench.sh
-# stay portable and a new machine is a ~15-line branch here plus a different
-# SBATCH header. Defaults to `horeka`.
+# (horeka2 | horeka | jupiter | local), so run_cgols_multinode.sh /
+# run_cgols_bench.sh stay portable and a new machine is a ~15-line branch here
+# plus a different SBATCH header. Defaults to `horeka2` (HoreKa 2, x86 side:
+# Ruby gpu-h200 / Teal gpu-h100); `horeka` is the legacy system, retired 12/2026.
 #
 # No `set -e` anywhere in these scripts: `module` and `micromamba` are shell
 # functions that misbehave under it.
@@ -17,7 +18,7 @@
 #   cgols_check_workspace - the ./data symlink exists AND is globally visible
 #   start_gpu_logger / stop_gpu_logger - per-node nvidia-smi sampling
 
-CGOLS_SITE="${CGOLS_SITE:-horeka}"
+CGOLS_SITE="${CGOLS_SITE:-horeka2}"
 
 # Resolve the repo from THIS file's location, never from $0: under Slurm $0 is
 # a copy in the spool directory, so $0-relative paths point nowhere.
@@ -25,24 +26,56 @@ CGOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$CGOLS_DIR/../../.." && pwd)"   # pytests/self_gravity/cgols -> repo root
 export REPO CGOLS_DIR
 
-case "$CGOLS_SITE" in
-  horeka)
-    module purge
-    module load devel/cuda/12.9
-
+_cgols_activate_env() {
     source ~/.bashrc
+    # A non-interactive batch shell can return from ~/.bashrc before reaching
+    # the micromamba init block; fall back to the hook from the binary itself.
+    if ! declare -F micromamba >/dev/null; then
+        eval "$("${MAMBA_EXE:-$HOME/.local/bin/micromamba}" shell hook --shell bash)"
+    fi
     # micromamba, NOT conda: `conda activate` inside a batch job silently falls
     # back to the system python when conda's shell hook was never initialised.
     micromamba activate "${CGOLS_ENV:-astro}"
+}
 
+_cgols_pip_nvidia_libs() {
     # Every pip-installed NVIDIA lib, independent of the python version. The
     # glob matters: it picks up nvidia/nccl/lib, which a fixed list of
     # cublas/cufft/cudnn/... misses. NCCL on LD_LIBRARY_PATH is ESSENTIAL once
     # traffic leaves the node - without it the inter-node rendezvous hangs.
-    PYSITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-    for d in "$PYSITE"/nvidia/*/lib; do
+    local pysite d
+    pysite=$(python -c 'import site; print(site.getsitepackages()[0])')
+    for d in "$pysite"/nvidia/*/lib; do
       [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"
     done
+}
+
+# `module`, ~/.bashrc and the micromamba hook are shell code that reads unset
+# variables (HoreKa's /etc/bashrc references BASHRCSOURCED), so under the
+# runners' `set -u` they abort the job. Run the site block with nounset off and
+# restore the caller's setting afterwards.
+_cgols_had_nounset=0
+case $- in *u*) _cgols_had_nounset=1; set +u ;; esac
+
+case "$CGOLS_SITE" in
+  horeka2)
+    # HoreKa 2, x86 login hk2-x86.scc.kit.edu (Ruby gpu-h200, Teal gpu-h100).
+    # Jade (gpu-b200) is aarch64 and needs its own env - not this branch.
+    # No CUDA module: the software stack moved to EasyBuild with new names,
+    # and nothing here needs one - the pip nvidia-* wheels provide every
+    # runtime lib incl. NCCL, and ptxas comes from nvidia/cuda_nvcc (the
+    # preflight banner prints which ptxas actually won).
+    module purge 2>/dev/null
+    _cgols_activate_env
+    _cgols_pip_nvidia_libs
+    ;;
+
+  horeka)
+    # Legacy HoreKa (decommissioned 12/2026).
+    module purge
+    module load devel/cuda/12.9
+    _cgols_activate_env
+    _cgols_pip_nvidia_libs
     ;;
 
   jupiter)
@@ -50,12 +83,8 @@ case "$CGOLS_SITE" in
     # module names once an allocation exists.
     module purge
     module load CUDA
-    source ~/.bashrc
-    micromamba activate "${CGOLS_ENV:-astro}"
-    PYSITE=$(python -c 'import site; print(site.getsitepackages()[0])')
-    for d in "$PYSITE"/nvidia/*/lib; do
-      [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"
-    done
+    _cgols_activate_env
+    _cgols_pip_nvidia_libs
     ;;
 
   local)
@@ -63,10 +92,13 @@ case "$CGOLS_SITE" in
     ;;
 
   *)
-    echo "ERROR: unknown CGOLS_SITE='$CGOLS_SITE' (horeka | jupiter | local)" >&2
+    echo "ERROR: unknown CGOLS_SITE='$CGOLS_SITE' (horeka2 | horeka | jupiter | local)" >&2
     return 1 2>/dev/null || exit 1
     ;;
 esac
+
+[ "$_cgols_had_nounset" = 1 ] && set -u
+unset _cgols_had_nounset
 
 # --- JAX runtime knobs ------------------------------------------------------
 # cuda_async instead of the default BFC allocator: the compiled step needs a

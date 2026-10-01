@@ -1,8 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=cgols_mn
 #SBATCH --account=hk-project-pai00101
-#SBATCH --partition=accelerated-h200
+#SBATCH --partition=gpu-h200
 #SBATCH --time=48:00:00
+# HoreKa 2 GPU partitions are SHARED by default; a multi-node SPMD job wants
+# whole nodes (all 4 GPUs visible to every rank for --gpu-bind=none, no
+# co-tenant on the NICs), so ask for them explicitly.
+#SBATCH --exclusive
 
 #SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
@@ -24,9 +28,12 @@
 #   sbatch --export=ALL,CGOLS_DIM=1024 run_cgols_multinode.sh
 #
 # PRODUCTION 2048 TARGET (see run_horeka_2048.sh, which just sets these):
-#   accelerated-h200, 8 nodes x 4 H200 = 32 GPUs, split (1, 8, 4, 1),
-#   ~127-129 GB/device, ~135k steps at ~3.1-3.3 s/step => ~120-130 h wall,
-#   i.e. three 48 h legs, ~3,900-4,150 GPU-h.
+#   HoreKa 2 Ruby gpu-h200, 8 nodes x 4 H200 = 32 GPUs, split (1, 8, 4, 1),
+#   ~127-129 GB/device, ~135k steps at ~3.1-4 s/step => ~120-150 h wall,
+#   i.e. three to four 48 h legs, ~3,900-4,800 GPU-h.
+#
+# Submit from THIS directory (Slurm writes the .out/.err relative to the
+# submit dir, and the watchdog reads the .err).
 #
 # LEGS. A leg that TIMEOUTs is resumed from the previous leg's Orbax checkpoint
 # directory, with a FRESH run tag (the startup cleanup wipes checkpoints and
@@ -100,9 +107,21 @@ SRUN_ARGS=(--gpu-bind=none --kill-on-bad-exit=1)
 # task, whereas killing a local python would leave 31 orphaned ranks holding
 # their GPUs. The settle window is longer than the 1024 run's 15 min because 32
 # ranks take correspondingly longer to form the clique and to compile.
-ERR_FILE="cgols_${SLURM_JOB_ID:-local}.err"
+# Ask Slurm where this job's stderr goes: the bench wrapper names it
+# cgols_bench_%j.err, and a hardcoded name would leave the watchdog blind.
+ERR_FILE=$(scontrol show job "${SLURM_JOB_ID:-0}" 2>/dev/null | sed -n 's/^ *StdErr=//p')
+ERR_FILE="${ERR_FILE:-cgols_${SLURM_JOB_ID:-local}.err}"
 SETTLE="${CGOLS_WATCHDOG_SETTLE:-1800}"   # 30 min
 GRACE="${CGOLS_WATCHDOG_GRACE:-300}"      # 5 min for an in-flight warning to clear
+
+# Sleep up to $1 s, but return as soon as srun exits: a run shorter than the
+# settle window (every dev-queue test) must not idle out the rest of SETTLE.
+_wait_or_exit() {
+    local deadline=$((SECONDS + $1))
+    while [ "$SECONDS" -lt "$deadline" ] && kill -0 "$SRUN_PID" 2>/dev/null; do
+        sleep 10
+    done
+}
 
 for attempt in 1 2 3; do
     stuck0=$(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true)
@@ -111,12 +130,14 @@ for attempt in 1 2 3; do
     srun "${SRUN_ARGS[@]}" python cgols.py &
     SRUN_PID=$!
 
-    sleep "$SETTLE"
+    _wait_or_exit "$SETTLE"
     if kill -0 "$SRUN_PID" 2>/dev/null; then
-        sleep "$GRACE"
+        _wait_or_exit "$GRACE"
         stuck=$(( $(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true) - stuck0 ))
         unstuck=$(( $(grep -c 'unstuck' "$ERR_FILE" 2>/dev/null || true) - unstuck0 ))
-        if [ "$stuck" -gt "$unstuck" ]; then
+        # Only a run that is STILL alive can be hung; one that exited during
+        # the grace window is reported below with its real exit code.
+        if [ "$stuck" -gt "$unstuck" ] && kill -0 "$SRUN_PID" 2>/dev/null; then
             echo "WATCHDOG: attempt $attempt hung at NCCL init, relaunching" >&2
             kill "$SRUN_PID" 2>/dev/null; sleep 60
             kill -9 "$SRUN_PID" 2>/dev/null || true
