@@ -34,6 +34,15 @@ if [ "$(uname -m)" != "x86_64" ]; then
     exit 1
 fi
 
+# Legacy HoreKa (login hkn19xx, /hkfs) shares the x86 arch and much of the
+# tooling, so without this check the script "succeeds" there and sets up the
+# OLD system. HoreKa 2's file systems are /hfs2/*.
+if [ ! -d /hfs2 ]; then
+    echo "ERROR: $(hostname) is not HoreKa 2 (no /hfs2) - this looks like legacy HoreKa." >&2
+    echo "       Log in to hk2-x86.scc.kit.edu and run this there." >&2
+    exit 1
+fi
+
 # --- 1. micromamba ----------------------------------------------------------
 MAMBA_EXE="${MAMBA_EXE:-$HOME/.local/bin/micromamba}"
 export MAMBA_ROOT_PREFIX="${MAMBA_ROOT_PREFIX:-$HOME/micromamba}"
@@ -134,10 +143,10 @@ sacctmgr -n -P show associations user="$USER" format=Account 2>/dev/null | sort 
 
 say "GPU partitions"
 for p in gpu-h200 gpu-h100 dev-gpu-h100 gpu-b200; do
-    scontrol show partition "$p" 2>/dev/null \
-        | grep -oE "PartitionName=[^ ]+|State=[^ ]+|MaxNodes=[^ ]+|MaxTime=[^ ]+|TotalNodes=[^ ]+|OverSubscribe=[^ ]+" \
-        | tr '\n' ' '
-    echo
+    info=$(scontrol show partition "$p" 2>/dev/null \
+        | grep -oE "State=[^ ]+|MaxNodes=[^ ]+|MaxTime=[^ ]+|TotalNodes=[^ ]+|OverSubscribe=[^ ]+" \
+        | tr '\n' ' ')
+    printf '%-13s %s\n' "$p" "${info:-NOT FOUND}"
 done
 echo
 echo "Setup done. Next: sbatch --test-only the job shapes, then the dev ladder."

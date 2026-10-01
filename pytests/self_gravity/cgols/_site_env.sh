@@ -65,6 +65,11 @@ case "$CGOLS_SITE" in
     # and nothing here needs one - the pip nvidia-* wheels provide every
     # runtime lib incl. NCCL, and ptxas comes from nvidia/cuda_nvcc (the
     # preflight banner prints which ptxas actually won).
+    if [ ! -d /hfs2 ]; then
+        echo "ERROR: CGOLS_SITE=horeka2 but $(hostname) has no /hfs2 - this is legacy" >&2
+        echo "       HoreKa. Submit from hk2-x86.scc.kit.edu (or set CGOLS_SITE=horeka)." >&2
+        return 1 2>/dev/null || exit 1
+    fi
     module purge 2>/dev/null
     _cgols_activate_env
     _cgols_pip_nvidia_libs
