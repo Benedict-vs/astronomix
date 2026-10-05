@@ -83,8 +83,10 @@ sys.exit(not (jax.__version__ == "0.10.1" and o.__version__ == "0.12.1"))' 2>/de
         "nvidia-cuda-nvcc-cu12>=12.9,<13" \
         equinox beartype jaxtyping scipy astropy autocvd matplotlib || exit 1
 fi
-if ! python -c 'import astronomix, os, sys
-sys.exit(not os.path.realpath(astronomix.__file__).startswith(os.path.realpath(sys.argv[1])))' "$REPO" 2>/dev/null; then
+# Check from / : `python -c` puts the cwd on sys.path, so run from the repo
+# root it imports the source tree and skips the install it is meant to detect.
+if ! (cd / && python -c 'import astronomix, os, sys
+sys.exit(not os.path.realpath(astronomix.__file__).startswith(os.path.realpath(sys.argv[1])))' "$REPO") 2>/dev/null; then
     say "installing astronomix editable from $REPO"
     # --no-deps: pyproject still pins orbax <0.11.11 for upstream's jax 0.6.2,
     # and resolving it would drag orbax back below what jax 0.10 can restore.
