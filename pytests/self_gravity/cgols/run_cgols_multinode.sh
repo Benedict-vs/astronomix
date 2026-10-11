@@ -48,7 +48,23 @@
 
 set -u
 
+# Under sbatch this file runs as Slurm's spool copy
+# (/var/spool/slurmd/job<id>/slurm_script), so BASH_SOURCE does not lead back to
+# the repo; ask Slurm for the path that was submitted instead.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ ! -f "$HERE/_site_env.sh" ] && [ -n "${SLURM_JOB_ID:-}" ]; then
+    _cmd="$(scontrol show job "$SLURM_JOB_ID" 2>/dev/null | sed -n 's/^ *Command=//p')"
+    if [ -n "$_cmd" ]; then
+        case "$_cmd" in /*) ;; *) _cmd="${SLURM_SUBMIT_DIR:-.}/$_cmd" ;; esac
+        HERE="$(cd "$(dirname "$_cmd")" 2>/dev/null && pwd)"
+    else
+        HERE="${SLURM_SUBMIT_DIR:-}"
+    fi
+fi
+if [ ! -f "$HERE/_site_env.sh" ]; then
+    echo "ERROR: cannot locate the cgols directory (got '$HERE')" >&2
+    exit 1
+fi
 source "$HERE/_site_env.sh" || exit 1
 cd "$CGOLS_DIR" || exit 1
 
