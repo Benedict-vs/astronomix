@@ -1181,12 +1181,24 @@ def _time_integration_to_disk(
     # padded copy exists only while the (much larger) solver workspace is free.
     emit_frames = config.activate_snapshot_callback and snapshot_callable is not None
 
+    # Jitted, never eager: an eager jax.debug.callback device_puts its operands
+    # to the host, which fails multi-process (one process per GPU) because a
+    # global array spans other processes' devices and is not fully
+    # addressable. Under jit XLA moves the callback operands to device 0
+    # itself, exactly as in the ON_DEVICE loop.
+    @jax.jit
+    def _frame_jit(time, state, frame_params):
+        padded = _prepare_padded_state(
+            state, config, frame_params, registered_variables
+        )
+        snapshot_callable(time, padded, registered_variables)
+
     def _emit_frame(time, state, frame_params):
         with mesh_ctx, pallas_mesh_context(pallas_mesh):
-            padded = _prepare_padded_state(
-                state, config, frame_params, registered_variables
-            )
-            snapshot_callable(time, padded, registered_variables)
+            _frame_jit(time, state, frame_params)
+        # Host callbacks run asynchronously: wait until the frame is written
+        # before the next segment donates the state it was read from.
+        jax.effects_barrier()
 
     # The frame at t_start is only emitted on a cold start — a resumed run's
     # predecessor already recorded it.

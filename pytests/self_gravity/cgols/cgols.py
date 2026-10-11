@@ -2663,6 +2663,14 @@ if __name__ == "__main__":
         # rank. From 2048 on the Orbax checkpoint (already written sharded, one
         # shard per device) is the final artefact and this dump is skipped.
         if not BENCH_STEPS and RESOLUTION <= 1024:
+            # Multi-process, final_state is a global array whose shards live
+            # in other processes, so rank 0 cannot convert it to numpy on its
+            # own: gather first. process_allgather is a COLLECTIVE - every rank
+            # calls it, never behind RANK0.
+            if jax.process_count() > 1:
+                from jax.experimental import multihost_utils
+
+                final_state = multihost_utils.process_allgather(final_state, tiled=True)
             if RANK0:
                 jnp.save(_data_final(f"cgols_final_state{RUN_TAG}.npy"), final_state)
             barrier("cgols:final-state-saved")
