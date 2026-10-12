@@ -61,8 +61,10 @@ turbulence/mixing) and a slightly warmer, puffier central disk.
 # (SHARD_SPLIT) run every visible GPU independently preallocates 0.95 of its own
 # memory - it is not a shared budget. setdefault lets a command-line override win.
 import ast
+import faulthandler
 import math
 import os
+import signal
 import time
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
@@ -235,6 +237,17 @@ if NUM_GPUS != jax.device_count():
 #: Never guard a COLLECTIVE with this (an Orbax save/restore, a barrier) - that
 #: deadlocks every other rank; guard only this script's own side effects.
 RANK0 = jax.process_index() == 0
+
+# A hung rank is otherwise silent: Slurm's time-limit SIGTERM is followed by a
+# SIGKILL that discards the buffered stdout (job 67285 left no trace of where
+# it stopped). Dump every thread's Python stack to stderr on SIGTERM, then
+# terminate as before; on SIGUSR1 dump without stopping, so a live run can be
+# inspected with  scancel --signal=USR1 <jobid>  (steps only, not --full).
+# Registered after the distributed init, so any handler JAX installed there is
+# chained, not replaced.
+faulthandler.enable()
+faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
+faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 def rprint(*args, **kwargs):
@@ -658,6 +671,17 @@ RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "_B" if COOLING else "")
 # bit-identical to one left uninterrupted.
 CHECKPOINT_EVERY = int(os.environ.get("CGOLS_CHECKPOINT_EVERY", "3"))
 CHECKPOINT_KEEP = int(os.environ.get("CGOLS_CHECKPOINT_KEEP", "4"))
+
+# Frame callbacks per device instead of once on device 0. Multi-process only
+# (one device per process, so every rank fires exactly once on its replicated
+# copy and RANK0 still writes); single-process it would fire once per local
+# device. Diagnostic for the multi-process GPU hang of job 67285 - the default
+# stays the gathered-on-device-0 callback until the probe has decided.
+CALLBACK_PARTITIONED = (
+    os.environ.get("CGOLS_CALLBACK_PARTITIONED", "0") == "1"
+    and jax.process_count() > 1
+)
+
 RESTART_FROM = os.environ.get("CGOLS_RESTART_FROM", "")
 RESTART_STEP = os.environ.get("CGOLS_RESTART_STEP", "")
 
@@ -1805,7 +1829,7 @@ def make_snapshot_callable(
         vz = state[registered_variables.velocity_index.z]
 
         if CHECKPOINT_EVERY:
-            jax.debug.callback(_prune_checkpoints)
+            jax.debug.callback(_prune_checkpoints, partitioned=CALLBACK_PARTITIONED)
 
         # Edge-on (x-z, y=0) and face-on (x-y, z=0) physical slices.
         rho_xz = rho[g:hi, my, g:hi]   # (dim_x, dim_z)
@@ -1843,6 +1867,7 @@ def make_snapshot_callable(
             _replicated(n_xy),
             _replicated(mdot_z),
             _replicated(vr_xz),
+            partitioned=CALLBACK_PARTITIONED,
         )
 
     return snapshot_callable

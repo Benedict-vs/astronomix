@@ -124,6 +124,11 @@ export JAX_USE_SHARDY_PARTITIONER=false
 # run; NCCL_DEBUG=INFO is the escalation when a rendezvous does hang.
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 
+# Unbuffered Python output: Slurm kills a job that overruns its time limit with
+# SIGKILL, which discards block-buffered stdout, so a hung run's .out stopped
+# at the last flush=True print and showed nothing of where it got to (67285).
+export PYTHONUNBUFFERED=1
+
 
 cgols_preflight() {
     # Version banner. Every job's .out then documents exactly which jax, orbax,
