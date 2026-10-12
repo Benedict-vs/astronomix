@@ -289,6 +289,8 @@ def _pallas_call_sharded(
     def body(*all_args):
         state_arrays = list(all_args[: len(state_inputs)])
         others = all_args[len(state_inputs):]
+        # Local (pre-halo) extent of every sharded axis, to strip back to.
+        local_size = {ax: state_arrays[0].shape[ax] for ax, _, _ in sharded_axes}
 
         for array_axis_idx, mesh_axis_name, num_dev in sharded_axes:
             spatial_idx = array_axis_idx - 1
@@ -314,9 +316,37 @@ def _pallas_call_sharded(
                 right_halo = jax.lax.ppermute(
                     left_edge, mesh_axis_name, perm=left_perm
                 )
-                state_arrays[i] = jnp.concatenate(
-                    [left_halo, arr, right_halo], axis=array_axis_idx
-                )
+                pieces = [left_halo, arr, right_halo]
+                # Block alignment (see below), folded into this concatenate
+                # so it costs no extra copy of the local state.
+                extra = (-(size + 2 * h)) % max(int(block_3[spatial_idx]), 1)
+                if extra:
+                    last = jax.lax.slice_in_dim(right_halo, h - 1, h, axis=array_axis_idx)
+                    pieces.append(jnp.repeat(last, extra, axis=array_axis_idx))
+                state_arrays[i] = jnp.concatenate(pieces, axis=array_axis_idx)
+
+        # The kernels' grid is ``n // block``, so a local extent that is not a
+        # whole number of blocks leaves the last cells of every shard
+        # unprocessed - silently frozen. With ghost cells the sharded array is
+        # N + 2*num_ghost_cells long, so e.g. 1032 cells over 4 shards gives
+        # 258 per shard: two cells per shard never update (at the box centre,
+        # for an even split). Pad each sharded axis on the right, beyond the
+        # halo, up to a block multiple. The halo already covers the stencil
+        # reach, so the padding cannot influence a real cell's output; edge
+        # values keep the padded cells physical. Stripped again below. Axes
+        # with a halo were aligned in the concatenate above; this pad (one
+        # extra copy) only remains for halo-free, pointwise kernels.
+        for array_axis_idx, _, _ in sharded_axes:
+            spatial_idx = array_axis_idx - 1
+            if spatial_idx >= len(block_3):
+                continue
+            b = max(int(block_3[spatial_idx]), 1)
+            for i, arr in enumerate(state_arrays):
+                extra = (-arr.shape[array_axis_idx]) % b
+                if extra:
+                    pad = [(0, 0)] * arr.ndim
+                    pad[array_axis_idx] = (0, extra)
+                    state_arrays[i] = jnp.pad(arr, pad, mode="edge")
 
         # Re-enter the wrapper with mesh=None so the recursive
         # ``kernel_build_fn`` call goes through the no-wrap path.  Without
@@ -326,15 +356,15 @@ def _pallas_call_sharded(
             out = kernel_build_fn(*state_arrays, *others)
 
         def _strip(o):
+            # Drop the left halo, then keep exactly the local extent: this
+            # removes the right halo and any block-alignment padding.
             for array_axis_idx, _, _ in sharded_axes:
                 spatial_idx = array_axis_idx - 1
-                if spatial_idx >= len(halo_padded):
-                    continue
-                h = halo_padded[spatial_idx]
-                if h <= 0:
-                    continue
-                size = o.shape[array_axis_idx]
-                o = jax.lax.slice_in_dim(o, h, size - h, axis=array_axis_idx)
+                h = halo_padded[spatial_idx] if spatial_idx < len(halo_padded) else 0
+                h = max(h, 0)
+                n = local_size[array_axis_idx]
+                if o.shape[array_axis_idx] != n:
+                    o = jax.lax.slice_in_dim(o, h, h + n, axis=array_axis_idx)
             return o
 
         if isinstance(out, tuple):
