@@ -26,6 +26,10 @@ pytests/self_gravity/cgols/data
 # HoreKa / Slurm job artifacts dropped next to the scripts
 pytests/self_gravity/cgols/cgols_*.out
 pytests/self_gravity/cgols/cgols_*.err
+pytests/self_gravity/cgols/distsanity_*.out
+pytests/self_gravity/cgols/distsanity_*.err
+pytests/self_gravity/cgols/probe_*.out
+pytests/self_gravity/cgols/probe_*.err
 pytests/self_gravity/cgols/gpu_usage_*.csv
 
 # regenerated methods-paper outputs (see pytests/paper_plots)
