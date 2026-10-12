@@ -151,8 +151,11 @@ def build_central_column(sigma_cells, window=None):
     # ---- Branch on smoothing, exactly as cgols.py:908-938 ----
     if sigma_cells > 0:
         P_top_2d = K_const * rho_halo[:, :, -1:] ** gamma
+        P_bottom_2d = K_const * rho_halo[:, :, :1] ** gamma
         rho_total = _gaussian_smooth_3d(rho_disk + rho_halo, sigma_cells)
-        P_total = vertical_hse_pressure(rho_total, Phi_total, dz, P_top_2d)
+        P_total = vertical_hse_pressure(
+            rho_total, Phi_total, dz, P_top_2d, P_bottom_2d
+        )
     else:
         rho_total = rho_disk + rho_halo
         P_total = rho_disk * c_s_d**2 + K_const * rho_halo**gamma

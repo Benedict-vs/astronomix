@@ -888,20 +888,35 @@ def Phi_halo_function(r):
     )
 
 
-def vertical_hse_pressure(rho, Phi, dz_, P_top):
-    """Pressure in discrete vertical HSE: integrate dP/dz = -rho dPhi/dz downward.
+def vertical_hse_pressure(rho, Phi, dz_, P_top, P_bottom=None):
+    """Pressure in discrete vertical HSE: integrate dP/dz = -rho dPhi/dz.
 
-    Trapezoidal integration along each (x, y) column from the top boundary,
-    where P = P_top. Returns a pressure consistent with the vertical force
-    balance for the supplied density, so a (re)constructed IC does not ring
-    vertically. (Matches the analytic isothermal solution to the discretisation
-    error of the integrator.)
+    Trapezoidal integration along each (x, y) column, inward from BOTH z
+    boundaries to the midplane: the upper half from the top (P = P_top), the
+    lower half from the bottom (P = P_bottom, default P_top). Returns a pressure
+    consistent with the vertical force balance for the supplied density, so a
+    (re)constructed IC does not ring vertically. (Matches the analytic
+    isothermal solution to the discretisation error of the integrator.)
+
+    Two-sided, not one sweep from the top: below the midplane a single sweep
+    gets the halo pressure as (midplane pressure) - (a nearly equal sum), a
+    cancellation of ~P_mid/P_halo ~ 3e3. In fp32 that left the lower half with
+    ~2e-3 pressure errors (8% of max|v| of spurious halo rotation through the
+    sqrt in v_phi), and even an exact sum amplified the 3e-7 rounding asymmetry
+    of the smoothed density to 9e-4. Each half now only accumulates terms of
+    one sign, and the two halves are mirror images to rounding.
     """
+    if P_bottom is None:
+        P_bottom = P_top
     dPhi_dz = jnp.gradient(Phi, dz_, axis=2)
     q = rho * dPhi_dz  # equals -dP/dz
     incr = 0.5 * (q[:, :, :-1] + q[:, :, 1:]) * dz_  # P[k] - P[k+1]
-    rev = jnp.cumsum(incr[:, :, ::-1], axis=2)[:, :, ::-1]
-    return jnp.concatenate([P_top + rev, P_top], axis=2)
+    mid = rho.shape[2] // 2
+    upper = jnp.cumsum(incr[:, :, mid:][:, :, ::-1], axis=2)[:, :, ::-1]  # k = mid..nz-2
+    lower = jnp.cumsum(-incr[:, :, : mid - 1], axis=2)  # k = 1..mid-1
+    return jnp.concatenate(
+        [P_bottom, P_bottom + lower, P_top + upper, P_top], axis=2
+    )
 
 
 def _gaussian_smooth_3d(field, sigma):
@@ -1359,12 +1374,15 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
     if SMOOTHING_SIGMA_CELLS > 0:
         # Top-boundary halo pressure for HSE: a (Nx, Ny, 1) slice, not full 3D.
         P_top_2d = K_const * rho_halo[:, :, -1:] ** gamma
+        P_bottom_2d = K_const * rho_halo[:, :, :1] ** gamma
         rho_total = rho_disk + rho_halo
         del rho_disk, rho_halo
 
         rho_total = _gaussian_smooth_3d(rho_total, SMOOTHING_SIGMA_CELLS)
-        P_total = vertical_hse_pressure(rho_total, Phi_total, dz, P_top_2d)
-        del P_top_2d
+        P_total = vertical_hse_pressure(
+            rho_total, Phi_total, dz, P_top_2d, P_bottom_2d
+        )
+        del P_top_2d, P_bottom_2d
 
         # Rotation from total fields.
         dPhi_dx = jnp.gradient(Phi_total, dx, axis=0)
