@@ -129,6 +129,18 @@ export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 # at the last flush=True print and showed nothing of where it got to (67285).
 export PYTHONUNBUFFERED=1
 
+# No cross-process waits inside the XLA compiler. Sharded autotuning splits the
+# autotuning of each multi-process compile across ranks and exchanges results
+# through the distributed key-value store, so every rank blocks until all have
+# published theirs; ranks whose compile histories differ can wait forever. Job
+# 68965 (D2, DIM=256) sat 20 min with all 4 ranks in backend_compile of the
+# trivial t=0 frame program (the same program compiled in seconds at 128). Off,
+# every rank autotunes its own compile - a little slower, and independent.
+case " ${XLA_FLAGS:-} " in
+    *xla_gpu_shard_autotuning*) ;;
+    *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_shard_autotuning=false" ;;
+esac
+
 
 cgols_preflight() {
     # Version banner. Every job's .out then documents exactly which jax, orbax,

@@ -61,6 +61,7 @@ turbulence/mixing) and a slightly warmer, puffier central disk.
 # (SHARD_SPLIT) run every visible GPU independently preallocates 0.95 of its own
 # memory - it is not a shared budget. setdefault lets a command-line override win.
 import ast
+import contextlib
 import faulthandler
 import math
 import os
@@ -1483,6 +1484,21 @@ def plot_ic_diagnostics(config, diagnostics):
     if not RANK0:
         return
 
+    # On the host CPU, not the GPU: everything below is rank-0-only eager jnp,
+    # so on the GPU rank 0 would compile programs no other rank compiles. Job
+    # 68965 hung for 20 min with every rank inside the XLA compile of the t=0
+    # frame right after this, a cross-process wait (see XLA_FLAGS in
+    # _site_env.sh); keep the ranks' GPU compile histories identical.
+    try:
+        host = jax.default_device(jax.local_devices(backend="cpu")[0])
+    except RuntimeError:  # JAX_PLATFORMS without cpu
+        host = contextlib.nullcontext()
+    with host:
+        _plot_ic_diagnostics(config, diagnostics)
+
+
+def _plot_ic_diagnostics(config, diagnostics):
+    """Body of :func:`plot_ic_diagnostics` (rank 0, default device = CPU)."""
     x1, _, z1 = _ic_axes(config)
     dx = dz = config.grid_spacing
     mid_x = config.num_cells.x // 2
