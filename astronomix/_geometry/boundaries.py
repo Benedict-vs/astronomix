@@ -63,6 +63,22 @@ def _axis_slice(axis: int, start, stop, ndim: int) -> tuple:
 # Open boundaries — broadcast the first/last interior cell into all ghost cells
 # -----------------------------------------------------------------------------
  
+def _axis_range_mask(shape: tuple, axis: int, start: int, stop: int) -> jax.Array:
+    """Boolean mask, broadcastable against ``shape``, that is True for indices
+    ``start <= i < stop`` along ``axis`` (length ``shape[axis]`` on that axis,
+    1 elsewhere)."""
+    idx = jax.lax.broadcasted_iota(
+        jnp.int32, tuple(n if d == axis else 1 for d, n in enumerate(shape)), axis
+    )
+    return (idx >= start) & (idx < stop)
+
+
+# Open and diode ghost fills are written as elementwise selects against an
+# index mask rather than ``.at[ghosts].set(...)``: on an axis that is sharded
+# across devices, GSPMD lowers that scatter to an all-gather of the WHOLE state
+# along the axis (every RK stage), while a select only needs the one-cell-thick
+# edge slab broadcast to the axis' shards. Values are bit-identical.
+
 @partial(jax.jit, static_argnames=["axis", "num_ghost_cells"])
 def _open_left_boundary(
     primitive_state: STATE_TYPE, num_ghost_cells: int, axis: int
@@ -70,24 +86,39 @@ def _open_left_boundary(
     """All left ghost cells ← first interior cell (via length-1 broadcast)."""
     ndim = primitive_state.ndim
     src = _axis_slice(axis, num_ghost_cells, num_ghost_cells + 1, ndim)
-    dst = _axis_slice(axis, 0, num_ghost_cells, ndim)
-    return primitive_state.at[dst].set(primitive_state[src])
- 
- 
+    mask = _axis_range_mask(primitive_state.shape, axis, 0, num_ghost_cells)
+    return jnp.where(mask, primitive_state[src], primitive_state)
+
+
 @partial(jax.jit, static_argnames=["axis", "num_ghost_cells"])
 def _open_right_boundary(
     primitive_state: STATE_TYPE, num_ghost_cells: int, axis: int
 ) -> STATE_TYPE:
     """All right ghost cells ← last interior cell (via length-1 broadcast)."""
     ndim = primitive_state.ndim
-    src = _axis_slice(axis, -num_ghost_cells - 1, -num_ghost_cells, ndim)
-    dst = _axis_slice(axis, -num_ghost_cells, None, ndim)
-    return primitive_state.at[dst].set(primitive_state[src])
+    n = primitive_state.shape[axis]
+    src = _axis_slice(axis, n - num_ghost_cells - 1, n - num_ghost_cells, ndim)
+    mask = _axis_range_mask(primitive_state.shape, axis, n - num_ghost_cells, n)
+    return jnp.where(mask, primitive_state[src], primitive_state)
 
 
 # -----------------------------------------------------------------------------
 # Diode boundaries — open copy, then forbid inflow through the boundary
 # -----------------------------------------------------------------------------
+
+def _diode_clamp(primitive_state, start, stop, axis, normal_index, clamp):
+    """Apply ``clamp`` (jnp.minimum / jnp.maximum against 0) to variable
+    ``normal_index`` in the ghost range ``[start, stop)`` along ``axis``. An
+    out-of-range ``normal_index`` (the scalar potential's single dummy
+    variable) leaves the state untouched."""
+    if not 0 <= normal_index < primitive_state.shape[0]:
+        return primitive_state
+    mask = _axis_range_mask(primitive_state.shape, axis, start, stop)
+    mask = mask & _axis_range_mask(
+        primitive_state.shape, 0, normal_index, normal_index + 1
+    )
+    return jnp.where(mask, clamp(primitive_state, 0.0), primitive_state)
+
 
 @partial(jax.jit, static_argnames=["axis", "num_ghost_cells", "normal_index"])
 def _diode_left_boundary(
@@ -98,11 +129,12 @@ def _diode_left_boundary(
     boundary-normal velocity at ``normal_index`` is clamped to ≤ 0 so the ghost
     region can never feed gas into the domain. The same clamp is valid on the
     conserved state (momentum has the sign of velocity). An out-of-bounds
-    ``normal_index`` (e.g. the scalar potential's dummy variable axis) makes
-    the clamp a dropped scatter, leaving the plain open copy."""
+    ``normal_index`` (e.g. the scalar potential's dummy variable axis) leaves
+    the plain open copy."""
     primitive_state = _open_left_boundary(primitive_state, num_ghost_cells, axis)
-    dst = _axis_slice(axis, 0, num_ghost_cells, primitive_state.ndim)
-    return primitive_state.at[(normal_index,) + dst[1:]].min(0.0)
+    return _diode_clamp(
+        primitive_state, 0, num_ghost_cells, axis, normal_index, jnp.minimum
+    )
 
 
 @partial(jax.jit, static_argnames=["axis", "num_ghost_cells", "normal_index"])
@@ -112,8 +144,10 @@ def _diode_right_boundary(
     """Mirror image of ``_diode_left_boundary``: the right ghost cells' normal
     velocity is clamped to ≥ 0 (outflow through the right face only)."""
     primitive_state = _open_right_boundary(primitive_state, num_ghost_cells, axis)
-    dst = _axis_slice(axis, -num_ghost_cells, None, primitive_state.ndim)
-    return primitive_state.at[(normal_index,) + dst[1:]].max(0.0)
+    n = primitive_state.shape[axis]
+    return _diode_clamp(
+        primitive_state, n - num_ghost_cells, n, axis, normal_index, jnp.maximum
+    )
 
 
 # -----------------------------------------------------------------------------
