@@ -65,6 +65,7 @@ from astronomix._modules._iteration_level_updates import (
 from astronomix._modules._cooling._cooling import cooling_time_step_limit
 from astronomix._modules._cooling.cooling_options import COOLING_OPERATOR_SPLIT
 from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
+from astronomix._modules._gravity._utils import _pad_external_potential
 from astronomix._snapshotting._snapshot_diagnostics import (
     build_snapshot_store,
     record_snapshot,
@@ -644,6 +645,27 @@ def _integrate_core(
     # =============== ↑ Setup of the snapshot array ↑ =============
     # -------------------------------------------------------------
 
+    # The external potential is static, but the gravity source pads it onto
+    # the ghost-cell grid on every call, i.e. every RK stage. XLA's GPU
+    # pipeline does not hoist that out of the loop, and on a sharded grid the
+    # edge pad is an all-to-all of the whole local potential. Pad it once
+    # here; the in-loop _pad_external_potential then sees matching shapes and
+    # returns it unchanged. Snapshot diagnostics run on the unpadded grid and
+    # keep ``params``.
+    step_params = params
+    if config.gravity_config.external_potential:
+        step_params = params._replace(
+            gravitational_potential=_pad_external_potential(
+                params.gravitational_potential,
+                initial_loop_state.primitive_state[
+                    registered_variables.density_index
+                ],
+                config,
+                registered_variables,
+                params,
+            )
+        )
+
     # -------------------------------------------------------------
     # ================ ↓ step / record closures ↓ =================
     # -------------------------------------------------------------
@@ -660,6 +682,7 @@ def _integrate_core(
         end time, runs the per-step modules and evolves the state.  Returns
         ``(dt, new_state)``; the driver advances the time.
         """
+        params = step_params  # external potential pre-padded, see above
         primitive_state = state.primitive_state
         key = state.key
         forcing = state.forcing
