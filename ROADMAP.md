@@ -15,10 +15,17 @@ being AthenaPK's own GPU-vs-CPU difference), the CP Alfvén convergence study an
 the A100 benchmark (Pallas 9.25 ms per step at 2 x 128³ in double precision
 against AthenaPK's 25.4 ms). `pytests/mhd/vl2_athenapk_regression.py` guards it.
 
-**Next.** The same benchmark on H100/H200 and at larger N (the scheme is
-FP64-compute bound on the A100), strong and weak scaling on several GPUs against
-AthenaPK's own scaling, single precision, and the turbulence driving of the
-dynamo study (below) under VL2.
+**Done since** (paper revision, branch `paper-revision`): AthenaPK builds for the
+JUPITER GH200 nodes in double and single precision
+(`/e/project1/astronomix/storcks1/athenapk_build/`, `jupiter_athenapk.sh`), the
+single-GPU comparison on GH200 in both precisions (`benchmark.py`,
+`fv_athenapk_single_precision.py`; VL2 Pallas 2.8x faster per step than AthenaPK
+in double, 6.9x in single precision at N = 128), and strong/weak scaling of VL2 to
+128 GPUs (`examples/scripts/scaling/`).
+
+**Next.** Scaling against AthenaPK's own multi-GPU scaling; the VL2 Pallas kernels
+on multiple nodes are communication bound (FV weak-scaling efficiency 58-65 % at
+128 GPUs, at eight to nine times the FD throughput per GPU).
 
 ## 2. Cas A at high resolution
 
@@ -47,13 +54,14 @@ at matched E_B/E_K (Pm_num is a scheme constant: CT ~1.21, every GLM scheme
 forcing (`TurbulentForcingConfig.forcing_modes`). The hydro counterpart against
 AthenaK is in `examples/scripts/forward/hydro/turbulence`.
 
-**Next.** Run the same study with astronomix's own VL2 scheme, so FV and FD share
-the code, the forcing realisation and the diagnostics: `dynamo_convergence.py`
-needs a `--scheme vl2` path (ideal gas with gamma close to 1 as in
-`athenapk_turb.py`, the GLM psi instead of face fields in the reduction, the
-VL2 time step in the step-count reconstruction). Then compare spectra, dynamo
-growth rates and Pm_num of the two discretisations, also against the literature
-(e.g. arXiv:astro-ph/0109497).
+**Done since** (paper revision): the study with astronomix's own VL2 scheme
+(`dynamo_convergence.py --scheme {fd,vl2}`, data in `data/fd_fv/`,
+`make_fd_fv_reynolds_figure.py`): with the same forcing and diagnostics, FD
+(WENO-Z + CT) has Pm 1.16-1.22 and FV (VL2 + GLM) 0.61-0.63 at N = 64-256 (VL2
+reproduces the earlier AthenaPK PLM numbers to 1-3 %); Re and Rm grow as N^1.2.
+
+**Next.** Compare against the literature (e.g. arXiv:astro-ph/0109497) and with
+explicit diffusivities at fixed Pm.
 
 ## Known open issues
 
@@ -70,6 +78,20 @@ growth rates and Pm_num of the two discretisations, also against the literature
   used only without positivity-preserving WENO, dual energy and the cold-crush
   blend; porting it to the SSPRK4 integrator and to the PP data flow is open.
 - The pairwise `all_to_all` halo exchange of the multi-GPU scaling work
-  (esovetkin/optim_scaling, 256483e) helped from 32 GPUs on but is not merged
-  (it fails with integer mesh-axis names); a pairwise-`ppermute` variant is the
-  candidate to benchmark.
+  (esovetkin/optim_scaling, 256483e) is now merged and the default for
+  multi-device meshes (`BackendConfig.halo_exchange = "pair_all_to_all"`; the
+  shard_map of the exchange runs under string axis names, which JAX needs for
+  `axis_index_groups`). It needs ~10 % of the device memory for NCCL (the
+  sharded runners set a 90 % XLA pool); `"ppermute"` restores the ring exchange.
+- `_as_3tuple_block_shape` (`_pallas_helpers.py`) clamps the Pallas block to the
+  padded extent, which can give a non-power-of-two block that Triton cannot lower
+  (e.g. 1D finite difference with open boundaries at N = 64); a block shape that
+  does not divide the grid silently falls back to the native backend.
+- `analysis_helpers/_exposed_rhs.py` does not support fully periodic
+  (`PERIODIC_ROLL`) layouts.
+- Multi-node runs should use one process per node driving its four GPUs
+  (`PROCESS_LAYOUT=node`, the runners' default): one process per GPU is ~30 %
+  slower per step across nodes, for a reason not yet identified. At 128 GPUs
+  the NCCL buffers need more than the 8 % of device memory that the default
+  92 % XLA pool leaves free (`XLA_PYTHON_CLIENT_MEM_FRACTION` 0.85-0.90, and
+  `NCCL_NVLS_ENABLE=0 NCCL_BUFFSIZE=1048576` for FD MHD).

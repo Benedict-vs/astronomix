@@ -58,6 +58,10 @@ OPTIMAL_BACKEND = 2
 POSITIVITY_NONE = 0
 POSITIVITY_HARD_FLOOR = 1
 
+#: Attempts of a step after the first under ``PositivityConfig.step_retry``,
+#: each at half the step size of the one before (the last at 1/64).
+MAXIMUM_STEP_RETRIES = 6
+
 # solver modes
 FINITE_VOLUME = 0
 FINITE_DIFFERENCE = 1
@@ -143,8 +147,9 @@ RK4_LSRK = 3
 #: steps with ``first_order_fallback``). Selecting it switches the
 #: finite-volume solver to the AthenaPK-equivalent scheme, which for MHD
 #: carries the cell-centred field together with the GLM cleaning scalar psi
-#: (Dedner et al. 2002). The scheme is Cartesian and has no self-gravity,
-#: external-potential, stellar-wind-tracer or cosmic-ray terms;
+#: (Dedner et al. 2002). The scheme is Cartesian. Self-gravity and an external
+#: potential enter through Athena++'s coupling (``ATHENA_SECOND_ORDER``); the
+#: scheme has no stellar-wind-tracer or cosmic-ray terms, and
 #: ``finalize_config`` rejects those combinations (spherical geometry, as for
 #: every spherical configuration, is switched to MUSCL instead).
 VL2 = 4
@@ -183,9 +188,14 @@ PERIODIC_ROLL = 1
 #   SECOND_ORDER_CONSERVATIVE  - flux-based energy source (2nd-order accurate)
 #   FOURTH_ORDER_CONSERVATIVE  - corrected flux-based energy source (4th-order,
 #                                the energy-conserving high-order scheme)
+# and of the finite-volume VL2 scheme:
+#   ATHENA_SECOND_ORDER        - Athena++'s coupling (second order): cell-centred
+#                                rho grad(phi) momentum source and the energy
+#                                source from the stage's Riemann mass fluxes
 SIMPLE_SOURCE = 0
 SECOND_ORDER_CONSERVATIVE = 1
 FOURTH_ORDER_CONSERVATIVE = 2
+ATHENA_SECOND_ORDER = 3
 
 # Magnetic part integrators for split MHD
 IMPLICIT_MIDPOINT = 0
@@ -341,7 +351,9 @@ class GravityConfig(NamedTuple):
 
     #: Coupling of the self-gravity source to the hydrodynamics. One of
     #: ``SIMPLE_SOURCE`` / ``SECOND_ORDER_CONSERVATIVE`` /
-    #: ``FOURTH_ORDER_CONSERVATIVE``.
+    #: ``FOURTH_ORDER_CONSERVATIVE`` (finite difference) or
+    #: ``ATHENA_SECOND_ORDER`` (the finite-volume VL2 scheme, which
+    #: ``finalize_config`` switches to it).
     self_gravity_version: int = FOURTH_ORDER_CONSERVATIVE
 
     #: Enable an external, static gravitational potential provided via
@@ -369,6 +381,30 @@ class GravityConfig(NamedTuple):
     #: low-order coupling alone exceeds it). Exactly conservative; high order
     #: wherever psi = 1.
     work_flux_correction: bool = False
+
+    #: Periodic Poisson solve with the Green's function of the second-order
+    #: (3-, 5- or 7-point) discrete Laplacian, -4 pi G / sum_d [4 sin^2(k_d dx
+    #: / 2) / dx^2], instead of the spectral -4 pi G / k^2. This is the kernel
+    #: of Athena++'s FFT solver (and the operator its multigrid solver
+    #: inverts). With it the density is exactly the discrete Laplacian of the
+    #: potential, so the cell-centred momentum source of ``ATHENA_SECOND_ORDER``
+    #: is the divergence of a discrete gravitational stress tensor (Mullen,
+    #: Hanawa & Gammie 2021): momentum is conserved locally, not only in total.
+    #: The potential is second-order accurate, so the finite-difference
+    #: couplings keep the spectral kernel. The open-boundary (Hockney-Eastwood)
+    #: solve always uses the point-mass kernel.
+    poisson_discrete_laplacian: bool = False
+
+    #: ``ATHENA_SECOND_ORDER`` only: the time-centred energy source of Mullen,
+    #: Hanawa & Gammie (2021). Each VL2 stage, which updates from ``U^n``,
+    #: charges its mass fluxes with the average of the potential at ``t^n``
+    #: and of the potential of the stage's new density (one more Poisson solve
+    #: per step). The energy change of every stage then equals minus the change
+    #: of the gravitational energy ``(1/2) sum rho phi`` exactly, so total
+    #: energy is conserved to round-off for any time step (with a symmetric
+    #: Green's function and no floor acting). Athena++ itself charges the
+    #: potential of the stage's initial state (second-order energy error).
+    time_centred_energy_source: bool = False
 
     #: Master gravity switch. Set automatically in ``finalize_config`` to
     #: ``self_gravity or external_potential``; gates the gravity source-term
@@ -412,6 +448,17 @@ class PositivityConfig(NamedTuple):
     #: recovery is unclamped).
     clamp_in_estimates: bool = True
 
+    #: Redo a time step at half the step size, from the same state, forcing
+    #: and PRNG key, when it leaves a non-finite value or a non-positive
+    #: density (or pressure, for an ideal gas), up to ``MAXIMUM_STEP_RETRIES``
+    #: times. The positivity-preserving WENO keeps every stage positive only
+    #: while no stage's splitting speeds exceed those the step was sized with;
+    #: a near-vacuum cell that accelerates within a single step (its mass
+    #: drains faster than its momentum) breaks that, and the step is then
+    #: repeated instead of carrying a negative density into the next one.
+    #: Adaptive time stepping and forward-mode runs only.
+    step_retry: bool = False
+
     #: Cold-crush first-order flux blending (the FD counterpart of Athena's
     #: first-order flux correction for radiatively cooled gas): blend the WENO
     #: interface flux toward LLF at interfaces with a COLD side under
@@ -448,10 +495,12 @@ class BackendConfig(NamedTuple):
     #: to PALLAS on compute-capability >= 8.0 GPUs and NATIVE_JAX otherwise.
     backend: int = OPTIMAL_BACKEND
     #: Pallas kernel block shape ``(bx, by, bz)``; ``None`` picks the tuned
-    #: per-dimensionality default (see ``_default_pallas_block_shape``),
-    #: clamped to the grid extents.  With the default ``pallas_num_warps=4``
-    #: keep blocks at 128 cells (one element per thread) — larger blocks
-    #: register-spill in the f64 WENO kernels, smaller ones idle threads.
+    #: default, 128 cells along the contiguous last axis ((1, 1, 128) in 3D,
+    #: (1, 128) in 2D; see ``_default_pallas_block_shape``). Every block size
+    #: is reduced to the largest power of two that divides the grid extent.
+    #: With the default ``pallas_num_warps=4`` keep blocks at 128 cells (one
+    #: element per thread) — larger blocks register-spill, smaller ones idle
+    #: threads — and their rows long along the last (contiguous) axis.
     pallas_block_shape: Optional[Tuple[int, int, int]] = None
     pallas_use_triton: bool = True
     pallas_interpret: bool = False
@@ -468,12 +517,38 @@ class BackendConfig(NamedTuple):
     #: approximate ``rsqrt`` path (``x * jax.lax.rsqrt(x)`` -> ``rsqrt.approx.f64``,
     #: still ~1 ULP). On GPUs where the double-precision ``sqrt`` dominates the
     #: kernel this markedly speeds up the double-precision step (fewer register
-    #: spills) without changing the convergence behaviour.
-    #: NOTE: the *forward* kernel is switched but the hand-written Pallas
-    #: *adjoints* still use IEEE ``sqrt``; with this on, reverse-mode AD is
-    #: therefore ~1 ULP inconsistent with the forward (``finalize_config`` warns).
+    #: spills) without changing the convergence behaviour (A100; on a GH200 it
+    #: makes no measurable difference).
+    #: NOTE: only the *forward* Pallas kernel is switched; derivatives go through
+    #: the native tangent, which uses IEEE ``sqrt``, so with this on reverse-mode
+    #: AD is ~1 ULP inconsistent with the forward (``finalize_config`` warns).
     #: There is no equivalent fast f64 path for division, so only ``sqrt`` changes.
     use_approximate_rsqrt: bool = False
+    #: How the multi-device Pallas kernels exchange their halos along a split
+    #: axis. ``"ppermute"``: two collective permutes over the whole periodic
+    #: ring of devices. ``"pair_all_to_all"``: two phases of all-to-alls over
+    #: disjoint neighbour pairs (even-odd, then odd-even including the
+    #: wraparound pair), so every collective spans two devices only and its
+    #: communicator does not grow with the device count. Both move the same
+    #: halo data and give bit-identical results; an axis split over an odd
+    #: number of devices always uses the ring. The pairwise exchange is ~5%
+    #: faster at 8-32 GPUs and 5-13% at 128 GPUs on JUPITER (GH200); its
+    #: per-pair NCCL communicators need device memory beyond the XLA pool, so
+    #: multi-node runs should leave ~10% of the GPU memory to NCCL.
+    halo_exchange: str = "pair_all_to_all"
+    #: Reverse mode (``differentiation_mode == BACKWARDS``) of the ideal-gas
+    #: hydro and ideal-MHD WENO fluxes through a Pallas adjoint kernel
+    #: (``jax.vjp`` of the forward kernel's window function, inside the kernel;
+    #: the positivity-preserving recombination of MHD in native JAX) instead of
+    #: the transpose of the native-JAX tangent, which also re-runs the native
+    #: forward for its linearisation (the hydro gradient is ~4x faster at
+    #: 128^3-256^3). Opt-in, because it differentiates with respect to the state
+    #: (and the dual-energy ``g`` and the MHD inflow reference) only: the
+    #: physical constants in ``params`` get a ZERO cotangent through the flux,
+    #: and forward-mode AD (``jax.jvp``) through a BACKWARDS configuration then
+    #: raises. A sharded run needs at least the block-rounded 5-cell halo per
+    #: shard along every flux axis that is split.
+    pallas_adjoint: bool = False
 
 
 class SimulationConfig(NamedTuple):
@@ -722,6 +797,26 @@ class SimulationConfig(NamedTuple):
     #: EOS only, since no ohmic heating term is added to the energy equation.
     resistivity: bool = False
 
+    #: Upwind dissipation of the constrained-transport edge EMFs on the
+    #: interface fields (finite-difference MHD), in the form of the upwind CT of
+    #: Londrillo & Del Zanna (2004): every edge EMF gets the jumps of the two
+    #: interface-field components meeting there, reconstructed to the edge from
+    #: both sides at fifth order, times half the local fast signal speed across
+    #: the jump. The central high-order CT interpolations leave the grid-scale
+    #: modes of the interface fields almost undamped, so that without it a field
+    #: oblique to the grid lets grid-scale perturbations grow; the added term is
+    #: O(dx^5) on smooth fields and keeps div B = 0 exactly (it is differenced by
+    #: the CT's own discrete curl). Its strength is ``ct_upwind_strength``.
+    #: Finite-difference MHD only.
+    ct_upwind_dissipation: bool = False
+
+    #: Strength kappa of ``ct_upwind_dissipation`` (1: the full upwind form,
+    #: half the signal speed times the jump). The grid-scale instability is
+    #: removed down to kappa = 0.01, while the added resistivity grows with
+    #: kappa (subsonic dynamo: +2-5 % at 0.03, about x2.3 at 1; at Mach 10 none
+    #: measurable below 1); 0.03 keeps a factor three of margin.
+    ct_upwind_strength: float = 0.03
+
     #: Explicit thermal conduction term div(kappa grad T) in the energy
     #: equation (constant conductivity ``params.thermal_conductivity``, or
     #: ``kappa = rho alpha`` with ``conduction_density_weighted``; explicit
@@ -905,10 +1000,8 @@ class SimulationConfig(NamedTuple):
     #: nonlinearity is a ratio of smoothness indicators, not a comparison
     #: against an absolute epsilon) and keeps the optimal linear weights at
     #: smooth extrema, where JS drops order and damps small-amplitude features.
-    #: Implemented in the native and the Pallas forward kernels; the
-    #: hand-written Pallas adjoints use the Jiang-Shu weights, so reverse-mode
-    #: gradients with the Pallas backend are inconsistent with the forward pass
-    #: (``finalize_config`` prints a note).
+    #: Implemented in the native and the Pallas kernels; derivatives of the
+    #: Pallas backend go through the native tangent, which uses the same weights.
     weno_z: bool = False
 
     #: Absolute floor in the WENO smoothness denominators (JS and Z).
@@ -1161,31 +1254,22 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
     if config.conduction_order not in (2, 4):
         raise ValueError(f"conduction_order must be 2 or 4, got {config.conduction_order!r}.")
 
-    # weno_z is implemented in the FORWARD Pallas kernels; their hand-written
-    # adjoints use the Jiang-Shu weights, so reverse-mode gradients would not
-    # match the forward pass. weno_epsilon_relative is native-only.
+    # weno_epsilon_relative is native-only.
     if config.weno_epsilon_relative > 0.0 and config.backend_config.backend == PALLAS:
         raise ValueError(
             "weno_epsilon_relative is implemented for the NATIVE_JAX backend "
             "only; pass BackendConfig(backend=NATIVE_JAX)."
         )
-    if config.weno_z and config.backend_config.backend == PALLAS:
-        print(
-            "NOTE: weno_z runs the Pallas FORWARD kernels; the hand-written "
-            "Pallas adjoints use Jiang-Shu weights, so reverse-mode gradients "
-            "would be inconsistent with the forward pass. Forward-only runs "
-            "(evolution, convergence, timing) are unaffected."
-        )
 
     # Approximate-rsqrt fast path: the forward MHD WENO kernel is switched to the
-    # refined approximate rsqrt, but the hand-written Pallas adjoints still use
-    # IEEE sqrt.  Purely forward runs (convergence, runtime) are unaffected; warn
+    # refined approximate rsqrt, but the native tangent behind the Pallas
+    # derivatives still uses IEEE sqrt.  Purely forward runs (convergence, runtime) are unaffected; warn
     # only so a reverse-mode/AD user knows the forward and backward differ by the
     # rsqrt's ~1 ULP.
     if config.backend_config.use_approximate_rsqrt:
         print(
             "NOTE: backend_config.use_approximate_rsqrt is ON — the MHD WENO "
-            "forward kernel uses approximate rsqrt while its adjoints use IEEE "
+            "forward kernel uses approximate rsqrt while its tangent uses IEEE "
             "sqrt, so reverse-mode gradients are ~1 ULP inconsistent with the "
             "forward. Fine for forward-only runs; turn off for exact AD."
         )
@@ -1274,28 +1358,53 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         or config.gravity_config.external_potential
     ))
 
-    if config.gravity_config.gravity and (config.limiter != MINMOD):
+    uses_vl2 = config.solver_mode == FINITE_VOLUME and config.time_integrator == VL2
+
+    if config.gravity_config.gravity and (config.limiter != MINMOD) and not uses_vl2:
         print(
             "Curiously, in self-gravitating systems, the VAN_ALBADA limiters seem to cause crashes."
         )
         print("Setting MINMOD limiter for gravity.")
         config = config._replace(limiter=MINMOD)
 
+    # Athena++'s gravity coupling needs the per-stage Riemann mass fluxes of
+    # the VL2 scheme; the other couplings are those of the finite-difference
+    # solver (the classic finite-volume schemes ignore the choice).
+    if (
+        config.gravity_config.gravity
+        and config.gravity_config.self_gravity_version == ATHENA_SECOND_ORDER
+        and not uses_vl2
+    ):
+        raise ValueError(
+            "The ATHENA_SECOND_ORDER self-gravity coupling is only available "
+            "with the VL2 finite-volume scheme (time_integrator=VL2)."
+        )
+
     # The AthenaPK-equivalent VL2 finite-volume scheme. Its piecewise-linear
     # stencil needs two ghost cells; with periodic boundaries on every axis the
     # wrap-around is done by rolling the arrays instead (as in the FD solver).
-    if config.solver_mode == FINITE_VOLUME and config.time_integrator == VL2:
+    if uses_vl2:
 
         # The VL2 update replaces the whole finite-volume step: it has no
-        # gravity source, no geometric source terms and only fluxes for the
-        # gas and field variables, so these combinations would be silently
-        # ignored (gravity, geometry) or fail on the extra state variables.
-        # Spherical geometry was already switched to MUSCL above.
-        if config.gravity_config.gravity:
+        # geometric source terms and only fluxes for the gas and field
+        # variables, so these combinations would be silently ignored
+        # (geometry) or fail on the extra state variables. Spherical geometry
+        # was already switched to MUSCL above. Gravity enters through
+        # Athena++'s coupling, the only one built on the VL2 stages.
+        if (
+            config.gravity_config.gravity
+            and config.gravity_config.self_gravity_version != ATHENA_SECOND_ORDER
+        ):
+            print("Setting the Athena++ (ATHENA_SECOND_ORDER) gravity coupling for the VL2 scheme.")
+            config = config._replace(
+                gravity_config=config.gravity_config._replace(
+                    self_gravity_version=ATHENA_SECOND_ORDER
+                )
+            )
+        if config.gravity_config.gravity and config.gravity_config.work_flux_correction:
             raise ValueError(
-                "The VL2 scheme has no gravity source: self-gravity and an "
-                "external potential require another finite-volume time "
-                "integrator (e.g. RK2_SSP or MUSCL)."
+                "The flux-corrected gravitational work (work_flux_correction) "
+                "is implemented for the finite-difference couplings only."
             )
         if config.geometry != CARTESIAN:
             raise ValueError("The VL2 scheme is implemented for Cartesian geometry only.")
@@ -1343,12 +1452,38 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         else:
             config = config._replace(boundary_handling=GHOST_CELLS, num_ghost_cells=2)
 
+        # The Poisson solve takes the density array as it is, so with ghost
+        # cells it would treat the halo as part of the domain. Isolated
+        # self-gravity in a periodic hydrodynamic box is set by
+        # ``poisson_manual_open_boundaries``.
+        if config.gravity_config.self_gravity and config.boundary_handling == GHOST_CELLS:
+            raise ValueError(
+                "Self-gravity with the VL2 scheme requires periodic hydrodynamic "
+                "boundaries on every axis (use poisson_manual_open_boundaries "
+                "for an isolated potential)."
+            )
+
     # HLLD is implemented only inside the VL2 scheme; the classic
     # finite-volume Riemann-solver dispatch does not know it.
     elif config.solver_mode == FINITE_VOLUME and config.riemann_solver == HLLD:
         raise ValueError(
             "The HLLD Riemann solver is only available with the VL2 time "
             "integrator (time_integrator=VL2)."
+        )
+
+    # The upwind EMF dissipation acts on the constrained-transport interface
+    # fields, which only the finite-difference MHD scheme carries.
+    if config.ct_upwind_dissipation and config.solver_mode != FINITE_DIFFERENCE:
+        raise ValueError("ct_upwind_dissipation requires finite-difference MHD")
+
+    # A retried step needs a step size to reduce, and its data-dependent loop
+    # has no reverse-mode derivative.
+    if config.positivity_config.step_retry and (
+        config.fixed_timestep or config.differentiation_mode != FORWARDS
+    ):
+        raise ValueError(
+            "positivity_config.step_retry requires adaptive time stepping and "
+            "differentiation_mode=FORWARDS"
         )
 
     # Finite-difference-specific checks.
@@ -1424,6 +1559,9 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
             config.diffusion or config.thermal_conduction or config.resistivity
         ):
             config = config._replace(num_ghost_cells=max(config.num_ghost_cells, 6))
+
+        if config.ct_upwind_dissipation and not config.mhd:
+            raise ValueError("ct_upwind_dissipation requires finite-difference MHD")
 
         if config.resistivity:
             if not config.mhd or config.dimensionality != 3:
