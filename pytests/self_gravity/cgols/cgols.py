@@ -2698,6 +2698,13 @@ if __name__ == "__main__":
             # every leg keeps the same cadence instead of re-spreading 60
             # frames over the remaining window.
             _t_end = float(params.t_end)
+            # A leg chained after the one that finished the run has nothing to
+            # do; without this it would integrate a zero-length segment and
+            # write a duplicate final checkpoint and frame. Every rank sees the
+            # same restored time, so they all leave here together.
+            if _t0 >= _t_end * (1.0 - 1e-6):
+                rprint(f"Run already complete (t = {_t0_myr:.2f} Myr = t_end); nothing to do.")
+                raise SystemExit(0)
             _remaining = max(1, round(NUM_SNAPSHOTS * (_t_end - _t0) / _t_end))
             config = config._replace(num_snapshots=_remaining)
             rprint(f"  {_remaining} of {NUM_SNAPSHOTS} frames left on the run's grid")
