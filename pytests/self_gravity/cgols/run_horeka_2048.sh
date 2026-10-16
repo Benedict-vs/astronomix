@@ -16,9 +16,15 @@
 # across 8 of its 13 nodes, one process per GPU, 75 Myr, adiabatic A-series
 # (pure hydro, no cooling), split (1, 8, 4, 1).
 #
-#   sbatch run_horeka_2048.sh                                      # leg 1, fresh
-#   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
-#          run_horeka_2048.sh                                      # leg 2
+#   sbatch --export=ALL,CGOLS_RUN_TAG=_A2048 run_horeka_2048.sh    # leg 1, fresh
+#   sbatch --export=ALL,CGOLS_RUN_TAG=_A2048,CGOLS_RESTART_FROM=latest \
+#          run_horeka_2048.sh                                      # legs 2, 3, ...
+#
+# Every leg uses the SAME tag: a resumed leg continues the checkpoint numbering,
+# the frame numbering, the diag log and the run's frame grid, so one run is one
+# directory each. Full states: one Orbax checkpoint per frame (344 GB at 2048);
+# CGOLS_CHECKPOINT_KEEP=0 keeps all of them, CGOLS_CHECKPOINT_ARCHIVE_EVERY=k
+# keeps every k-th on top of the newest CGOLS_CHECKPOINT_KEEP.
 #
 # This file is only the production PARAMETER SET; all of the launch mechanics
 # (environment, preflight banner, workspace check, srun flags, NCCL watchdog)

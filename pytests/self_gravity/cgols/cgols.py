@@ -672,6 +672,13 @@ RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "_B" if COOLING else "")
 # bit-identical to one left uninterrupted.
 CHECKPOINT_EVERY = int(os.environ.get("CGOLS_CHECKPOINT_EVERY", "3"))
 CHECKPOINT_KEEP = int(os.environ.get("CGOLS_CHECKPOINT_KEEP", "4"))
+# Permanent full-state archive on top of the rolling window: checkpoint step k
+# (= frame k, at t = k * t_end / CGOLS_NUM_SNAPSHOTS) is never pruned when
+# k % CGOLS_CHECKPOINT_ARCHIVE_EVERY == 0. 1 keeps every frame's full state,
+# 0 (default) keeps only the newest CHECKPOINT_KEEP. Step numbers are global
+# frame indices only when every leg resumes into the SAME run tag
+# (CGOLS_RESTART_FROM=latest), which continues the numbering.
+CHECKPOINT_ARCHIVE_EVERY = int(os.environ.get("CGOLS_CHECKPOINT_ARCHIVE_EVERY", "0"))
 
 # Frame callbacks per device instead of once on device 0. Multi-process only
 # (one device per process, so every rank fires exactly once on its replicated
@@ -1783,10 +1790,14 @@ def make_snapshot_callable(
     # collective, so it sits OUTSIDE the RANK0 branch - every rank must reach
     # it - and it must happen before the TO_DISK driver's first latest_step()
     # read, which is itself a collective over this directory.
+    #
+    # A leg resumed into the same run tag keeps the earlier legs' frames and
+    # appends to them (see the frame counter below).
     if RANK0:
         os.makedirs(out_dir, exist_ok=True)
-        for f in glob.glob(os.path.join(out_dir, "frame_*.npz")):
-            os.remove(f)
+        if not RESTART_FROM:
+            for f in glob.glob(os.path.join(out_dir, "frame_*.npz")):
+                os.remove(f)
         if CHECKPOINT_EVERY:
             os.makedirs(ckpt_dir, exist_ok=True)
             if not RESTART_FROM:
@@ -1800,7 +1811,12 @@ def make_snapshot_callable(
     # Host-side frame counter for the filename. The callback may fire unordered, so
     # filenames are not assumed to be time-ordered; each file stores its own time
     # and the loader sorts by it.
-    counter = {"i": 0}
+    # A resumed leg continues after the highest existing frame number.
+    _existing = [
+        int(os.path.basename(f)[6:10])
+        for f in glob.glob(os.path.join(out_dir, "frame_[0-9][0-9][0-9][0-9].npz"))
+    ]
+    counter = {"i": max(_existing) + 1 if _existing else 0}
 
     def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz):
         # jax.debug.callback fires on every process with the same (explicitly
@@ -1836,7 +1852,11 @@ def make_snapshot_callable(
         if not RANK0:
             return
         steps = sorted(int(d) for d in os.listdir(ckpt_dir) if d.isdigit())
-        for step in steps[:-CHECKPOINT_KEEP]:
+        # steps[:-0] would be empty, so KEEP=0 keeps everything; spell it out.
+        old = steps[:-CHECKPOINT_KEEP] if CHECKPOINT_KEEP > 0 else []
+        for step in old:
+            if CHECKPOINT_ARCHIVE_EVERY and step % CHECKPOINT_ARCHIVE_EVERY == 0:
+                continue
             shutil.rmtree(os.path.join(ckpt_dir, str(step)), ignore_errors=True)
 
     def _replicated(x):
@@ -2575,8 +2595,9 @@ if __name__ == "__main__":
         # 0 ever writes the file - see _progress_bar), but only rank 0 truncates
         # it, or 32 ranks race to unlink the file the others just opened.
         _default_diag_log = _log(f"cgols_diag{RUN_TAG}.log")
+        # A resumed leg (CGOLS_RESTART_FROM) appends to its tag's log instead.
         if os.environ.setdefault("ASTRONOMIX_DIAG_LOG", _default_diag_log) == _default_diag_log:
-            if RANK0 and os.path.exists(_default_diag_log):
+            if RANK0 and not RESTART_FROM and os.path.exists(_default_diag_log):
                 os.remove(_default_diag_log)
         barrier("cgols:diag-log-truncated")
 
@@ -2671,6 +2692,15 @@ if __name__ == "__main__":
             _t0 = float(params.t_start)
             _t0_myr = (_t0 * code_units.code_time).to(u.Myr).value
             rprint(f"Restarting from {_ckpt_dir} at t = {_t0:.6f} code ({_t0_myr:.2f} Myr)")
+            # The TO_DISK driver splits [t_start, t_end] into num_snapshots
+            # segments. Hand it only the frames still due on the run's grid of
+            # NUM_SNAPSHOTS over [0, t_end] (checkpoints sit on that grid), so
+            # every leg keeps the same cadence instead of re-spreading 60
+            # frames over the remaining window.
+            _t_end = float(params.t_end)
+            _remaining = max(1, round(NUM_SNAPSHOTS * (_t_end - _t0) / _t_end))
+            config = config._replace(num_snapshots=_remaining)
+            rprint(f"  {_remaining} of {NUM_SNAPSHOTS} frames left on the run's grid")
 
         if NUM_GPUS > 1:
             # No-op data-movement-wise when the state was already restored onto

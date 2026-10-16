@@ -35,11 +35,11 @@
 # Submit from THIS directory (Slurm writes the .out/.err relative to the
 # submit dir, and the watchdog reads the .err).
 #
-# LEGS. A leg that TIMEOUTs is resumed from the previous leg's Orbax checkpoint
-# directory, with a FRESH run tag (the startup cleanup wipes checkpoints and
-# frames carrying the same tag):
+# LEGS. A leg that TIMEOUTs is resumed into the SAME run tag from its newest
+# checkpoint; checkpoints, frames and the diag log then continue where the
+# previous leg stopped (only a fresh start clears them):
 #
-#   sbatch --export=ALL,CGOLS_RESTART_FROM=data/cgols_checkpoints,CGOLS_RUN_TAG=_leg2 \
+#   sbatch --export=ALL,CGOLS_RUN_TAG=_A1024,CGOLS_RESTART_FROM=latest \
 #          run_cgols_multinode.sh
 #
 # Budget the legs from the LATE-run throughput decay, not from leg 1: at 1024
