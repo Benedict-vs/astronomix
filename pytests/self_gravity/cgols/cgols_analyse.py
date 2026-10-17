@@ -32,6 +32,7 @@ from cgols import (
     analyse_results,
     animate_wind_snapshots,
     build_config,
+    build_initial_conditions,
     plot_paper_slices,
     plot_wind_timeseries,
 )
@@ -48,8 +49,12 @@ final_state = jnp.asarray(np.load(_data_final(f"cgols_final_state{RUN_TAG}.npy")
 try:
     initial_state = jnp.asarray(np.load(_ic_state_path()))
 except FileNotFoundError:
-    print(f"{_ic_state_path()} not found - showing final-state diagnostics only.")
-    initial_state = None
+    # Runs with in-process initial conditions (CGOLS_IC_MODE=insitu, the default
+    # for srun runs and run_series_local.sh) never write the IC file. The build
+    # is deterministic, so rebuild it here (eager, single device; it also
+    # re-renders this run's initial_profiles / rotation_curve figures).
+    print(f"{_ic_state_path()} not found - rebuilding the initial conditions in-process.")
+    initial_state, _, _, _ = build_initial_conditions(save_potential=False)
 
 analyse_results(final_state, config, registered_variables, initial_state=initial_state)
 print(f"Wrote figures/cgols/{FIG_RUN_DIR}/{{static_check,vz_diagnostic,extras}}.png")
