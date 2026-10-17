@@ -14,7 +14,7 @@ it. Missing panels are rendered as an annotated placeholder rather than
 silently dropped, so the layout always matches the paper.
 
 Usage:
-    python cgols_fig12_recreation.py                # A from _A512_jul, B from _B
+    python cgols_fig12_recreation.py                # A from _A512_jul, B from _B512_aug
     CGOLS_FIG12_A=cgols_snapshots_Avr \
     CGOLS_FIG12_B=cgols_snapshots_Bvr \
         python cgols_fig12_recreation.py            # use the vr-bearing reruns
@@ -33,7 +33,7 @@ from matplotlib.colors import LogNorm, Normalize
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 A_DIR = os.environ.get("CGOLS_FIG12_A", "cgols_snapshots_A512_jul")
-B_DIR = os.environ.get("CGOLS_FIG12_B", "cgols_snapshots_B")
+B_DIR = os.environ.get("CGOLS_FIG12_B", "cgols_snapshots_B512_aug")
 TARGET_MYR = float(os.environ.get("CGOLS_FIG12_TIME_MYR", "25.0"))
 
 # Paper panel specs (Figs 1 & 2 of 1803.01005).
@@ -115,7 +115,9 @@ def render(figname, dirname, title):
             cb.set_label(label)
     fig.suptitle(title, fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
-    out = os.path.join(HERE, "figures", "cgols", figname)
+    out_dir = os.path.join(HERE, "figures", "cgols", "paper")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, figname)
     fig.savefig(out, dpi=250)
     plt.close(fig)
     print(f"wrote {out}  (frame at {t_myr:.2f} Myr from {dirname})")
@@ -123,12 +125,12 @@ def render(figname, dirname, title):
 
 if __name__ == "__main__":
     render(
-        "cgols_fig1_recreation.png", A_DIR,
+        "fig1_recreation.png", A_DIR,
         "cf. Schneider & Robertson (1803.01005) Fig. 1 — Model A (adiabatic), "
         f"512$^2\\times$1024, t = {TARGET_MYR:.0f} Myr",
     )
     render(
-        "cgols_fig2_recreation.png", B_DIR,
+        "fig2_recreation.png", B_DIR,
         "cf. Schneider & Robertson (1803.01005) Fig. 2 — Model B (radiative), "
         f"512$^2\\times$1024, t = {TARGET_MYR:.0f} Myr",
     )

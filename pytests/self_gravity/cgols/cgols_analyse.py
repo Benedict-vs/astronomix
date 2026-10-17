@@ -25,6 +25,7 @@ import jax.numpy as jnp
 # Importing cgols runs autocvd + the module-level constants/functions (cheap), but
 # not the simulation itself (guarded behind `if __name__ == "__main__"`).
 from cgols import (
+    FIG_RUN_DIR,
     RUN_TAG,
     _data_final,
     _ic_state_path,
@@ -51,7 +52,7 @@ except FileNotFoundError:
     initial_state = None
 
 analyse_results(final_state, config, registered_variables, initial_state=initial_state)
-print("Wrote figures/cgols/{cgols_static_check,cgols_vz_diagnostic,cgols_extras}.png")
+print(f"Wrote figures/cgols/{FIG_RUN_DIR}/{{static_check,vz_diagnostic,extras}}.png")
 
 # Intermediate-snapshot products (the wind animation + the outflow time-series).
 # These read the per-frame .npz files streamed to SNAPSHOTS_DIR/ during the run,

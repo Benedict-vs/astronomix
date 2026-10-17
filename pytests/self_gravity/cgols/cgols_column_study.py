@@ -56,7 +56,7 @@ from cgols import (  # noqa: E402
     T_disk,
     T_factor,
     T_halo,
-    _fig,
+    _study_fig,
     _gaussian_smooth_3d,
     build_config,
     code_length,
@@ -275,7 +275,7 @@ def main():
         ax.grid(alpha=0.3)
     axes[0].set_title("CGOLS central column vs IC smoothing")
     plt.tight_layout()
-    out = _fig("cgols_column_study.png")
+    out = _study_fig("column_study.png")
     plt.savefig(out, dpi=150)
     plt.close(fig)
     print(f"\nwrote {out}")

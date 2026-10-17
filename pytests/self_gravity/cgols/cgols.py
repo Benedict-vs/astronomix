@@ -451,6 +451,24 @@ def _fig(name):
     return _in_dir(os.path.join("figures", "cgols"), name)
 
 
+# Figure layout: one folder per run, named by its tag without the underscore
+# (figures/cgols/A512/, ...; "untagged" for the empty tag), cross-run paper
+# recreations in figures/cgols/paper/, one-off studies in figures/cgols/studies/.
+def _run_fig(name):
+    """Resolve ``name`` against this run's figure folder, figures/cgols/<tag>/."""
+    return _in_dir(os.path.join("figures", "cgols", FIG_RUN_DIR), name)
+
+
+def _paper_fig(name):
+    """Resolve ``name`` against figures/cgols/paper/ (paper-figure recreations)."""
+    return _in_dir(os.path.join("figures", "cgols", "paper"), name)
+
+
+def _study_fig(name):
+    """Resolve ``name`` against figures/cgols/studies/ (one-off studies)."""
+    return _in_dir(os.path.join("figures", "cgols", "studies"), name)
+
+
 def _log(name):
     """Resolve ``name`` against the cgols log directory (cgols_logs/)."""
     return _in_dir("cgols_logs", name)
@@ -475,7 +493,7 @@ def _log(name):
 #   sigma = 3.0: n_c =  67, T_c = 8.3e4, transition 225 pc  (previous default)
 # 1.5 is the default: half the central-disk distortion of 3.0 while keeping the
 # contact wide enough for the WENO5 stencil. Changing sigma requires an IC
-# rebuild (CGOLS_CREATE_IC=1); watch cgols_vz_diagnostic.png / the static check
+# rebuild (CGOLS_CREATE_IC=1); watch vz_diagnostic.png / the static check
 # on the next run for disk ringing.
 SMOOTHING_SIGMA_CELLS = float(os.environ.get("CGOLS_SMOOTHING_SIGMA", "1.5"))
 
@@ -654,6 +672,7 @@ DEEPVOID_BLEND = os.environ.get("CGOLS_DEEPVOID_BLEND", "0") == "1"
 # other or the production outputs. Defaults to "_B" for a radiative run, so the
 # A- and B-series never share snapshot / checkpoint / log / figure filenames.
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "_B" if COOLING else "")
+FIG_RUN_DIR = RUN_TAG.lstrip("_") or "untagged"
 
 # Full-state checkpointing, via astronomix's Orbax TO_DISK mode: the run is
 # split into num_snapshots segments and after each one the full loop carry is
@@ -1577,7 +1596,7 @@ def _plot_ic_diagnostics(config, diagnostics):
     ax.legend()
     ax.set_title("Rotation curve (midplane)")
     plt.tight_layout()
-    plt.savefig(_fig(f"cgols_rotation_curve{IC_TAG}.png"), dpi=300)
+    plt.savefig(_run_fig("rotation_curve.png"), dpi=300)
     plt.close(fig)
 
     # ---- Diagnostic plot: density and temperature profiles ----
@@ -1609,7 +1628,7 @@ def _plot_ic_diagnostics(config, diagnostics):
     ax2.set_title("Temperature profiles")
 
     plt.tight_layout()
-    plt.savefig(_fig(f"cgols_initial_profiles{IC_TAG}.png"), dpi=300)
+    plt.savefig(_run_fig("initial_profiles.png"), dpi=300)
     plt.close(fig)
 
 
@@ -2066,7 +2085,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     )
     fig.suptitle(suptitle)
     plt.tight_layout()
-    plt.savefig(_fig(f"cgols_static_check{RUN_TAG}.png"), dpi=300)
+    plt.savefig(_run_fig("static_check.png"), dpi=300)
     plt.close(fig)
     del n_mid_f, n_z_f, T_mid_f, T_z_f
     if have_initial:
@@ -2119,7 +2138,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     plt.colorbar(im, ax=axb, label=r"$v_z$ [km s$^{-1}$]")
 
     plt.tight_layout()
-    plt.savefig(_fig(f"cgols_vz_diagnostic{RUN_TAG}.png"), dpi=300)
+    plt.savefig(_run_fig("vz_diagnostic.png"), dpi=300)
     plt.close(fig)
 
     # ---- Final-state morphology, phase diagram, vertical mass flux ----
@@ -2233,7 +2252,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
     axD.legend()
 
     plt.tight_layout()
-    plt.savefig(_fig(f"cgols_extras{RUN_TAG}.png"), dpi=300)
+    plt.savefig(_run_fig("extras.png"), dpi=300)
     plt.close(fig)
 
 
@@ -2259,7 +2278,7 @@ def _snapshot_grid(config):
     return x, y, z, extent_xz, extent_xy
 
 
-def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_animation{RUN_TAG}.gif", fps=12):
+def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="wind_animation.gif", fps=12):
     """Animate the intermediate snapshots: edge-on n, edge-on T, face-on n.
 
     Builds a GIF with matplotlib's FuncAnimation + PillowWriter (the codebase's
@@ -2270,7 +2289,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind
     from matplotlib.animation import FuncAnimation, PillowWriter
     from matplotlib.colors import LogNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _fig(out)
+    snapshots_dir, out = _here(snapshots_dir), _run_fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
@@ -2329,7 +2348,7 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind
     rprint(f"Wrote {out} ({n_frames} frames, t = {t[0]:.1f} -> {t[-1]:.1f} Myr)")
 
 
-def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_timeseries{RUN_TAG}.png"):
+def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out="wind_timeseries.png"):
     """Quantitative wind diagnostics from the 1D vertical mass-flux snapshots.
 
     Left: net mass OUTflow rate through z = +/-H planes vs time (outward = +z above
@@ -2341,7 +2360,7 @@ def plot_wind_timeseries(config, snapshots_dir=SNAPSHOTS_DIR, out=f"cgols_wind_t
     """
     from matplotlib.colors import TwoSlopeNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _fig(out)
+    snapshots_dir, out = _here(snapshots_dir), _run_fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")
@@ -2390,7 +2409,7 @@ def plot_paper_slices(
     config,
     snapshots_dir=SNAPSHOTS_DIR,
     target_times_myr=(10.0, 25.0, 50.0, 60.0),
-    out=f"cgols_paper_slices{RUN_TAG}.png",
+    out=f"paper_slices_{FIG_RUN_DIR}.png",
     n_range=(1e-4, 1e3),
     T_range=(1e3, 10 ** 7.5),
     x_half=5.0,
@@ -2423,7 +2442,7 @@ def plot_paper_slices(
     """
     from matplotlib.colors import LogNorm
 
-    snapshots_dir, out = _here(snapshots_dir), _fig(out)
+    snapshots_dir, out = _here(snapshots_dir), _paper_fig(out)
     data = load_snapshots(snapshots_dir)
     if data is None:
         rprint(f"No frames in {snapshots_dir}/ - run cgols.py first to produce snapshots.")

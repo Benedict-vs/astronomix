@@ -98,7 +98,7 @@ from cgols import (
     load_initial_conditions,
     mu,
     m_p,
-    _fig,
+    _study_fig,
     _data_final,
     _snapshot_grid,
 )
@@ -360,9 +360,9 @@ if __name__ == "__main__":
         print("  (t_end < 5 Myr: wind is OFF, so both should be ~0 -- AD wiring check)")
 
     plot_maps(sigma0, n_mid0, dsig_dM, dsig_dE, extent_xz,
-              _fig(f"cgols_sensitivity_maps{TAG}.png"))
+              _study_fig(f"sensitivity_maps{TAG}.png"))
     plot_profiles(n_mid0, dn_dM, dn_dE, np.asarray(x), np.asarray(z),
-                  _fig(f"cgols_sensitivity_profiles{TAG}.png"))
+                  _study_fig(f"sensitivity_profiles{TAG}.png"))
 
     npz_path = _data_final(f"cgols_sensitivity{TAG}.npz")
     np.savez(
