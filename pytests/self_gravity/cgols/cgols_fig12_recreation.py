@@ -14,7 +14,7 @@ it. Missing panels are rendered as an annotated placeholder rather than
 silently dropped, so the layout always matches the paper.
 
 Usage:
-    python cgols_fig12_recreation.py                # A from prod_tmax5e9, B from _B
+    python cgols_fig12_recreation.py                # A from _A512_jul, B from _B
     CGOLS_FIG12_A=cgols_snapshots_Avr \
     CGOLS_FIG12_B=cgols_snapshots_Bvr \
         python cgols_fig12_recreation.py            # use the vr-bearing reruns
@@ -32,7 +32,7 @@ from matplotlib.colors import LogNorm, Normalize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-A_DIR = os.environ.get("CGOLS_FIG12_A", "cgols_snapshots_prod_tmax5e9")
+A_DIR = os.environ.get("CGOLS_FIG12_A", "cgols_snapshots_A512_jul")
 B_DIR = os.environ.get("CGOLS_FIG12_B", "cgols_snapshots_B")
 TARGET_MYR = float(os.environ.get("CGOLS_FIG12_TIME_MYR", "25.0"))
 

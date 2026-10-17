@@ -34,7 +34,7 @@ export CGOLS_PRESERVING_FLUX=0            # bare A-series numerics, as in the pa
 export CGOLS_DIM=512
 export CGOLS_SHARD_SPLIT="(1, 2, 1, 1)"   # identical to the B-series run
 export CGOLS_NUM_SNAPSHOTS=60             # identical to the B-series run
-export CGOLS_RUN_TAG="_Atime"             # keeps outputs off the _prod_tmax5e9 A-series
+export CGOLS_RUN_TAG="_Atime"             # keeps outputs off the _A512_jul A-series
 
 # Ask XLA to terminate itself on a stuck collective rather than waiting forever
 # (the 2026-08-02 rendezvous deadlock). The warn path fires by default; whether
