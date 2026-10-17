@@ -446,6 +446,11 @@ def _data_final(name):
     return _in_dir(os.path.join("data", "final"), name)
 
 
+def _data_study(name):
+    """Bulk-data path for one-off study outputs (data/studies/ on scratch)."""
+    return _in_dir(os.path.join("data", "studies"), name)
+
+
 def _fig(name):
     """Resolve ``name`` against the cgols figures directory (figures/cgols/)."""
     return _in_dir(os.path.join("figures", "cgols"), name)

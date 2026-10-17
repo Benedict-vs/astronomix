@@ -99,7 +99,7 @@ from cgols import (
     mu,
     m_p,
     _study_fig,
-    _data_final,
+    _data_study,
     _snapshot_grid,
 )
 
@@ -364,7 +364,7 @@ if __name__ == "__main__":
     plot_profiles(n_mid0, dn_dM, dn_dE, np.asarray(x), np.asarray(z),
                   _study_fig(f"sensitivity_profiles{TAG}.png"))
 
-    npz_path = _data_final(f"cgols_sensitivity{TAG}.npz")
+    npz_path = _data_study(f"cgols_sensitivity{TAG}.npz")
     np.savez(
         npz_path,
         sigma0=sigma0, n_mid0=n_mid0,
