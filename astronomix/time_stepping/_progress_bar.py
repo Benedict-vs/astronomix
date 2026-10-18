@@ -62,10 +62,14 @@ def _advanced_a_bucket(fraction, key):
     return True
 
 
+# Host-side previous total mass, for the per-step mass change on the diag line.
+_last_mass: dict = {}
+
+
 def _show_diagnostics(
     t, min_density, min_pressure, max_speed, max_temperature, has_nan,
     max_density=None, max_density_index=None,
-    fraction=None,
+    fraction=None, total_mass=None,
 ) -> None:
     """Host-side per-step diagnostic line.
 
@@ -127,10 +131,21 @@ def _show_diagnostics(
             at = "@(" + ",".join(str(int(i)) for i in max_density_index) + ")"
         max_rho = f"  max_rho={float(max_density):.3e}{at}"
 
+    # Total gas mass and its change since the previous step (code units). The
+    # density floor adds mass when the update drives a cell negative; that shows
+    # up as a jump in dM far above the steady wind loading / boundary outflow.
+    mass = ""
+    if total_mass is not None:
+        m = float(total_mass)
+        prev = _last_mass.get("m")
+        _last_mass["m"] = m
+        dm = f"{m - prev:+.3e}" if prev is not None else "n/a"
+        mass = f"  mass={m:.7e} dM={dm}"
+
     msg = (
         f"{pct}[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
         f"min_P={float(min_pressure):.3e}  max|v|={float(max_speed):.3e}  "
-        f"max_T(code)={float(max_temperature):.3e}{max_rho}{flag}"
+        f"max_T(code)={float(max_temperature):.3e}{max_rho}{mass}{flag}"
     )
 
     log_path = os.environ.get("ASTRONOMIX_DIAG_LOG")

@@ -27,6 +27,7 @@ from jax.experimental import checkify
 # astronomix constants
 from astronomix.option_classes.simulation_config import (
     BACKWARDS,
+    CARTESIAN,
     FINITE_DIFFERENCE,
     FINITE_VOLUME,
     FORWARDS,
@@ -907,10 +908,21 @@ def _integrate_core(
         # cells (in GHOST_CELLS mode), so shift the argmax to interior indices —
         # slightly negative / past-the-end values mean the max sits in a ghost slab.
         max_density = jnp.max(rho)
-        max_density_index = (
-            jnp.stack(jnp.unravel_index(jnp.argmax(rho), rho.shape))
-            - config.num_ghost_cells
-        )
+        # The location is found without argmax: GSPMD partitions a (value,
+        # index) reduce over the sharded field as an all-gather of the whole
+        # field along an axis, every step (~8.7 GB per device at 2048^2 x 4096),
+        # and argmax's flat int32 index overflows past 2^31 cells. Narrowing the
+        # cells equal to the max one axis at a time picks the same cell as
+        # argmax (the first in C order) with only scalar reductions.
+        is_max = rho == max_density
+        big = jnp.iinfo(jnp.int32).max
+        index = []
+        for ax in range(rho.ndim):
+            iota = jax.lax.broadcasted_iota(jnp.int32, rho.shape, ax)
+            i = jnp.min(jnp.where(is_max, iota, big))
+            is_max = is_max & (iota == i)
+            index.append(i)
+        max_density_index = jnp.stack(index) - config.num_ghost_cells
 
         if hasattr(registered_variables, "pressure_index"):
             pressure = prim[registered_variables.pressure_index]
@@ -931,6 +943,24 @@ def _integrate_core(
         max_speed = jnp.sqrt(jnp.max(v2))
 
         has_nan = jnp.logical_not(jnp.all(jnp.isfinite(prim)))
+
+        # Total gas mass on the interior grid. The positivity density floor can
+        # create mass (a cell the update drives negative is reset to the floor),
+        # which no min/max readout shows; the step-to-step change of this sum
+        # does. Interior cells are selected with an index mask, not a slice:
+        # slicing the sharded state would reshard it on every step.
+        total_mass = None
+        if config.geometry == CARTESIAN:
+            g = config.num_ghost_cells if config.boundary_handling == GHOST_CELLS else 0
+            interior = jnp.ones(rho.shape, dtype=bool)
+            for ax, n in enumerate(rho.shape):
+                idx = jax.lax.broadcasted_iota(jnp.int32, rho.shape, ax)
+                interior = interior & (idx >= g) & (idx < n - g)
+            total_mass = (
+                jnp.sum(jnp.where(interior, rho, 0.0))
+                * config.grid_spacing ** config.dimensionality
+            )
+
         # When the progress bar is also on, fold the completion fraction into the
         # diagnostics line (matching the bar's t / t_end measure) so the
         # percentage replaces the bar rather than fighting it for the in-place
@@ -941,12 +971,14 @@ def _integrate_core(
                 _show_diagnostics, t, min_density, min_pressure,
                 max_speed, max_temperature, has_nan,
                 max_density, max_density_index, fraction,
+                total_mass=total_mass,
             )
         else:
             jax.debug.callback(
                 _show_diagnostics, t, min_density, min_pressure,
                 max_speed, max_temperature, has_nan,
                 max_density, max_density_index,
+                total_mass=total_mass,
             )
 
     t_final, loop_state, snapshot_store, num_iterations = integrate(
