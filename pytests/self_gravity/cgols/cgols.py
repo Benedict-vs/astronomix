@@ -671,6 +671,11 @@ COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 # A-256 knot. Both default ON; CGOLS_PP_WENO=0 / CGOLS_DUAL_ENERGY=0 for tests.
 PP_WENO = os.environ.get("CGOLS_PP_WENO", "1") == "1"
 DUAL_ENERGY = os.environ.get("CGOLS_DUAL_ENERGY", "1") == "1"
+# WENO nonlinear weights: Jiang-Shu (default, what every run so far used) or
+# WENO-Z (Borges et al. 2008), which keeps the optimal weights at smooth extrema
+# and is less dissipative - suggested for the turbulent wind / shell. Forward
+# runs only: the Pallas adjoints use JS weights (no jvp/vjp work with it on).
+WENO_Z = os.environ.get("CGOLS_WENO_Z", "0") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
@@ -1052,6 +1057,7 @@ def build_config():
         # time-step estimates only.
         weno_positivity_preserving=PP_WENO,
         dual_energy=DUAL_ENERGY,
+        weno_z=WENO_Z,
         positivity_config=PositivityConfig(),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
