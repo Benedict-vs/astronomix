@@ -8,9 +8,9 @@
 #   CGOLS_SERIES=B nohup ./run_series_local.sh > cgols_logs/series_local_B.log 2>&1 &
 #   nohup ./run_series_local.sh 512 > cgols_logs/series_local.log 2>&1 &        # one size
 #
-# A = adiabatic (the bare paper A-series). B = radiative: cooling on with the
-# FCT-preserving flux blend and the settings of the completed B-512 run
-# (run_bseries_local.sh), the 10% cooling-dt rule off.
+# A = adiabatic (the paper's A-series). B = radiative: cooling on with the
+# settings of the B-512 runs (run_bseries_local.sh), the 10% cooling-dt rule
+# off. Both use cgols.py's positivity-preserving WENO + dual energy.
 #
 # CGOLS_IC_MODE=insitu builds the initial conditions in-process: files from
 # before the two-sided HSE fix (ef6b3f0) must not be reused. CGOLS_CHECKPOINT_KEEP=0
@@ -25,8 +25,7 @@ mkdir -p cgols_logs
 SERIES="${CGOLS_SERIES:-A}"
 case "$SERIES" in
     A) ;;
-    B) export CGOLS_COOLING=1 CGOLS_COOLING_DT_LIMIT=0 CGOLS_COOLING_SUBCYCLES=32 \
-              CGOLS_PRESERVING_FLUX=1 ;;
+    B) export CGOLS_COOLING=1 CGOLS_COOLING_DT_LIMIT=0 CGOLS_COOLING_SUBCYCLES=32 ;;
     *) echo "CGOLS_SERIES must be A or B, got '$SERIES'" >&2; exit 1 ;;
 esac
 

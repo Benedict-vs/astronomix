@@ -30,7 +30,6 @@ cd "$(dirname "$0")"
 export NCCL_NVLS_ENABLE=0
 
 export CGOLS_COOLING=0
-export CGOLS_PRESERVING_FLUX=0            # bare A-series numerics, as in the paper
 export CGOLS_DIM=512
 export CGOLS_SHARD_SPLIT="(1, 2, 1, 1)"   # identical to the B-series run
 export CGOLS_NUM_SNAPSHOTS=60             # identical to the B-series run

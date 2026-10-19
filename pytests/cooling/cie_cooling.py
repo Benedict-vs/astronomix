@@ -709,15 +709,12 @@ def _cooling_box_config(cooling, num_cells=16, timestep_limit=False, subcycles=1
             BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
             BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY),
         ),
-        # The cgols positivity stack, so the smoke run exercises the same
-        # interaction between the cooling floor and the pressure floor.
-        positivity_config=PositivityConfig(
-            default_positivity_protection=True,
-            vacuum_rest=True,
-            nan_safe=True,
-            velocity_clip=True,
-            temperature_clip=True,
-        ),
+        # The cgols numerics (positivity-preserving WENO + dual energy), so the
+        # smoke run exercises the same interaction of the cooling floor with
+        # the scheme's density / pressure floors.
+        weno_positivity_preserving=True,
+        dual_energy=True,
+        positivity_config=PositivityConfig(),
         progress_bar=False,
         **(
             dict(
@@ -746,8 +743,6 @@ def _cooling_box_params(t_end, max_thermal_energy_fraction=0.1):
         gamma=GAMMA,
         minimum_density=1e-8,
         minimum_pressure=1e-12,
-        positivity_max_velocity=1e4,
-        positivity_max_pressure_over_density=kelvin_to_code(5e9) / MU,
         cooling_params=CoolingParams(
             hydrogen_mass_fraction=X_H,
             metal_mass_fraction=Z_METAL,
@@ -1079,7 +1074,8 @@ def _mixing_layer_final_state(num_cells=16):
     t_sh = L_x / v_rel
 
     config = SimulationConfig(
-        positivity_config=PositivityConfig(default_positivity_protection=True),
+        weno_positivity_preserving=True,
+        positivity_config=PositivityConfig(),
         backend_config=BackendConfig(
             backend=BACKEND,
             pallas_block_shape=(4, 4, 4),

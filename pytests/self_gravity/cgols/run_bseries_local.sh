@@ -47,7 +47,6 @@ export CGOLS_COOLING_SUBCYCLES=32   # cheap insurance for intermediate dt/t_cool
 # WENO flux overshoots catastrophically (the 2026-07-31 blow-up); the blend
 # makes the offending interfaces locally diffusive instead. Costs the fused
 # WENO+divergence Pallas path (see cgols.py notes).
-export CGOLS_PRESERVING_FLUX=1
 export CGOLS_DIM=512
 export CGOLS_SHARD_SPLIT="(1, 2, 1, 1)"   # x-split over 2 GPUs; 512/2 = 256, divisible by the (4,4,8) Pallas block
 export CGOLS_NUM_SNAPSHOTS=60       # matches the 61-frame A-series reference

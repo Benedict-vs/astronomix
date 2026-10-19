@@ -646,31 +646,31 @@ COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 # clips then lock the region into a mass-pumping runaway. The chain of fixes
 # that did NOT work, for the record: sigma=0 sharp ICs (worse - the 1-cell disk
 # dies pre-onset), CFL 0.3 (blew up anyway), a 3.2e4 K cooling floor (delayed
-# it to the high state only). The fix that works is CGOLS_PRESERVING_FLUX=1,
-# the Hu-Adams-Shu/Zalesak FCT positivity flux limiter - with it the full
-# 75 Myr B-series at 128 runs with ZERO temperature-ceiling and ZERO
-# velocity-clip engagements (vs 24k/24.5k steps before) and peak max_rho
-# ~3.2e4, same scale as the adiabatic A-series. NB the limiter was silently
-# a no-op on the fused Pallas RK4_LSRK path until the matching astronomix fix
-# (_finite_difference/_time_integrators/_ssprk.py) that forces the explicit
-# flux path when blending is requested.
+# it to the high state only). What fixed it until Oct 2026 was the Hu-Adams-
+# Shu/Zalesak FCT positivity flux limiter (CGOLS_PRESERVING_FLUX=1): the full
+# 75 Myr B-series at 128 then ran with zero clip engagements and peak max_rho
+# ~3.2e4. Upstream has since replaced that limiter (and the clips) with the
+# positivity-preserving WENO + dual energy configured below.
 # Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
 COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 
-# Positivity-preserving flux blending (see _finite_difference/_interface_fluxes/
-# _flux_blending.py). PRESERVING_FLUX is the Hu-Adams-Shu / Zalesak-FCT limiter:
-# per interface, blend the WENO flux toward first-order LLF by the smallest
-# weight that keeps the LF-updated density AND pressure above their floors.
-# DEEPVOID_BLEND ramps toward LLF near the density floor.
-# PRESERVING_FLUX defaults ON whenever cooling is on - the radiative B-series
-# is NOT viable without it (see the blow-up notes above: the brute-force clips
-# rectify WENO oscillations at the cooling-sharpened contact into a density
-# runaway, while the FCT blend makes the offending interface locally diffusive
-# instead; costs the fused Pallas path, ~2.2x per step). It defaults OFF for an
-# adiabatic run, so a bare `python cgols.py` keeps the production A-series
-# numerics bit-identically.
-PRESERVING_FLUX = os.environ.get("CGOLS_PRESERVING_FLUX", "1" if COOLING else "0") == "1"
-DEEPVOID_BLEND = os.environ.get("CGOLS_DEEPVOID_BLEND", "0") == "1"
+# Positivity and the energy recovery (upstream astronomix, Oct 2026). Positivity
+# of the finite-difference scheme comes from the positivity-preserving WENO
+# reconstruction (Zhang & Shu 2012; SimulationConfig.weno_positivity_preserving):
+# every stage is a convex combination of admissible states, so density and
+# pressure stay above their floors without per-stage clamps. It replaces the
+# earlier patchwork - per-stage HARD_FLOOR, vacuum_rest, nan_safe, the velocity
+# and temperature clips and the Zalesak/Hu-Adams-Shu preserving-flux blend that
+# made the B-series viable - which upstream removed. The density floor of that
+# patchwork created mass (A-256: +26.8 code in one step at 20.85 Myr), and the
+# per-stage clips fed the contact runaways described above.
+# Dual energy (Bryan et al. 1995; SimulationConfig.dual_energy) carries a
+# separately advected internal energy g and recovers the pressure from it
+# wherever e_int/E < dual_energy_eta, so the fp32 cancellation of E - KE in fast
+# cold gas no longer produces the pressureless, floored cells that preceded the
+# A-256 knot. Both default ON; CGOLS_PP_WENO=0 / CGOLS_DUAL_ENERGY=0 for tests.
+PP_WENO = os.environ.get("CGOLS_PP_WENO", "1") == "1"
+DUAL_ENERGY = os.environ.get("CGOLS_DUAL_ENERGY", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
@@ -720,14 +720,7 @@ RESTART_STEP = os.environ.get("CGOLS_RESTART_STEP", "")
 # Runtime numerics knobs (defaults are the production values).
 # CGOLS_CFL: 0.9 is production-proven; the paper's Cholla setup ran 0.3, which
 # is the closer numerics match at ~3x the step count.
-# CGOLS_TMAX_K: the positivity temperature ceiling in Kelvin (becomes
-# positivity_max_pressure_over_density). It must sit WELL above the hottest
-# physical phase: at 5e8 K the box's hottest cell exceeded it on 27% of steps,
-# and that continuous thermal-energy deletion at sharp contacts fed a density
-# runaway at 43.8 Myr under CFL 0.9. 5e9 K (default) leaves real transients
-# untouched while still catching the 1e21+ K near-vacuum spikes.
 CFL = float(os.environ.get("CGOLS_CFL", "0.9"))
-TMAX_K = float(os.environ.get("CGOLS_TMAX_K", "5e9"))
 
 
 def _ic_state_path():
@@ -864,9 +857,7 @@ def build_cgols_wind_params():
     onset_myr = 5.0 if STEP_ONSET else 6.0
     knot_times_myr = jnp.array([0.0, 5.0, onset_myr, 10.0, 40.0, 45.0])
     return CGOLSWindParams(
-        # The paper's 300 pc gain region. Near-vacuum cells at the hot contacts
-        # it drives are handled by the positivity_temperature_clip ceiling (see
-        # build_config), so the physical radius is used directly.
+        # The paper's 300 pc gain region.
         injection_radius=(INJ_RAD * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
         schedule_mass_rates=jnp.array(
@@ -1017,11 +1008,6 @@ def build_config():
                 if COOLING_DT_LIMIT
                 else "cooling dt limit OFF (pure CFL); "
             )
-            + (
-                "FCT preserving flux ON; "
-                if PRESERVING_FLUX
-                else "FCT preserving flux OFF - EXPECT THE CONTACT RUNAWAY; "
-            )
             + f"outputs tagged {RUN_TAG!r}"
         )
     else:
@@ -1060,31 +1046,13 @@ def build_config():
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
-        # Positivity backstops, all required for this setup (values in the
-        # params blocks):
-        #   default_positivity_protection - per-stage + per-step HARD_FLOOR
-        #     density/pressure floors.
-        #   vacuum_rest - zeros a floored cell's momentum so the recovered
-        #     velocity is 0 rather than momentum/rho_floor.
-        #   nan_safe - resets any non-finite cell to a valid floor state.
-        #   velocity_clip - caps |v| in EVERY cell (density-independent): the
-        #     v = m/rho runaway forms in the near-floor band just ABOVE the
-        #     density floor, out of reach of the density-keyed safeguards.
-        #   temperature_clip - caps P/rho so c_s (and the CFL timestep) stays
-        #     finite when a WENO energy overshoot lands in a near-vacuum cell.
-        # All honoured bit-identically by the PALLAS kernels.
-        positivity_config=PositivityConfig(
-            default_positivity_protection=True,
-            vacuum_rest=True,
-            nan_safe=True,
-            velocity_clip=True,
-            temperature_clip=True,
-            # FCT positivity flux limiter / deep-void LLF blending, env-gated
-            # (CGOLS_PRESERVING_FLUX / CGOLS_DEEPVOID_BLEND); default OFF so the
-            # bare adiabatic A-series numerics are unchanged.
-            preserving_flux=PRESERVING_FLUX,
-            deepvoid_blend=DEEPVOID_BLEND,
-        ),
+        # Positivity: positivity-preserving WENO + dual energy (see PP_WENO /
+        # DUAL_ENERGY above). PositivityConfig keeps upstream's defaults: no
+        # per-step floor, clamped density/pressure in the wave-speed and
+        # time-step estimates only.
+        weno_positivity_preserving=PP_WENO,
+        dual_energy=DUAL_ENERGY,
+        positivity_config=PositivityConfig(),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
         # progress_bar / monitor add per-step host syncs, so drop them when timing.
@@ -1650,18 +1618,6 @@ def build_simulation_params(Phi_total):
         # cap that gradient while leaving the rarefied cavity room to form.
         minimum_density=1e-4,
         minimum_pressure=1e-5,
-        # Global velocity ceiling for positivity_velocity_clip (50 code = 5000
-        # km/s: well above any physical galactic wind, far below the near-floor
-        # v = m/rho runaway it exists to stop). Caps |v| in EVERY cell, not just
-        # sub-floor ones.
-        positivity_max_velocity=50.0,
-        # Temperature ceiling for positivity_temperature_clip. The solver caps
-        # P/rho in code units, so convert the physical T_max via T_factor
-        # (T = (P/rho)*T_factor). Default 5e9 K: far above the ~2e7 K CC85 hot
-        # wind and its transient shock heating, far below the 1e21+ K
-        # near-vacuum spikes that collapse the timestep. Do NOT tighten it
-        # toward the physical temperatures - see the CGOLS_TMAX_K knob comment.
-        positivity_max_pressure_over_density=TMAX_K / T_factor,
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
         **_cooling_params_kwargs(),
@@ -2561,12 +2517,8 @@ def plot_paper_slices(
 # code, and not what the run itself calls.
 #
 # Interactions with the positivity clips, for reading the B-series diagnostics:
-#   - temperature_clip (CGOLS_TMAX_K, 5e9 K) never conflicts with cooling, which
-#     only lowers T. Fidelity note: paper-era Cholla caps T at 1e9 K INSIDE its
-#     cooling kernel (unmentioned in either paper). Our 5e9 was chosen to fix the
-#     adiabatic per-stage-clipping runaway; CGOLS_TMAX_K=1e9 is a legitimate
-#     maximally-Cholla-faithful experiment. With cooling on the hottest gas
-#     self-limits, so the difference should be small - the default is unchanged.
+#   - Fidelity note: paper-era Cholla caps T at 1e9 K INSIDE its cooling kernel
+#     (unmentioned in either paper); there is no temperature ceiling here.
 #   - minimum_pressure = 1e-5 is a hard per-step/per-stage floor. The 10^4 K
 #     cooling floor is P = 1.4e-2 * rho, so for rho >~ 7e-4 the cooling floor
 #     binds first; in the most rarefied cavity cells (rho -> 1e-4) the pressure
