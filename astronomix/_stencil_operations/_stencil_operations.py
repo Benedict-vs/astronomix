@@ -8,92 +8,35 @@ Allows for code "closer to the math".
 from functools import partial
 
 # typing
-from typing import Tuple, Union
-from beartype import beartype as typechecker
-from jaxtyping import Array, Float, jaxtyped
+from typing import (
+    Tuple,
+    Union,
+)
+from jaxtyping import (
+    Array,
+    Float,
+)
 
 # jax
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec
 
-# astronomix
-from astronomix._pallas_helpers import _current_pallas_mesh
-
-try:
-    from jax.shard_map import shard_map  # jax >= 0.8 (promoted out of experimental)
-except ImportError:  # jax < 0.8
-    from jax.experimental.shard_map import shard_map
+# astronomix functions
+from astronomix._pallas_helpers import sharded_roll
 
 
-def _sharded_roll_layout(input_array: jnp.ndarray, shift: int, axis: int):
-    """``(mesh, pspec, mesh_axis_name, num_dev)`` when ``axis`` is split over the
-    active device mesh and a neighbour exchange can do the roll, else ``None``.
-
-    The layout is the solver's standard one (see ``_default_state_pspec``):
-    a state is sharded ``(VARAXIS, XAXIS, YAXIS, ZAXIS)``, a single field
-    ``(XAXIS, YAXIS, ZAXIS)``. Arrays of any other rank take the plain path.
-    """
-    mesh = _current_pallas_mesh()
-    if mesh is None or mesh.size <= 1 or shift == 0:
-        return None
-    names = tuple(mesh.axis_names)
-    if input_array.ndim == len(names):
-        spec = names
-    elif input_array.ndim == len(names) - 1:
-        spec = names[1:]
-    else:
-        return None
-    name = spec[axis % input_array.ndim]
-    num_dev = mesh.shape[name]
-    size = input_array.shape[axis]
-    if num_dev <= 1 or size % num_dev or abs(shift) > size // num_dev:
-        return None
-    return mesh, PartitionSpec(*spec), name, num_dev
-
-
-def _sharded_roll(input_array, shift, axis, mesh, pspec, name, num_dev):
-    """The periodic roll as a per-shard roll plus a ``|shift|``-cell ppermute.
-
-    GSPMD partitions the slice + concatenate of :func:`custom_roll` on a sharded
-    axis by resharding the whole array (an all-to-all of the full local field on
-    GPU), on every call. Shard ``k``'s rolled block is its own cells shifted by
-    ``shift`` plus the ``|shift|`` edge cells of its ring neighbour, so this
-    moves only that thin slab. Pure data movement: bit-identical to the
-    unsharded roll.
-    """
-
-    def body(x):
-        n = x.shape[axis]
-        if shift > 0:
-            edge = jax.lax.slice_in_dim(x, n - shift, n, axis=axis)
-            perm = [(j, (j + 1) % num_dev) for j in range(num_dev)]
-            halo = jax.lax.ppermute(edge, name, perm=perm)
-            return jax.lax.concatenate(
-                [halo, jax.lax.slice_in_dim(x, 0, n - shift, axis=axis)], axis
-            )
-        edge = jax.lax.slice_in_dim(x, 0, -shift, axis=axis)
-        perm = [(j, (j - 1) % num_dev) for j in range(num_dev)]
-        halo = jax.lax.ppermute(edge, name, perm=perm)
-        return jax.lax.concatenate(
-            [jax.lax.slice_in_dim(x, -shift, n, axis=axis), halo], axis
-        )
-
-    return shard_map(
-        body, mesh=mesh, in_specs=(pspec,), out_specs=pspec, check_rep=False
-    )(input_array)
-
-
-# @jaxtyped(typechecker=typechecker)
-@partial(jax.jit, static_argnames=["shift", "axis"])
 def custom_roll(input_array: jnp.ndarray, shift: int, axis: int) -> jnp.ndarray:
     """Periodic roll of ``input_array`` by ``shift`` along ``axis``.
 
     Equivalent to ``jnp.roll`` but expressed via two static slices and a
     concatenate, which keeps ``shift`` / ``axis`` compile-time constants so the
-    stencil helpers built on top of it fuse cleanly. Under a multi-device mesh
-    (``pallas_mesh_context``) a roll along a sharded axis is done as a
-    neighbour exchange instead, see :func:`_sharded_roll`.
+    stencil helpers built on top of it fuse cleanly.
+
+    Inside a multi-device ``pallas_mesh_context`` (a sharded
+    ``time_integration``), a roll along the split axis is a shard_map halo
+    exchange of ``|shift|`` planes (``sharded_roll``) instead of GSPMD's
+    all-to-all reshard of the whole block. The result is bitwise identical to
+    the single-device roll.
 
     Args:
         input_array: The array to roll.
@@ -103,14 +46,20 @@ def custom_roll(input_array: jnp.ndarray, shift: int, axis: int) -> jnp.ndarray:
     Returns:
         The rolled array.
     """
-    layout = _sharded_roll_layout(input_array, shift, axis)
-    if layout is not None:
-        return _sharded_roll(input_array, shift, axis, *layout)
-    i = (-shift) % input_array.shape[axis]
+    rolled = sharded_roll(input_array, shift, axis)
+    if rolled is not None:
+        return rolled
+    return _custom_roll_local(input_array, shift, axis)
+
+
+@partial(jax.jit, static_argnames=["shift", "axis"])
+def _custom_roll_local(input_array: jnp.ndarray, shift: int, axis: int) -> jnp.ndarray:
+    """The single-device roll (two static slices + a concatenate)."""
+    split_index = (-shift) % input_array.shape[axis]
     return jax.lax.concatenate(
         [
-            jax.lax.slice_in_dim(input_array, i, input_array.shape[axis], axis=axis),
-            jax.lax.slice_in_dim(input_array, 0, i, axis=axis),
+            jax.lax.slice_in_dim(input_array, split_index, input_array.shape[axis], axis=axis),
+            jax.lax.slice_in_dim(input_array, 0, split_index, axis=axis),
         ],
         dimension=axis,
     )
@@ -125,7 +74,7 @@ def _shift(input_array: jnp.ndarray, shift: int, axis: int) -> jnp.ndarray:
     """
     return custom_roll(input_array, shift, axis)
 
-# @jaxtyped(typechecker=typechecker)
+
 @partial(jax.jit, static_argnames=["indices", "axis"])
 def _stencil_add(
     input_array: jnp.ndarray,

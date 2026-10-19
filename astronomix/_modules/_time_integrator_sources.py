@@ -116,7 +116,10 @@ def _time_integrator_sources(
             )
         else:
             primitive_state = primitive_state_from_conserved(
-                conserved_state, gamma, config, registered_variables
+                conserved_state,
+                gamma,
+                config,
+                registered_variables,
             )
 
     # Stellar wind (FD path): added directly as a conserved-state source.
@@ -146,19 +149,22 @@ def _time_integrator_sources(
     # the resulting conserved-state change as the source term. Only when the
     # cooling operator is configured to live inside the RK stages -- with
     # COOLING_OPERATOR_SPLIT it is instead applied once per step, after the
-    # hydro update (see _iteration_level_updates._post_step_updates).
+    # hydro update (see _iteration_level_updates._post_step_updates). The grid
+    # spacing enables the cooling-resolution limiter.
     if (
         config.cooling_config.cooling
         and config.solver_mode == FINITE_DIFFERENCE
         and config.cooling_config.cooling_placement == COOLING_IN_RK_STAGES
     ):
-        if not config.cooling_config.cooling_curve_config.cooling_curve_type == SIMPLE_MIXING_LAYER_COOLING:
+        cooling_curve_type = config.cooling_config.cooling_curve_config.cooling_curve_type
+        if cooling_curve_type != SIMPLE_MIXING_LAYER_COOLING:
             primitive_state = update_pressure_by_cooling(
                 primitive_state,
                 registered_variables,
                 config.cooling_config,
                 params,
                 dt,
+                grid_spacing=config.grid_spacing,
             )
         else:
             primitive_state = update_pressure_by_cooling_mixing(
@@ -171,16 +177,22 @@ def _time_integrator_sources(
 
         if config.mhd:
             final_conserved_state = conserved_state_from_primitive_mhd(
-                primitive_state, gamma, registered_variables
+                primitive_state,
+                gamma,
+                registered_variables,
             )
         else:
             final_conserved_state = conserved_state_from_primitive(
-                primitive_state, gamma, config, registered_variables
+                primitive_state,
+                gamma,
+                config,
+                registered_variables,
             )
-        source_term += (final_conserved_state - conserved_state)
+        source_term += final_conserved_state - conserved_state
 
     # Self-gravity (FD path).
-    # TODO: maybe only one Poisson solve per RK step?
+    # TODO: consider a single Poisson solve per Runge-Kutta step; the potential
+    # is currently recomputed at every stage, which repeats the FFT solve.
     if config.gravity_config.gravity and config.solver_mode == FINITE_DIFFERENCE:
         source_term += _fd_gravity_source(
             primitive_state,
@@ -194,11 +206,13 @@ def _time_integrator_sources(
 
     # Self-gravity (FV path): the source is built from the (pre-hydro) state
     # passed in and added operator-split to the post-hydro state by the caller.
-    # Matches the former _apply_self_gravity scheme, which likewise evaluated the
-    # source on the gas substate with the hydro conversion.
+    # It is evaluated on the gas substate with the hydrodynamic conversion.
     if config.gravity_config.gravity and config.solver_mode == FINITE_VOLUME:
         fv_primitive_state = primitive_state_from_conserved(
-            conserved_state, gamma, config, registered_variables
+            conserved_state,
+            gamma,
+            config,
+            registered_variables,
         )
 
         gravitational_potential = _compute_total_potential(
@@ -230,14 +244,20 @@ def _time_integrator_sources(
     # Viscosity (FD path).
     if config.diffusion and config.solver_mode == FINITE_DIFFERENCE:
         source_term += fd_viscosity_source(
-            primitive_state, params, config, registered_variables
+            primitive_state,
+            params,
+            config,
+            registered_variables,
         ) * dt
 
-    # Thermal conduction (FD path): kappa * laplacian(T) added to the energy
+    # Thermal conduction (FD path): div(kappa grad T) added to the energy
     # equation.
     if config.thermal_conduction and config.solver_mode == FINITE_DIFFERENCE:
         source_term += fd_conduction_source(
-            primitive_state, params, config, registered_variables
+            primitive_state,
+            params,
+            config,
+            registered_variables,
         ) * dt
 
     return source_term
