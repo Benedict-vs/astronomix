@@ -683,6 +683,12 @@ DUAL_ENERGY = os.environ.get("CGOLS_DUAL_ENERGY", "1") == "1"
 # and is less dissipative - suggested for the turbulent wind / shell. Forward
 # runs only: the Pallas adjoints use JS weights (no jvp/vjp work with it on).
 WENO_Z = os.environ.get("CGOLS_WENO_Z", "0") == "1"
+# Step retry (upstream PositivityConfig.step_retry): a step that leaves a
+# non-finite value or a non-positive density / pressure is redone from the same
+# state at half the step size (up to 6 times). A safety net behind the wind
+# onset time-step limit; costs one admissibility reduction per step. Adaptive
+# stepping only, so it stays off in bench mode (fixed steps).
+STEP_RETRY = os.environ.get("CGOLS_STEP_RETRY", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
@@ -1065,7 +1071,9 @@ def build_config():
         weno_positivity_preserving=PP_WENO,
         dual_energy=DUAL_ENERGY,
         weno_z=WENO_Z,
-        positivity_config=PositivityConfig(),
+        positivity_config=PositivityConfig(
+            step_retry=STEP_RETRY and not BENCH_STEPS,
+        ),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
         # progress_bar / monitor add per-step host syncs, so drop them when timing.
