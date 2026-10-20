@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ↓ ————————————————————————————————————————————————————————————— ↓
-# Run wrapper: clean CUDA env, then exec the astx python.
+# Run wrapper: clean CUDA env, then exec the astx python (was the Cas A showcase's run.sh).
 # Usage: ./run.sh [ENVVAR=1 ...] script.py [args...]
 #        (JAX_ENABLE_X64=1 must be set via env before python starts)
 # ↑ ————————————————————————————————————————————————————————————— ↑
@@ -19,7 +19,7 @@ unset CUDA_HOME CUDA_ROOT CUDA_PATH
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-false}"
 # import the checkout this script lives in (or an ASTRO_ROOT override, e.g. a
 # bisect worktree), not the site-packages astronomix wheel
-ASTRO_ROOT="${ASTRO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+ASTRO_ROOT="${ASTRO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # Fail loudly if that root has no astronomix. A missing path is silently dropped
 # from PYTHONPATH and the STALE site-packages wheel gets imported instead, so an
 # A/B against a worktree would compare the wrong code and still look healthy.

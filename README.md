@@ -145,10 +145,13 @@ Runnable scripts live under `examples/scripts/`, notebooks under
   - [Positivity-preserving WENO](examples/scripts/validation/weno_stability)
 
 More involved, physics-module showcase scripts — turbulent radiative mixing
-layer, stellar wind, thermal instability, cooling and the calibrated
-Cassiopeia A supernova remnant reconstruction against Chandra data
-([`supernova_showcase`](examples/gallery/supernova_showcase)) — live in
-[`examples/gallery/`](examples/gallery). The faithful methods-paper figure
+layer, stellar wind, cooling — live in [`examples/gallery/`](examples/gallery).
+The Cassiopeia A supernova remnant reconstruction against Chandra data (with the
+thermal-instability study that grew out of it) has its own repository,
+[casanova](https://github.com/leo1200/casanova), and the differentiable mock
+observations it is built on (X-ray, radio, XRISM) are a separate package,
+[observistix](https://github.com/leo1200/observistix), usable with any JAX
+hydrodynamics code. The faithful methods-paper figure
 generators live under [`examples/scripts/`](examples/scripts); regenerate every
 paper figure with `pytest pytests/test_reproduce_paper.py --reproduce-paper`.
 The fast correctness tests live under [`pytests/`](pytests).

@@ -29,15 +29,16 @@ on multiple nodes are communication bound (FV weak-scaling efficiency 58-65 % at
 
 ## 2. Cas A at high resolution
 
-**In place.** The calibrated pipeline, the JAX observation model, the X-ray fit and
-the 4D-Var live in
-[`examples/gallery/supernova_showcase`](examples/gallery/supernova_showcase); start
-with its `OVERVIEW.md`, `ROADMAP.md` and `HANDOFF_LARGER_CLUSTER.md`. The scripts
-run on the positivity-preserving WENO (`weno_positivity_preserving=True`, set by
-`_common.make_fd_config`), whose gradients are finite in single precision. The
-`run.sh` wrapper imports the checkout it lives in.
+**In place.** The calibrated pipeline, the X-ray fit and the 4D-Var moved to their own
+repository, [casanova](https://github.com/leo1200/casanova) (2026-10-20, with the history
+of `examples/gallery/supernova_showcase`), and the JAX observation model to
+[observistix](https://github.com/leo1200/observistix); start with casanova's `OVERVIEW.md`,
+`ROADMAP.md` and `HANDOFF_LARGER_CLUSTER.md`. The scripts run on the
+positivity-preserving WENO (`weno_positivity_preserving=True`, set by
+`_common.make_fd_config`), whose gradients are finite in single precision. Its
+`run.sh` imports the astronomix and observistix checkouts next to it.
 
-**On JUPITER** ([`supernova_showcase/jupiter/README.md`](examples/gallery/supernova_showcase/jupiter/README.md)):
+**On JUPITER** (casanova's `jupiter/README.md`):
 the observation data rebuilt from the public Chandra archive (no CIAO on aarch64:
 `--responses tables`), the ICs from Orlando's delivery, gates G0-G5 measured, the
 cold-face tangent (P2, `ad_tangent_llf_cold_factor`) added after G2 failed at
