@@ -84,11 +84,24 @@ case "$CGOLS_SITE" in
     ;;
 
   jupiter)
-    # JSC JUPITER (GH200). Placeholder mirroring the HoreKa branch; adjust the
-    # module names once an allocation exists.
-    module purge
-    module load CUDA
-    _cgols_activate_env
+    # JSC JUPITER Booster (GH200, aarch64). The env is a venv built on the
+    # Stages Python module, so that module must be loaded for its libpython.
+    # No CUDA module: as on horeka2, the pip nvidia-* (cuda12) wheels provide
+    # every runtime lib incl. NCCL and ptxas, and the system stack is CUDA 13.
+    # The venv lives under the per-user project directory because $HOME is
+    # too small (~20 GB / 80k inodes) for a jax install. The project is shared,
+    # so every user points this at their OWN venv, never at someone else's.
+    # A batch shell started without the login environment has no `module`
+    # function; JSC's profile script defines it together with MODULEPATH
+    # (Lmod's bare init script leaves MODULEPATH empty).
+    if ! declare -F module >/dev/null; then
+        source /e/software/default/configs/modules.sh >/dev/null 2>&1
+    fi
+    # Python sits below GCCcore in the module hierarchy, so after a purge the
+    # (hidden) compiler module has to be loaded first.
+    module purge 2>/dev/null
+    module load Stages/2026 GCCcore/.14.3.0 Python/3.13.5
+    source "${CGOLS_VENV:-/e/project1/astronomix/$USER/envs/cgols}/bin/activate"
     _cgols_pip_nvidia_libs
     ;;
 
