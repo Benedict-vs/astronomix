@@ -779,6 +779,45 @@ class SimulationConfig(NamedTuple):
     #: local sound speed (``div_v`` is an undivided difference, i.e. a velocity).
     ad_shock_latch_compression_width: float = 0.05
 
+    #: Give the shock-history ACCUMULATORS the derivative of the shock arrival
+    #: time (tangent only; the primal is unchanged bit for bit). A parcel's
+    #: ``time_since_shock`` is t - t_s and its ``density_time`` the integral of rho
+    #: since t_s; with the boolean latch their derivative is transport only, so an
+    #: adjoint cannot see that moving a shock changes WHEN gas is shocked -- the
+    #: ionization age that thermal X-ray emission depends on. With this on, a
+    #: cell whose entropy rise crosses ``shock_entropy_jump`` during a step (under
+    #: compression) gets the derivative of f dt (resp. rho f dt), f = a_now /
+    #: (a_now - a_prev) the fraction of the step after the linearly interpolated
+    #: crossing (a = rise - jump, before and after the step): a shock arriving
+    #: delta_t earlier gives d(f dt) = delta_t exactly, for any shock strength
+    #: and any number of steps per crossing. Nothing is added outside the
+    #: crossing step, so -- unlike ``ad_smooth_shock_latch``, whose small per-step
+    #: leak in quiescent gas accumulates into the accumulators over many steps and
+    #: is carried into the gas when it is shocked later -- nothing leaks or
+    #: accumulates. The shocked fraction's own tangent stays transport. Mutually
+    #: exclusive with ``ad_smooth_shock_latch``.
+    ad_shock_arrival: bool = False
+
+    #: Whether the accumulators' per-step increments (``shocked_fraction * dt``,
+    #: ``shocked_fraction * rho * dt``) carry the tangent of the advected shocked
+    #: fraction (default, the exact derivative of the update). False: the
+    #: increments see the shocked fraction as a constant (tangent only; the primal
+    #: is unchanged bit for bit), so the accumulators change only through their
+    #: own transport, the density and the arrival term. In the primal the edge of
+    #: the shocked region is set by the shock criterion, not by advection, so the
+    #: transport tangent of the latch field at that edge is not a derivative the
+    #: primal follows; over thousands of steps it is integrated into the
+    #: accumulators of every cell the front passes (2026-10-13, under test).
+    ad_shock_latch_transport: bool = True
+
+    #: Damping of the arrival term (``ad_shock_arrival``) for crossings whose
+    #: entropy rise barely changes within the step: the term is weighted by
+    #: d^2 / (d^2 + w^2), d = rise_now - rise_previous (nats), w this width
+    #: (a constant of the step, tangent only). A slow crossing turns a modest
+    #: tangent of the rise into a large shift of the interpolated arrival; 0
+    #: (default): undamped.
+    ad_shock_arrival_damping: float = 0.0
+
     #: Self-gravity / external-potential configuration (see GravityConfig).
     gravity_config: GravityConfig = GravityConfig()
 
@@ -1068,6 +1107,19 @@ class SimulationConfig(NamedTuple):
     #: float32 tangent overflows long before the end of such a run.
     weno_ad_frozen_weights: bool = False
 
+    #: If > 0: on interfaces whose colder side is below this factor times
+    #: ``params.minimum_specific_pressure``, take the DERIVATIVE of the flux
+    #: through the monotone Lax-Friedrichs flux; the primal value is
+    #: unchanged. In cold, kinetic-dominated gas (freely expanding ejecta, far
+    #: below the temperature floor) the linearised WENO flux -- with or without
+    #: frozen weights -- advances the tangent with a linear high-order scheme
+    #: that is not stable at sharp density edges, and the tangent grows by
+    #: orders of magnitude per year while the true perturbation does not. A
+    #: tangent-only linearisation, so ``jax.jvp`` / ``jax.grad`` are those of a
+    #: locally first-order scheme there. Lives in the cold-crush blend, so it
+    #: requires ``positivity_config.coldcrush_blend`` (ideal gas).
+    ad_tangent_llf_cold_factor: float = 0.0
+
     # physical modules
 
     #: Turbulent forcing configuration (see TurbulentForcingConfig).
@@ -1231,6 +1283,13 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         )
     if int(config.ad_remat_chunks) < 1:
         raise ValueError(f"ad_remat_chunks must be >= 1, got {config.ad_remat_chunks!r}.")
+    if config.ad_tangent_llf_cold_factor > 0.0 and not (
+        config.positivity_config.coldcrush_blend and config.equation_of_state == IDEAL_GAS
+    ):
+        raise ValueError(
+            "ad_tangent_llf_cold_factor acts inside the cold-crush flux blend; it "
+            "needs positivity_config.coldcrush_blend=True and an ideal gas."
+        )
     if config.passive_scalar_substep_loop not in (SUBSTEPS_AUTO, SUBSTEPS_DYNAMIC, SUBSTEPS_MASKED):
         raise ValueError(
             "passive_scalar_substep_loop must be SUBSTEPS_AUTO, SUBSTEPS_DYNAMIC "
@@ -1248,6 +1307,13 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         )
     if config.ad_smooth_shock_latch and not config.track_shock_history:
         print("NOTE: ad_smooth_shock_latch has no effect without track_shock_history.")
+    if config.ad_shock_arrival and config.ad_smooth_shock_latch:
+        raise ValueError(
+            "ad_shock_arrival and ad_smooth_shock_latch are alternative tangents of the "
+            "shock history; switch on at most one."
+        )
+    if config.ad_shock_arrival and not config.track_shock_history:
+        print("NOTE: ad_shock_arrival has no effect without track_shock_history.")
 
     # The conduction source only distinguishes order 4 from everything else,
     # so any other value would silently run the second-order discretisation.

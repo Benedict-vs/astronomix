@@ -37,11 +37,20 @@ run on the positivity-preserving WENO (`weno_positivity_preserving=True`, set by
 `_common.make_fd_config`), whose gradients are finite in single precision. The
 `run.sh` wrapper imports the checkout it lives in.
 
-**Next** (details in `HANDOFF_LARGER_CLUSTER.md`): the gates G0-G2 on a GPU (the
-PP re-baseline at 128³ and the long-window tangent test), the PP-native cold-face
-tangent only if G2 needs it (P2), a separate frozen-theta switch (P3), then the
-448³ and 512³ runs. Callers outside the repository still pass the removed
-`--positivity` flag.
+**On JUPITER** ([`supernova_showcase/jupiter/README.md`](examples/gallery/supernova_showcase/jupiter/README.md)):
+the observation data rebuilt from the public Chandra archive (no CIAO on aarch64:
+`--responses tables`), the ICs from Orlando's delivery, gates G0-G5 measured, the
+cold-face tangent (P2, `ad_tangent_llf_cold_factor`) added after G2 failed at
+256³/512³, the hydro WENO Pallas adjoint back (`BackendConfig.pallas_adjoint`),
+deterministic scatters made cheap, `casa_4dvar` across nodes (`CASA_DISTRIBUTED=1`),
+a 128³ refit and the 512³ 4D-Var on 8 GH200 (198-835 s per gradient, <= 66 GB/GPU),
+which improves the held-out 2019/2022 score by 17.2 % (128³: 12.3 %).
+
+**Next**: the CIAO responses (built on an x86 machine), a longer refit and the
+Bayesian stage of the hand-off on the 512³ analysis; a separate frozen-theta switch
+(P3); the MHD WENO Pallas adjoint; the native-vs-Pallas dual-energy forward
+difference in kinetic-dominated cells. Callers outside the repository still pass
+the removed `--positivity` flag.
 
 ## 3. Second-order FV against fifth-order FD: spectra, dynamo, Prandtl number
 
