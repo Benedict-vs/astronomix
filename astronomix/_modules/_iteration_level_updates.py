@@ -127,6 +127,17 @@ def _post_step_updates(
         primitive_state = _apply_cooling(
             primitive_state, dt, config, params, registered_variables
         )
+        # Cooling only lowers the pressure row; with dual energy the carried
+        # internal-energy density g must follow, or the next step's switched
+        # pressure recovery (e_E/E < eta cells) and the advected g start from
+        # the uncooled value.
+        if registered_variables.internal_energy_active:
+            primitive_state = primitive_state.at[
+                registered_variables.internal_energy_index
+            ].set(
+                primitive_state[registered_variables.pressure_index]
+                / (params.gamma - 1.0)
+            )
 
     return primitive_state
 

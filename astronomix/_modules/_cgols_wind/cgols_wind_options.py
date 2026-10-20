@@ -15,6 +15,13 @@ class CGOLSWindConfig(NamedTuple):
 
     cgols_wind: bool = False
 
+    #: Also bound the hydro time step by the heating of the injection region
+    #: (see ``_cgols_wind.cgols_wind_time_step_limit``). The CFL estimate only
+    #: sees the start-of-step state, so on the step where the source switches
+    #: on it is set by the cold pre-onset gas while the step itself heats the
+    #: region by orders of magnitude.
+    timestep_limit: bool = False
+
 
 class CGOLSWindParams(NamedTuple):
     """Dynamic parameters of the CGOLS wind, all in code units.

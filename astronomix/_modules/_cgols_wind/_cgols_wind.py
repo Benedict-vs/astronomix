@@ -117,6 +117,44 @@ def _cgols_wind_source(
     return source_term
 
 
+@partial(jax.jit, static_argnames=["config", "registered_variables"])
+def cgols_wind_time_step_limit(
+    cgols_wind_params: CGOLSWindParams,
+    primitive_state: STATE_TYPE,
+    current_time: Union[float, Float[Array, ""]],
+    C_cfl: Union[float, Float[Array, ""]],
+    gamma: Union[float, Float[Array, ""]],
+    config: SimulationConfig,
+    helper_data: HelperData,
+    registered_variables: RegisteredVariables,
+) -> Float[Array, ""]:
+    """Upper bound on dt from the heating of the injection region.
+
+    Within one step a cell gains specific internal energy q dt with
+    q = (Edot / V) w / rho, so its sound speed reaches at least
+    sqrt(gamma (gamma - 1) q dt). Requiring that alone to satisfy the CFL
+    condition, dt sqrt(gamma (gamma - 1) q dt) <= C_cfl dx, gives
+    dt <= (C_cfl dx)^(2/3) / (gamma (gamma - 1) q_max)^(1/3).
+    This only binds while the injection region is still cold (the step that
+    switches the wind on, and the next few); once it is hot the ordinary CFL
+    estimate is smaller. Returns +inf while the source is off.
+    """
+    edot = jnp.interp(
+        current_time,
+        cgols_wind_params.schedule_times,
+        cgols_wind_params.schedule_energy_rates,
+    )
+    dx = config.grid_spacing
+    weights = jnp.clip(
+        (cgols_wind_params.injection_radius + dx / 2 - helper_data.r) / dx, 0.0, 1.0
+    )
+    V = jnp.sum(weights) * dx**3
+    rho = primitive_state[registered_variables.density_index]
+    q_max = jnp.max(edot / V * weights / rho)
+    dt = (C_cfl * dx) ** (2.0 / 3.0) / jnp.cbrt(gamma * (gamma - 1.0) * q_max)
+    return jnp.where(q_max > 0, dt, jnp.inf)
+
+
 """Claude notes:
 The CGOLS Chevalier & Clegg wind is implemented, wired into the time integrator, enabled in 
 cgols.py, and verified with conservation tests. Here's a rundown.

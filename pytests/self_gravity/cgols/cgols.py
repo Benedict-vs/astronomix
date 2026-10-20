@@ -570,6 +570,13 @@ BENCH_STEPS = int(os.environ.get("CGOLS_BENCH_STEPS", "0"))
 # (5 -> 6 Myr) for experiments (see build_cgols_wind_params).
 STEP_ONSET = os.environ.get("CGOLS_STEP_ONSET", "1") == "1"
 
+# Wind-heating time-step bound (CGOLSWindConfig.timestep_limit): the CFL dt of
+# the onset step is set by the cold pre-onset gas, ~5x the post-onset CFL dt.
+# Without the old density/pressure floors that step went negative at 512
+# (_B512pp NaN at 5.02 Myr, step 217). Binds only for the first few post-onset
+# steps (>=4.6x slack afterwards at 256). CGOLS_WIND_DT_LIMIT=0 to disable.
+WIND_DT_LIMIT = os.environ.get("CGOLS_WIND_DT_LIMIT", "1") == "1"
+
 # Outer boundary condition: "diode" (outflow-only, the paper's choice and the
 # default) or "open" (plain zero-gradient copy, which lets the static potential
 # pull ghost-reservoir gas back into the box - slow artificial accretion off
@@ -1090,7 +1097,7 @@ def build_config():
             external_potential=True,
         ),
         donate_state=True,
-        cgols_wind_config=CGOLSWindConfig(cgols_wind=True),
+        cgols_wind_config=CGOLSWindConfig(cgols_wind=True, timestep_limit=WIND_DT_LIMIT),
         # Intermediate output for the animation / wind time-series. We use the
         # host-offload callback path (activate_snapshot_callback) rather than the
         # on-device snapshot store (return_snapshots + return_states): the latter

@@ -72,6 +72,7 @@ from astronomix._modules._iteration_level_updates import (
     _post_step_updates,
 )
 from astronomix._modules._cooling._cooling import cooling_time_step_limit
+from astronomix._modules._cgols_wind._cgols_wind import cgols_wind_time_step_limit
 from astronomix._modules._cooling.cooling_options import COOLING_OPERATOR_SPLIT
 from astronomix._fluid_equations._passive_scalars import _fill_scalar_ghost_cells
 from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
@@ -920,6 +921,30 @@ def _integrate_core(
                             registered_variables,
                             params.C_cfl,
                         )
+                    )
+
+                # CGOLS wind heating constraint (see cgols_wind_time_step_limit):
+                # the CFL estimate cannot see the energy the source is about to
+                # inject, so the onset step would otherwise run at the cold
+                # pre-onset dt.
+                if (
+                    config.cgols_wind_config.cgols_wind
+                    and config.cgols_wind_config.timestep_limit
+                ):
+                    dt = jnp.minimum(
+                        dt,
+                        jax.lax.stop_gradient(
+                            cgols_wind_time_step_limit(
+                                params.cgols_wind_params,
+                                primitive_state,
+                                time,
+                                params.C_cfl,
+                                params.gamma,
+                                config,
+                                helper_data_pad,
+                                registered_variables,
+                            )
+                        ),
                     )
 
                 # Cooling-time constraint. Applied here rather than inside the
