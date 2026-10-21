@@ -32,8 +32,8 @@ from matplotlib.colors import LogNorm, Normalize
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-A_DIR = os.environ.get("CGOLS_FIG12_A", "cgols_snapshots_A512_jul")
-B_DIR = os.environ.get("CGOLS_FIG12_B", "cgols_snapshots_B512_aug")
+A_DIR = os.environ.get("CGOLS_FIG12_A", "cgols_snapshots_legacy/A512_jul")
+B_DIR = os.environ.get("CGOLS_FIG12_B", "cgols_snapshots_legacy/B512_aug")
 TARGET_MYR = float(os.environ.get("CGOLS_FIG12_TIME_MYR", "25.0"))
 
 # Paper panel specs (Figs 1 & 2 of 1803.01005).
