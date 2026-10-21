@@ -15,9 +15,9 @@ Emission models (see emission.py for the physics):
   xray_cgols        the CGOLS I Eq. 17 recipe, n^2 Lambda_A4(T) in the
                     2.32e6-1.55e7 K window
   xray_atomdb       n_e n_H epsilon_{0.3-2 keV}(T) from AtomDB, no T window,
-                    solar (AG89) metals scaled by --metallicity
+                    solar metals (Asplund+09, or AG89 with
+                    --solar-abundances AG89) scaled by --metallicity
   xray_atomdb_lopez the same with the Lopez+20 M82 wind abundance pattern
-                    (checkpoints only)
   halpha            Eq. 3 of arXiv:2606.10762 in 5e3-5e4 K
   emission_measure  int n_e n_H dl of the same gas [pc cm^-6]
 
@@ -63,7 +63,19 @@ _parser.add_argument(
     default=60.0,
     help="store the full maps of the snapshot closest to this time (Figs. 9 / 10)",
 )
-_parser.add_argument("--metallicity", type=float, default=1.0, help="Z / Z_sun of the AtomDB model")
+_parser.add_argument(
+    "--metallicity",
+    type=float,
+    default=1.0,
+    help="Z / Z_sun of the AtomDB model, relative to --solar-abundances",
+)
+_parser.add_argument(
+    "--solar-abundances",
+    choices=("A09", "AG89"),
+    default="A09",
+    help="solar set Z_sun refers to: Asplund+09 (default) or Anders & Grevesse 89; "
+    "in-situ frames carry A09-normalised metals only",
+)
 _parser.add_argument(
     "--halpha-disk-mask-kpc",
     type=float,
@@ -117,9 +129,8 @@ from astropy import units as u
 # astronomix constants
 from astronomix.analysis_helpers.emission import (
     ARCMIN2_PER_STERADIAN,
-    LOPEZ2020_M82_WIND_ABUNDANCES,
     MAP_UNITS,
-    XRAY_EMISSIVITY_UNIT,
+    SOLAR_ABUNDANCE_SET,
 )
 from astronomix.option_classes.simulation_config import FINITE_DIFFERENCE
 
@@ -130,14 +141,10 @@ from astronomix.analysis_helpers.emission import EmissionMapSettings
 # astronomix functions
 from astronomix import get_registered_variables
 from astronomix.analysis_helpers.emission import (
-    atomdb_xray_emissivity,
-    combined_log10_emissivity,
     emission_conversions,
     emission_maps,
-    line_of_sight_integral,
     load_xray_emissivity_table,
     luminosity_from_map,
-    metal_abundance_weights,
     minor_axis_profile,
 )
 
@@ -251,16 +258,10 @@ def make_block_projector(table, settings, cell_size_code):
     if cell_size_code in _BLOCK_PROJECTORS:
         return _BLOCK_PROJECTORS[cell_size_code]
     conversions = emission_conversions(CODE_UNITS)
-    lopez_metals = combined_log10_emissivity(
-        table,
-        metal_abundance_weights(table, LOPEZ2020_M82_WIND_ABUNDANCES, reference="A09"),
-        include_hydrogen_helium=False,
-    )
-    path_length_cm = cell_size_code * conversions.centimeters_per_code_length
 
     @jax.jit
     def project_block(density, pressure):
-        maps = emission_maps(
+        return emission_maps(
             density,
             pressure,
             conversions,
@@ -268,24 +269,6 @@ def make_block_projector(table, settings, cell_size_code):
             cell_size_code,
             settings,
         )
-        # The Lopez+20 abundance pattern needs its own metal map: unlike a
-        # scalar metallicity it cannot be recovered from the solar one.
-        temperature = (pressure / density) * conversions.kelvin_per_code_specific_energy
-        lopez_emissivity = atomdb_xray_emissivity(
-            density * conversions.electron_density_per_code_density,
-            density * conversions.hydrogen_density_per_code_density,
-            temperature,
-            table,
-            lopez_metals,
-        )
-        scale = XRAY_EMISSIVITY_UNIT * path_length_cm / (4.0 * np.pi)
-        for axis, plane in ((1, "xz"), (0, "yz")):
-            maps[f"xray_atomdb_metals_lopez_{plane}"] = line_of_sight_integral(
-                lopez_emissivity,
-                axis,
-                scale,
-            )
-        return maps
 
     _BLOCK_PROJECTORS[cell_size_code] = project_block
     return project_block
@@ -393,10 +376,9 @@ def product_maps(snapshot, metallicity):
         products[f"xray_atomdb_{plane}"] = (
             maps[f"xray_atomdb_hhe_{plane}"] + metallicity * maps[f"xray_atomdb_metals_{plane}"]
         )
-        if f"xray_atomdb_metals_lopez_{plane}" in maps:
-            products[f"xray_atomdb_lopez_{plane}"] = (
-                maps[f"xray_atomdb_hhe_{plane}"] + maps[f"xray_atomdb_metals_lopez_{plane}"]
-            )
+        # Frames written before the Lopez+20 map existed do not carry it.
+        if f"xray_atomdb_lopez_{plane}" in maps:
+            products[f"xray_atomdb_lopez_{plane}"] = maps[f"xray_atomdb_lopez_{plane}"]
         products[f"halpha_{plane}"] = maps[f"halpha_{plane}"]
         products[f"emission_measure_{plane}"] = maps[f"emission_measure_{plane}"]
     return products
@@ -482,7 +464,7 @@ def save_cache(path, records, maps, metadata):
     arrays = {"snapshot_index": np.array(indices, dtype=np.int32)}
     for key in keys:
         # One row per snapshot; a product missing from a snapshot (e.g. the
-        # Lopez+20 maps, which frames do not carry) is NaN-filled.
+        # Lopez+20 maps of older frames) is NaN-filled.
         rows = [np.atleast_1d(np.asarray(records[index].get(key, np.nan), dtype=np.float64)) for index in indices]
         width = max(row.size for row in rows)
         table = np.stack([row if row.size == width else np.full(width, np.nan) for row in rows])
@@ -506,6 +488,13 @@ def save_cache(path, records, maps, metadata):
 # -------------------------------------------------------------
 
 
+def _solar_label(metadata):
+    """Legend text of the AtomDB model's metallicity, e.g. 'Z = 1 Z_sun (A09)'."""
+    metallicity = float(metadata.get("metallicity", 1.0))
+    solar_set = str(metadata.get("solar_abundances", "AG89"))
+    return rf"Z = {metallicity:g} Z$_\odot$ ({solar_set})"
+
+
 def _map_extent(map_shape):
     """imshow extent (kpc) of an edge-on map, horizontal x vertical."""
     half_width = BOX_SIZE_KPC[0] / 2
@@ -518,7 +507,7 @@ def plot_maps(maps, metadata, tag, figure_directory):
     time_myr = float(metadata.get("map_time_myr", np.nan))
     panels_xray = [
         ("xray_cgols_xz", "X1: CGOLS I recipe\n" + r"$n^2\Lambda_{A4}$, $2.3$-$15.5$ MK"),
-        ("xray_atomdb_xz", "X2: AtomDB 0.3-2 keV\n" + r"$n_e n_H\epsilon(T)$, Z = Z$_\odot$"),
+        ("xray_atomdb_xz", "X2: AtomDB 0.3-2 keV\n" + r"$n_e n_H\epsilon(T)$, " + _solar_label(metadata)),
     ]
     panels_halpha = [
         ("halpha_xz", r"H$\alpha$ (Eq. 3), $5\times10^3$-$5\times10^4$ K"),
@@ -571,7 +560,7 @@ def plot_profiles(records, metadata, tag, figure_directory):
     figure, axis = plt.subplots(figsize=(6.4, 4.6))
     styles = {
         "xray_cgols": ("C0", "X1 CGOLS recipe"),
-        "xray_atomdb": ("C1", r"X2 AtomDB, Z$_\odot$"),
+        "xray_atomdb": ("C1", "X2 AtomDB, " + _solar_label(metadata)),
         "xray_atomdb_lopez": ("C2", "X2 AtomDB, Lopez+20 M82 wind"),
     }
     for product, (color, label) in styles.items():
@@ -627,14 +616,14 @@ def plot_profiles(records, metadata, tag, figure_directory):
     print(f"wrote {out}")
 
 
-def plot_luminosities(records, tag, figure_directory):
+def plot_luminosities(records, metadata, tag, figure_directory):
     """L_X(t) and L_Halpha(t) of every processed snapshot."""
     indices = sorted(records)
     times = np.array([float(records[index]["time_myr"]) for index in indices])
     figure, (axis_xray, axis_halpha) = plt.subplots(2, 1, figsize=(6.4, 7.0), sharex=True)
     for product, color, label in (
         ("xray_cgols", "C0", "X1 CGOLS recipe"),
-        ("xray_atomdb", "C1", r"X2 AtomDB, Z$_\odot$"),
+        ("xray_atomdb", "C1", "X2 AtomDB, " + _solar_label(metadata)),
         ("xray_atomdb_lopez", "C2", "X2 AtomDB, Lopez+20"),
     ):
         key = f"L_{product}_xz"
@@ -695,11 +684,21 @@ def main():
             raise SystemExit(f"no {source} found for --steps {ARGS.steps} ({checkpoint_directory} / {frames_directory})")
         print(f"{tag}: {len(selected)} snapshot(s) from {source} ({len(records)} already cached)")
 
+        if source == "frames" and ARGS.solar_abundances != SOLAR_ABUNDANCE_SET:
+            raise SystemExit(
+                f"--source frames: the in-situ metal maps are normalised to "
+                f"{SOLAR_ABUNDANCE_SET} solar; --solar-abundances {ARGS.solar_abundances} "
+                "needs the checkpoints"
+            )
         table = load_xray_emissivity_table()
-        settings = EmissionMapSettings(projection_axes=(1, 0))
+        settings = EmissionMapSettings(
+            projection_axes=(1, 0),
+            solar_abundance_set=ARGS.solar_abundances,
+        )
         metadata.update(
             source=source,
             metallicity=ARGS.metallicity,
+            solar_abundances=ARGS.solar_abundances,
             halpha_disk_mask_kpc=np.nan if ARGS.halpha_disk_mask_kpc is None else ARGS.halpha_disk_mask_kpc,
         )
         for index in selected:
@@ -736,7 +735,7 @@ def main():
         raise SystemExit(f"nothing to plot: {cache_path} is empty or missing")
     plot_maps(stored_maps, metadata, tag, figure_directory)
     plot_profiles(records, metadata, tag, figure_directory)
-    plot_luminosities(records, tag, figure_directory)
+    plot_luminosities(records, metadata, tag, figure_directory)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,9 @@ Three emission models are provided:
   a pre-computed APEC table (``data/xray_emissivity_0p3_2keV_atomdb.npz``,
   built once by ``data/generate_xray_emissivity_table.py``; no runtime
   dependency on pyatomdb). ``epsilon = epsilon_HHe + sum_el A_el epsilon_el``,
-  so the metallicity / abundance pattern is a free choice.
+  so the metallicity / abundance pattern is a free choice. "Solar" means
+  Asplund et al. (2009) by default (``SOLAR_ABUNDANCE_SET``); Anders &
+  Grevesse (1989), the set the table is tabulated in, can be selected instead.
 * **H-alpha** (Knoell et al. 2026, arXiv:2606.10762, Eq. 3):
   ``j = 2.63e-33 n_e n_H / T^0.9 erg cm^-3 s^-1 arcsec^-2`` for fully ionised
   gas, restricted to a temperature window, plus the plain emission measure
@@ -124,6 +126,11 @@ ELEMENT_SYMBOLS = (
     "Na", "Mg", "Al", "Si", "P", "S", "Cl", "Ar", "K", "Ca",
     "Sc", "Ti", "V", "Cr", "Mn", "Fe", "Co", "Ni", "Cu", "Zn",
 )  # fmt: skip
+
+#: The solar metal abundances "Z = Z_sun" refers to: "A09" (Asplund et al.
+#: 2009, represented by the Grevesse & Asplund 2010 set AtomDB ships) or "AG89"
+#: (Anders & Grevesse 1989, the set the table rows are tabulated in).
+SOLAR_ABUNDANCE_SET = "A09"
 
 #: M82 hot-wind abundances of Lopez et al. 2020 (arXiv:2006.08623, Table 2),
 #: by number relative to Asplund et al. 2009: the mean over the eight wind
@@ -306,7 +313,7 @@ def table_log10_temperature(table: XrayEmissivityTable) -> np.ndarray:
 def metal_abundance_weights(
     table: XrayEmissivityTable,
     abundances: Optional[dict] = None,
-    reference: str = "AG89",
+    reference: str = SOLAR_ABUNDANCE_SET,
 ) -> np.ndarray:
     """
     Per-metal weights turning the table's AG89-solar rows into a pattern.
@@ -315,9 +322,10 @@ def metal_abundance_weights(
         table: The emissivity table.
         abundances: ``{element symbol: abundance relative to solar}``; metals
             not listed are solar. ``None`` is the solar pattern.
-        reference: The solar table ``abundances`` is quoted against: ``"AG89"``
-            (Anders & Grevesse 1989) or ``"A09"`` (Asplund et al. 2009,
-            represented by the Grevesse & Asplund 2010 set AtomDB ships).
+        reference: The solar table ``abundances`` is quoted against: ``"A09"``
+            (Asplund et al. 2009, represented by the Grevesse & Asplund 2010
+            set AtomDB ships; the default) or ``"AG89"`` (Anders & Grevesse
+            1989). The rows are rescaled by the ratio of the two sets.
 
     Returns:
         The weights ``A_el`` (n_metals,) of ``sum_el A_el epsilon_el``.
@@ -351,9 +359,10 @@ def combined_log10_emissivity(
 
     Args:
         table: The emissivity table.
-        metal_weights: Per-metal weights (see :func:`metal_abundance_weights`);
-            a scalar applies the same factor to every metal (a metallicity in
-            units of solar).
+        metal_weights: Per-metal weights on the table rows, which are at AG89
+            solar abundance (see :func:`metal_abundance_weights`, which also
+            converts to A09); a scalar applies the same factor to every row (a
+            metallicity in units of AG89 solar).
         include_hydrogen_helium: Add the H + He part.
 
     Returns:
@@ -539,6 +548,7 @@ MAP_UNITS = {
     "xray_cgols": ("erg s^-1 cm^-2 sr^-1", True),
     "xray_atomdb_hhe": ("erg s^-1 cm^-2 sr^-1", True),
     "xray_atomdb_metals": ("erg s^-1 cm^-2 sr^-1", True),
+    "xray_atomdb_lopez": ("erg s^-1 cm^-2 sr^-1", True),
     "halpha": ("erg s^-1 cm^-2 arcsec^-2", False),
     "emission_measure": ("pc cm^-6", False),
 }
@@ -556,6 +566,9 @@ class EmissionMapSettings(NamedTuple):
     projection_axes: tuple = (1, 0)
     #: Viewing inclination [deg]; only edge-on (90) is implemented.
     inclination_deg: float = 90.0
+    #: The solar set the "xray_atomdb_metals" map is normalised to (see
+    #: SOLAR_ABUNDANCE_SET).
+    solar_abundance_set: str = SOLAR_ABUNDANCE_SET
 
 
 def line_of_sight_integral(field, axis: int, scale: float):
@@ -579,8 +592,10 @@ def emission_maps(
     be processed separately and their maps added (the post-processing driver
     does this to stay within memory), and a sharded field reduces with a single
     collective. The X-ray AtomDB model is stored as two maps, H+He and the
-    solar-pattern metals, so the metallicity remains a post-hoc factor:
-    ``S = S_hhe + Z S_metals``.
+    solar-pattern metals (``settings.solar_abundance_set``), so the metallicity
+    remains a post-hoc factor: ``S = S_hhe + Z S_metals``. A third, complete
+    map uses the Lopez+20 M82 wind abundance pattern
+    (:data:`LOPEZ2020_M82_WIND_ABUNDANCES`), which no scalar Z reproduces.
 
     Args:
         density: Density field [code units], shape (nx, ny, nz).
@@ -611,8 +626,13 @@ def emission_maps(
 
     solar_metals = combined_log10_emissivity(
         table,
-        metal_weights=1.0,
+        metal_abundance_weights(table, reference=settings.solar_abundance_set),
         include_hydrogen_helium=False,
+    )
+    lopez_mixture = combined_log10_emissivity(
+        table,
+        metal_abundance_weights(table, LOPEZ2020_M82_WIND_ABUNDANCES, reference="A09"),
+        include_hydrogen_helium=True,
     )
     integrands = {
         "xray_cgols": cgols_xray_emissivity(number_density, temperature),
@@ -629,6 +649,13 @@ def emission_maps(
             temperature,
             table,
             solar_metals,
+        ),
+        "xray_atomdb_lopez": atomdb_xray_emissivity(
+            electron_density,
+            hydrogen_density,
+            temperature,
+            table,
+            lopez_mixture,
         ),
         "halpha": halpha_emissivity(
             electron_density,
@@ -656,6 +683,7 @@ def emission_maps(
         "xray_cgols": XRAY_EMISSIVITY_UNIT * path_length_cm / (4.0 * math.pi),
         "xray_atomdb_hhe": XRAY_EMISSIVITY_UNIT * path_length_cm / (4.0 * math.pi),
         "xray_atomdb_metals": XRAY_EMISSIVITY_UNIT * path_length_cm / (4.0 * math.pi),
+        "xray_atomdb_lopez": XRAY_EMISSIVITY_UNIT * path_length_cm / (4.0 * math.pi),
         "halpha": HALPHA_EMISSIVITY_UNIT * path_length_cm,
         "emission_measure": path_length_cm / CENTIMETERS_PER_PARSEC,
     }

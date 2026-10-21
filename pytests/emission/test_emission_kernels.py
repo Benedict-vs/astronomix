@@ -46,6 +46,7 @@ from astronomix.analysis_helpers.emission import (
     CGOLS_XRAY_TEMPERATURE_MIN_K,
     HALPHA_COEFFICIENT,
     LOPEZ2020_M82_WIND_ABUNDANCES,
+    SOLAR_ABUNDANCE_SET,
     XRAY_EMISSIVITY_UNIT,
 )
 
@@ -168,15 +169,33 @@ def test_table_composition_and_sanity(table):
     assert log10_temperature[-1] == pytest.approx(9.0)
     assert log10_temperature.size == 201
 
-    # Solar weights reproduce the plain sum; a scalar Z scales the metals only.
-    solar = metal_abundance_weights(table)
-    np.testing.assert_array_equal(solar, np.ones(len(table.metal_atomic_numbers)))
-    full = 10.0 ** combined_log10_emissivity(table, solar)
+    # AG89 (the rows' own set) solar weights are all one and reproduce the
+    # plain sum; a scalar Z scales the metals only.
+    solar_ag89 = metal_abundance_weights(table, reference="AG89")
+    np.testing.assert_array_equal(solar_ag89, np.ones(len(table.metal_atomic_numbers)))
+    full = 10.0 ** combined_log10_emissivity(table, solar_ag89)
     metals_only = 10.0 ** combined_log10_emissivity(table, 1.0, include_hydrogen_helium=False)
     hydrogen_helium = 10.0**table.log10_emissivity_hydrogen_helium
     np.testing.assert_allclose(full, hydrogen_helium + metals_only, rtol=1e-12)
     half_solar = 10.0 ** combined_log10_emissivity(table, 0.5)
     np.testing.assert_allclose(half_solar, hydrogen_helium + 0.5 * metals_only, rtol=1e-12)
+
+    # The default solar set is Asplund 09: every row rescaled by A09 / AG89,
+    # checked against the raw table arrays.
+    assert SOLAR_ABUNDANCE_SET == "A09"
+    solar_a09 = metal_abundance_weights(table)
+    ratio = table.solar_abundance_ga10 / table.solar_abundance_ag89
+    np.testing.assert_allclose(solar_a09, ratio, rtol=1e-14)
+    full_a09 = 10.0 ** combined_log10_emissivity(table, solar_a09)
+    expected_a09 = hydrogen_helium + np.sum(
+        ratio[:, None] * 10.0**table.log10_emissivity_metals,
+        axis=0,
+    )
+    np.testing.assert_allclose(full_a09, expected_a09, rtol=1e-12)
+    # Asplund's O and Fe are ~0.6-0.7x AG89's, so the A09 metals emit less.
+    metals_a09 = expected_a09 - hydrogen_helium
+    i7 = int(np.argmin(np.abs(log10_temperature - 7.0)))
+    assert 0.5 < metals_a09[i7] / metals_only[i7] < 0.9
 
     # Abundances quoted against Asplund 09 are rescaled to the table's AG89.
     lopez = metal_abundance_weights(table, LOPEZ2020_M82_WIND_ABUNDANCES, reference="A09")
@@ -253,6 +272,14 @@ def test_uniform_box_luminosity(table, temperature):
     pressure = jnp.full(shape, pressure_code)
 
     maps = emission_maps(density, pressure, conversions, table, cell_size_code)
+    maps_ag89 = emission_maps(
+        density,
+        pressure,
+        conversions,
+        table,
+        cell_size_code,
+        EmissionMapSettings(solar_abundance_set="AG89"),
+    )
 
     cell_cm = cell_size_code * conversions.centimeters_per_code_length
     volume_cm3 = np.prod(shape) * cell_cm**3
@@ -274,7 +301,22 @@ def test_uniform_box_luminosity(table, temperature):
         "xray_atomdb_hhe": n_e * n_h * table_value(table.log10_emissivity_hydrogen_helium) * volume_cm3,
         "xray_atomdb_metals": n_e
         * n_h
-        * table_value(combined_log10_emissivity(table, 1.0, include_hydrogen_helium=False))
+        * table_value(
+            combined_log10_emissivity(
+                table,
+                table.solar_abundance_ga10 / table.solar_abundance_ag89,
+                include_hydrogen_helium=False,
+            )
+        )
+        * volume_cm3,
+        "xray_atomdb_lopez": n_e
+        * n_h
+        * table_value(
+            combined_log10_emissivity(
+                table,
+                metal_abundance_weights(table, LOPEZ2020_M82_WIND_ABUNDANCES, reference="A09"),
+            )
+        )
         * volume_cm3,
         "halpha": 4.0 * math.pi * ARCSEC2_PER_STERADIAN * HALPHA_COEFFICIENT
         * n_e * n_h * temperature**-0.9 * volume_cm3 * in_halpha_window,
@@ -285,6 +327,14 @@ def test_uniform_box_luminosity(table, temperature):
         for plane in ("xz", "yz"):
             luminosity = luminosity_from_map(maps[f"{name}_{plane}"], pixel_area_cm2, name)
             assert luminosity == pytest.approx(expected, rel=1e-9, abs=1e-300), (name, plane)
+    assert set(maps) == {f"{name}_{plane}" for name in analytic for plane in ("xz", "yz")}
+
+    # AG89-normalised metals: the table rows as they are.
+    expected_ag89 = n_e * n_h * volume_cm3 * table_value(
+        combined_log10_emissivity(table, 1.0, include_hydrogen_helium=False)
+    )
+    luminosity_ag89 = luminosity_from_map(maps_ag89["xray_atomdb_metals_xz"], pixel_area_cm2, "xray_atomdb_metals")
+    assert luminosity_ag89 == pytest.approx(expected_ag89, rel=1e-9, abs=1e-300)
 
     # The (pressure, density) -> T conversion is the cgols.py one (mu = 0.6).
     mu_mp_over_kb = 0.6 * const.m_p / const.k_B * (100 * u.km / u.s) ** 2

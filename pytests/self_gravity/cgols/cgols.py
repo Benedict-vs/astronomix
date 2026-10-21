@@ -741,8 +741,9 @@ CALLBACK_PARTITIONED = (
 )
 
 # Synthetic emission maps in every frame (astronomix/analysis_helpers/
-# emission.py): edge-on soft X-ray (the CGOLS I Eq. 17 recipe and the AtomDB
-# 0.3-2 keV band split into H+He and solar metals), H-alpha and emission
+# emission.py): edge-on soft X-ray (the CGOLS I Eq. 17 recipe; the AtomDB
+# 0.3-2 keV band split into H+He and Asplund+09 solar metals, plus the full
+# band with the Lopez+20 M82 wind abundances), H-alpha and emission
 # measure, each a full line-of-sight sum next to mdot_z. They let
 # cgols_emission.py analyse runs whose full-state checkpoints are pruned or too
 # large to keep (2048). "xy" stores the maps along y (x-z planes) AND along x
@@ -1905,8 +1906,8 @@ def make_snapshot_callable(
         to garbage. An explicit replication constraint makes the all-gather
         happen inside the jit, where it is legal. The planes are small (three
         2048x4096 @ 33.5 MB + one 2048x2048 @ 16.8 MB ~ 117 MB per frame,
-        ~7 GB over a 61-frame run; the ten emission maps of
-        CGOLS_EMISSION_FRAMES=xy add 335 MB per frame at 2048), so the gather
+        ~7 GB over a 61-frame run; the twelve emission maps of
+        CGOLS_EMISSION_FRAMES=xy add 403 MB per frame at 2048), so the gather
         is not a cost concern.
         """
         if sharding is None:
