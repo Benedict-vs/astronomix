@@ -52,10 +52,16 @@ REFERENCE_DIR = os.environ.get(
 )
 SLICE_TIMES_MYR = (25.0, 50.0, 75.0)
 OUTFLOW_HEIGHTS_KPC = (5.0, 8.0)
+STREAMLINE_MIN_UG = 0.01
 
 #: Phases of the feedback schedule over which the outflow is averaged (Myr):
 #: the high state including its ramps, and the late low state.
 PHASES_MYR = {"10-45 Myr (high)": (10.0, 45.0), "45-75 Myr (low)": (45.0, 75.0)}
+
+
+def percent_change(new, old):
+    """Relative change in per cent, NaN when the reference is zero."""
+    return 100.0 * (new / old - 1.0) if old != 0 else float("nan")
 
 
 def outflow_through(data, z, height):
@@ -129,19 +135,19 @@ def main():
         ax.set_title(f"net outflow through |z| = {height:.0f} kpc")
         print(f"|z| = {height:.0f} kpc:")
         print(f"  peak:       hydro {rate_hydro.max():7.2f}  MHD {rate_mhd.max():7.2f} Msun/yr "
-              f"({100 * (rate_mhd.max() / rate_hydro.max() - 1):+.1f}%)")
+              f"({percent_change(rate_mhd.max(), rate_hydro.max()):+.1f}%)")
         for name, window in PHASES_MYR.items():
             if t_mhd[-1] < window[1] - 1:
                 continue
             mean_hydro = phase_mean(t_hydro, rate_hydro, window)
             mean_mhd = phase_mean(t_mhd, rate_mhd, window)
             print(f"  {name}: hydro {mean_hydro:7.2f}  MHD {mean_mhd:7.2f} Msun/yr "
-                  f"({100 * (mean_mhd / mean_hydro - 1):+.1f}%)")
+                  f"({percent_change(mean_mhd, mean_hydro):+.1f}%)")
         if t_mhd[-1] >= t_hydro[-1] - 1:
             total_hydro = cumulative(t_hydro, rate_hydro)
             total_mhd = cumulative(t_mhd, rate_mhd)
             print(f"  cumulative: hydro {total_hydro:7.1f}  MHD {total_mhd:7.1f} x1e6 Msun "
-                  f"({100 * (total_mhd / total_hydro - 1):+.1f}%)")
+                  f"({percent_change(total_mhd, total_hydro):+.1f}%)")
     axes[0].set_ylabel(r"$\dot M_{\rm out}$ [$M_\odot$ yr$^{-1}$]")
     axes[0].legend()
     plt.tight_layout()
@@ -154,7 +160,7 @@ def main():
 
     columns = ("n hydro", "n MHD", "T MHD", "|B| MHD", "beta MHD")
     fig, axes = plt.subplots(
-        len(SLICE_TIMES_MYR), len(columns), figsize=(3.0 * len(columns), 5.2 * len(SLICE_TIMES_MYR))
+        len(SLICE_TIMES_MYR), len(columns), figsize=(3.0 * len(columns), 4.6 * len(SLICE_TIMES_MYR))
     )
     axes = np.atleast_2d(axes)
     for row, target in enumerate(SLICE_TIMES_MYR):
@@ -174,9 +180,14 @@ def main():
                 origin="lower", extent=extent_xz, cmap=cmap, norm=norm,
             )
             if column == 3:
-                # In-plane field lines (B_x, B_z) of the y = 0 slice.
+                # In-plane field lines (B_x, B_z) of the y = 0 slice, drawn
+                # only where the field is above STREAMLINE_MIN_UG (the
+                # direction of a round-off field is noise).
+                weak = mhd["B_xz_uG"][i_mhd].T < STREAMLINE_MIN_UG
                 ax.streamplot(
-                    x, z, mhd["Bx_xz_uG"][i_mhd].T, mhd["Bz_xz_uG"][i_mhd].T,
+                    x, z,
+                    np.ma.masked_where(weak, mhd["Bx_xz_uG"][i_mhd].T),
+                    np.ma.masked_where(weak, mhd["Bz_xz_uG"][i_mhd].T),
                     color="w", density=1.2, linewidth=0.5, arrowsize=0.5,
                 )
                 ax.set_xlim(extent_xz[0], extent_xz[1])
