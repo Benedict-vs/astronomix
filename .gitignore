@@ -22,6 +22,8 @@ field_level_inference/_archive
 # data/ -> /export/scratch symlink holding the multi-GB states)
 pytests/self_gravity/cgols/cgols_snapshots*
 pytests/self_gravity/cgols/cgols_logs
+# figures of diagnostic-only variants (pp/pp2/ppz validation runs, Oct 2026)
+pytests/self_gravity/cgols/figures/cgols/diagnostics/
 pytests/self_gravity/cgols/data
 # HoreKa / Slurm job artifacts dropped next to the scripts
 pytests/self_gravity/cgols/cgols_*.out
