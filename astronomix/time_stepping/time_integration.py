@@ -896,6 +896,28 @@ def _integrate_core(
                         )
                     )
 
+                # CGOLS wind heating constraint, as in the finite-difference
+                # branch below (the VL2 scheme carries the wind source).
+                if (
+                    config.cgols_wind_config.cgols_wind
+                    and config.cgols_wind_config.timestep_limit
+                ):
+                    dt = jnp.minimum(
+                        dt,
+                        jax.lax.stop_gradient(
+                            cgols_wind_time_step_limit(
+                                params.cgols_wind_params,
+                                primitive_state,
+                                time,
+                                params.C_cfl,
+                                params.gamma,
+                                config,
+                                helper_data_pad,
+                                registered_variables,
+                            )
+                        ),
+                    )
+
                 # Cooling-time constraint, applied after the estimator choice
                 # above so both the plain CFL and the source-term-aware
                 # estimator see it.
@@ -1016,6 +1038,7 @@ def _integrate_core(
                     params,
                     helper_data_pad,
                     registered_variables,
+                    time,
                 )
             elif config.solver_mode == FINITE_DIFFERENCE:
                 new_state = _evolve_state_fd(

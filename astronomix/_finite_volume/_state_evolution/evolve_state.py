@@ -576,6 +576,7 @@ def _evolve_state_fv(
     params: SimulationParams,
     helper_data: HelperData,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, Float[Array, ""]] = 0.0,
 ) -> STATE_TYPE:
     # The AthenaPK-equivalent VL2 scheme (hydro and GLM-MHD) replaces the whole
     # finite-volume step with its own Cartesian update, including Athena++'s
@@ -590,6 +591,7 @@ def _evolve_state_fv(
             params,
             helper_data,
             registered_variables,
+            current_time,
         )
 
     if config.mhd:

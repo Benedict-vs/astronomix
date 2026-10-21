@@ -294,9 +294,13 @@ from astronomix import (
 from astronomix.option_classes.simulation_config import (
     OPEN_BOUNDARY,
     FINITE_DIFFERENCE,
+    FINITE_VOLUME,
+    HLLC,
     OPEN_BOUNDARY_DIODE,
     PALLAS,
+    POSITIVITY_HARD_FLOOR,
     RK4_LSRK,
+    VL2,
     SIMPLE_SOURCE,
     TO_DISK,
     VARAXIS,
@@ -737,10 +741,23 @@ CALLBACK_PARTITIONED = (
 RESTART_FROM = os.environ.get("CGOLS_RESTART_FROM", "")
 RESTART_STEP = os.environ.get("CGOLS_RESTART_STEP", "")
 
+# Hydro solver: "fd" (default, the production WENO5 finite-difference scheme
+# configured above) or "fv" (the AthenaPK-equivalent VL2 finite-volume scheme:
+# donor-cell predictor + van Leer PLM corrector, HLLC, AthenaPK's first-order
+# flux correction and density / pressure floors - Cholla's VL + PLM + HLLC of
+# the paper, 2nd order). The fv knobs only enter the config when selected, so
+# the fd config stays byte-identical.
+SOLVER = os.environ.get("CGOLS_SOLVER", "fd")
+if SOLVER not in ("fd", "fv"):
+    raise ValueError(f"CGOLS_SOLVER must be 'fd' or 'fv', got {SOLVER!r}")
+
 # Runtime numerics knobs (defaults are the production values).
-# CGOLS_CFL: 0.9 is production-proven; the paper's Cholla setup ran 0.3, which
-# is the closer numerics match at ~3x the step count.
-CFL = float(os.environ.get("CGOLS_CFL", "0.9"))
+# CGOLS_CFL: 0.9 is production-proven for fd, whose dt = C dx / sum_d(|v_d| + c)
+# (sum over the three axes, ~0.3 per axis); the paper's Cholla setup ran 0.3,
+# which is the closer numerics match at ~3x the step count. The fv (VL2)
+# dt = C dx / max_d(|v_d| + c) is the Athena / Cholla convention, stable up to
+# C = 0.5 in 3D; 0.4 is the default there.
+CFL = float(os.environ.get("CGOLS_CFL", "0.9" if SOLVER == "fd" else "0.4"))
 
 
 def _ic_state_path():
@@ -996,6 +1013,47 @@ def _gaussian_smooth_3d(field, sigma):
 # ---------------------------------------------------------------------------
 # Initial-condition build
 # ---------------------------------------------------------------------------
+def _solver_config_kwargs():
+    """The SimulationConfig entries of the hydro solver (CGOLS_SOLVER)."""
+    if SOLVER == "fd":
+        return dict(
+            solver_mode=FINITE_DIFFERENCE,
+            # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven
+            # shocks, but it carries one more full-state register and OOMs at
+            # 512x512x1024. Staying on the memory-lean 2N-storage RK4_LSRK;
+            # stability at the sharp wind/disk contacts is handled by the
+            # positivity backstops below.
+            time_integrator=RK4_LSRK,
+            # Positivity: positivity-preserving WENO + dual energy (see PP_WENO
+            # / DUAL_ENERGY above). PositivityConfig keeps upstream's defaults:
+            # no per-step floor, clamped density/pressure in the wave-speed and
+            # time-step estimates only.
+            weno_positivity_preserving=PP_WENO,
+            dual_energy=DUAL_ENERGY,
+            weno_z=WENO_Z,
+            positivity_config=PositivityConfig(
+                step_retry=STEP_RETRY and not BENCH_STEPS,
+            ),
+        )
+    # VL2 (AthenaPK / Cholla-like 2nd order). HLLC keeps the contact (the
+    # wind / disk interface) sharp, as in the paper. Positivity is AthenaPK's:
+    # the first-order flux correction falls back to LLF fluxes around any cell
+    # whose update would go non-positive, and the hard floor applies the
+    # density / pressure floors (params.minimum_*) in every stage. The external
+    # potential couples through the cell-centred SIMPLE_SOURCE of the gravity
+    # config below (also the fd coupling), which keeps the Pallas stages.
+    return dict(
+        solver_mode=FINITE_VOLUME,
+        time_integrator=VL2,
+        riemann_solver=HLLC,
+        first_order_flux_correction=True,
+        positivity_config=PositivityConfig(
+            per_step_mode=POSITIVITY_HARD_FLOOR,
+            step_retry=STEP_RETRY and not BENCH_STEPS,
+        ),
+    )
+
+
 def build_config():
     """Build the SimulationConfig + registered_variables.
 
@@ -1051,12 +1109,6 @@ def build_config():
         # (eagerly built, bit-identical) geometry.
         host_helper_data=not INSITU_IC,
         geometry=CARTESIAN,
-        solver_mode=FINITE_DIFFERENCE,
-        # SSPRK4 (RK4_SSP) would be more robust to the strong wind-driven shocks,
-        # but it carries one more full-state register and OOMs at 512x512x1024.
-        # Staying on the memory-lean 2N-storage RK4_LSRK; stability at the sharp
-        # wind/disk contacts is handled by the positivity backstops below.
-        time_integrator=RK4_LSRK,
         backend_config=BackendConfig(
             backend=PALLAS,
             pallas_block_shape=PALLAS_BLOCK_SHAPE,
@@ -1066,16 +1118,7 @@ def build_config():
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
         num_cells=StaticIntVector(dim_x, dim_y, dim_z),
-        # Positivity: positivity-preserving WENO + dual energy (see PP_WENO /
-        # DUAL_ENERGY above). PositivityConfig keeps upstream's defaults: no
-        # per-step floor, clamped density/pressure in the wave-speed and
-        # time-step estimates only.
-        weno_positivity_preserving=PP_WENO,
-        dual_energy=DUAL_ENERGY,
-        weno_z=WENO_Z,
-        positivity_config=PositivityConfig(
-            step_retry=STEP_RETRY and not BENCH_STEPS,
-        ),
+        **_solver_config_kwargs(),
         # Benchmark mode: run exactly BENCH_STEPS equal-sized steps and print the
         # elapsed (post-compile) time so cgols_scaling.py can derive sec/step.
         # progress_bar / monitor add per-step host syncs, so drop them when timing.
