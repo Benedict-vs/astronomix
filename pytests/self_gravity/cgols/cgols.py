@@ -328,6 +328,12 @@ from astronomix._modules._cooling.cooling_options import (
     CoolingParams,
 )
 from astronomix.parallel import barrier
+from astronomix.analysis_helpers.emission import (
+    EmissionMapSettings,
+    emission_conversions,
+    emission_maps,
+    load_xray_emissivity_table,
+)
 
 jax.config.update("jax_enable_x64", False)
 
@@ -733,6 +739,22 @@ CALLBACK_PARTITIONED = (
     os.environ.get("CGOLS_CALLBACK_PARTITIONED", "0") == "1"
     and jax.process_count() > 1
 )
+
+# Synthetic emission maps in every frame (astronomix/analysis_helpers/
+# emission.py): edge-on soft X-ray (the CGOLS I Eq. 17 recipe and the AtomDB
+# 0.3-2 keV band split into H+He and solar metals), H-alpha and emission
+# measure, each a full line-of-sight sum next to mdot_z. They let
+# cgols_emission.py analyse runs whose full-state checkpoints are pruned or too
+# large to keep (2048). "xy" stores the maps along y (x-z planes) AND along x
+# (y-z planes), "y" only the former, "0" none. With checkpointing on (the
+# default) the frame jit runs between TO_DISK segments, a separate program from
+# the solver, so the maps cannot touch the solver state and add no peak
+# memory; their cost is a few fused reductions once per frame.
+EMISSION_FRAMES = os.environ.get("CGOLS_EMISSION_FRAMES", "xy")
+if EMISSION_FRAMES not in ("0", "y", "xy"):
+    raise SystemExit(
+        f"CGOLS_EMISSION_FRAMES must be '0', 'y' or 'xy', got {EMISSION_FRAMES!r}"
+    )
 
 RESTART_FROM = os.environ.get("CGOLS_RESTART_FROM", "")
 RESTART_STEP = os.environ.get("CGOLS_RESTART_STEP", "")
@@ -1821,7 +1843,15 @@ def make_snapshot_callable(
     ]
     counter = {"i": max(_existing) + 1 if _existing else 0}
 
-    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz):
+    # Emission maps (CGOLS_EMISSION_FRAMES): the line-of-sight axes of the
+    # (x, y, z) interior, 1 -> x-z map, 0 -> y-z map.
+    emission_axes = {"0": (), "y": (1,), "xy": (1, 0)}[EMISSION_FRAMES]
+    if emission_axes:
+        emission_settings = EmissionMapSettings(projection_axes=emission_axes)
+        emission_unit_conversions = emission_conversions(code_units, mu)
+        xray_table = load_xray_emissivity_table()
+
+    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz, emission):
         # jax.debug.callback fires on every process with the same (explicitly
         # all-gathered, see _replicated below) global planes; one writer only,
         # or 32 ranks race on frame_NNNN.npz.
@@ -1839,6 +1869,10 @@ def make_snapshot_callable(
             n_xy=np.asarray(n_xy, dtype=np.float32),
             mdot_z=np.asarray(mdot_z, dtype=np.float32),
             vr_xz=np.asarray(vr_xz, dtype=np.float32),
+            **{
+                f"emission_{name}": np.asarray(emission_map, dtype=np.float32)
+                for name, emission_map in emission.items()
+            },
         )
 
     # Rolling retention for the Orbax checkpoints (CGOLS_CHECKPOINT_EVERY > 0):
@@ -1871,7 +1905,9 @@ def make_snapshot_callable(
         to garbage. An explicit replication constraint makes the all-gather
         happen inside the jit, where it is legal. The planes are small (three
         2048x4096 @ 33.5 MB + one 2048x2048 @ 16.8 MB ~ 117 MB per frame,
-        ~7 GB over a 61-frame run), so the gather is not a cost concern.
+        ~7 GB over a 61-frame run; the ten emission maps of
+        CGOLS_EMISSION_FRAMES=xy add 335 MB per frame at 2048), so the gather
+        is not a cost concern.
         """
         if sharding is None:
             return x
@@ -1916,6 +1952,21 @@ def make_snapshot_callable(
             * code_mdot_to_msun_per_yr
         )
 
+        # Edge-on emission maps, full line-of-sight sums over the interior in
+        # physical units (keys and units: emission.MAP_UNITS). Like mdot_z
+        # these are reductions over a (possibly) split axis, so the sharded
+        # run lowers them to a partial sum per device plus one all-reduce.
+        emission = {}
+        if emission_axes:
+            emission = emission_maps(
+                rho[g:hi, g:hi, g:hi],
+                P_gas[g:hi, g:hi, g:hi],
+                emission_unit_conversions,
+                xray_table,
+                dx,
+                emission_settings,
+            )
+
         jax.debug.callback(
             _save_frame,
             time,
@@ -1924,6 +1975,7 @@ def make_snapshot_callable(
             _replicated(n_xy),
             _replicated(mdot_z),
             _replicated(vr_xz),
+            {name: _replicated(emission_map) for name, emission_map in emission.items()},
             partitioned=CALLBACK_PARTITIONED,
         )
 
