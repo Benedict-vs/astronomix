@@ -28,6 +28,10 @@ from astronomix.option_classes.simulation_config import (
     FINITE_VOLUME,
     SPHERICAL,
 )
+from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CENTRAL_SPHERE,
+    CLUSTER_SPHERES,
+)
 
 # astronomix containers
 from astronomix.option_classes.simulation_config import (
@@ -147,8 +151,13 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
             needs_geometric_centers = True
             needs_r = True
 
-    # CGOLS central starburst wind: needs the distance to the box center.
-    if config.cgols_wind_config.cgols_wind:
+    # CGOLS central starburst wind: needs the distance to the box center. The
+    # cluster geometry (model C) instead measures distances to every cluster
+    # from the 1D cell-center axes, see below.
+    if (
+        config.cgols_wind_config.cgols_wind
+        and config.cgols_wind_config.injection_geometry == CENTRAL_SPHERE
+    ):
         needs_r = True
 
     # Cosmic-ray diffusive shock acceleration.
@@ -165,6 +174,17 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
     needs_cell_centers_y = False
     needs_cell_centers_z = False
     if config.frame_tracking:
+        needs_cell_centers_z = True
+
+    # CGOLS cluster feedback (model C): the distance of every cell to every
+    # cluster is assembled from the three replicated 1D axes by broadcasting,
+    # which shards like an elementwise op and needs no 3D coordinate field.
+    if (
+        config.cgols_wind_config.cgols_wind
+        and config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES
+    ):
+        needs_cell_centers_x = True
+        needs_cell_centers_y = True
         needs_cell_centers_z = True
 
     # Snapshot diagnostics.
