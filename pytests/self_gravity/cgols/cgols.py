@@ -12,7 +12,9 @@ design uses NO radiative cooling. ``CGOLS_COOLING=1`` switches on the companion
 paper's radiative B-series (arXiv:1803.01005): the same ICs and wind injection
 plus the operator-split, sub-cycled CIE cooling described in the cooling section
 at the end of this file (outputs are tagged ``_B`` so the two series never
-collide).
+collide). ``CGOLS_FEEDBACK=clusters`` replaces the central injection sphere by
+the eight re-drawn star clusters of the paper's model C (see the
+CGOLS_CLUSTER_* knobs; tagged ``_Cad`` adiabatic / ``_C`` radiative).
 
 Fidelity vs Schneider & Robertson 2018
 --------------------------------------
@@ -313,8 +315,21 @@ from astronomix.option_classes.simulation_config import (
     finalize_config,
 )
 from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_OVERLAP_SUM,
+    CLUSTER_OVERLAP_UNION,
+    CLUSTER_SPHERES,
+    CGOLSClusterParams,
     CGOLSWindConfig,
     CGOLSWindParams,
+)
+from astronomix._modules._cgols_wind.cluster_placement import (
+    MASS_EQUAL,
+    MASS_POWER_LAW,
+    ClusterPlacementSettings,
+    cholla_cluster_schedule,
+    cluster_positions,
+    cluster_table,
+    draw_cluster_schedule,
 )
 from astronomix._modules._cooling._cooling_tables import cie_parabolic_cooling
 from astronomix._modules._cooling.cooling_options import (
@@ -516,6 +531,99 @@ END_TIME = END_TIME_FRACTION * TOTAL_TIME
 # Injection radius
 INJ_RAD = 300 # pc
 
+# ---- Feedback geometry: central sphere (models A/B) or clusters (model C) ----
+# CGOLS_FEEDBACK=central (default) is the single 300 pc sphere of models A and
+# B. CGOLS_FEEDBACK=clusters is the clustered feedback of model C (Schneider,
+# Robertson & Thompson 2018, arXiv:1803.01005, Sec. 2.2.2): the SAME total
+# rates and the same total injection volume, split into 8 spheres of 150 pc
+# (8 x 150^3 = 300^3), placed at random in the central disk and all moved
+# every 15 Myr. The schedule, the rate/energy split and the injection physics
+# (uniform volumetric rates, edge-cell weighting, momentum rescaled so exactly
+# Edot enters as heat - deviation 1 above) are those of the central sphere, so
+# A and C differ in the geometry only.
+#
+# The defaults of every CGOLS_CLUSTER_* knob reproduce model C AS RUN, i.e.
+# Cholla's Grid3D::Add_Supernovae (evaneschneider/cholla 645a076), which
+# differs from the paper's wording in two numbers: "within the central 1.5 kpc"
+# is a diameter (R_s = 0.75 kpc), and "up to 100 pc" is z_s = 105 pc. Cholla
+# draws R uniformly in [0, R_s) - uniform in RADIUS, not in area, so the
+# clusters crowd towards the centre - phi uniformly, z uniformly in
+# [-z_s, z_s], re-seeding rand() with int(t_since_onset / 15 Myr) + 1, i.e.
+# new positions at 20, 35, 50 and 65 Myr. Overlapping spheres simply add.
+# The alternatives are physically motivated options on top (see
+# astronomix/_modules/_cgols_wind/cluster_placement.py).
+#
+# Resolution: a 150 pc sphere is only 1.9 cells in radius at CGOLS_DIM=128
+# (dx = 78 pc), 3.8 at 256 and 7.7 at 512 - the paper ran C at 512-2048. The
+# edge weighting keeps the injected totals exact at any resolution, but below
+# 256 the clusters are unresolved point-like sources and the |z| <= 105 pc
+# scatter is under 1.5 cells: 256 is the minimum for a meaningful model C,
+# 128 is a smoke test.
+FEEDBACK = os.environ.get("CGOLS_FEEDBACK", "central")
+if FEEDBACK not in ("central", "clusters"):
+    raise ValueError(f"CGOLS_FEEDBACK must be 'central' or 'clusters', got {FEEDBACK!r}")
+CLUSTERS = FEEDBACK == "clusters"
+# "cholla" (default): replay Cholla's own glibc rand() sequence, i.e. the
+# paper's exact realisation (if Titan's C library was glibc); falls back to
+# "random" with a warning where the C library is not glibc. "random": a
+# numpy draw from CGOLS_CLUSTER_SEED and the distributions below. Only
+# "random" honours the RADIAL/VERTICAL/REDRAW/MIN_SEP/COROTATE/MASS knobs.
+CLUSTER_PLACEMENT = os.environ.get("CGOLS_CLUSTER_PLACEMENT", "cholla")
+NUM_CLUSTERS = int(os.environ.get("CGOLS_NUM_CLUSTERS", "8"))
+# Same total volume as the central sphere by default (150 pc for 8).
+CLUSTER_RADIUS_PC = float(
+    os.environ.get("CGOLS_CLUSTER_RADIUS_PC", f"{INJ_RAD / NUM_CLUSTERS ** (1 / 3):.6g}")
+)
+# Radial placement: "uniform_radius" (Cholla: dN/dR = const inside RMAX),
+# "uniform_area" (constant surface density, the literal paper reading), or
+# "exponential" (N ~ R exp(-R / RSCALE), CGOLS V's disk-wide clusters with
+# RSCALE = 1 kpc; the Kennicutt-Schmidt Sigma_SFR ~ Sigma_gas^1.4 of this gas
+# disk would give R_gas / 1.4 = 1.14 kpc).
+CLUSTER_RADIAL = os.environ.get("CGOLS_CLUSTER_RADIAL", "uniform_radius")
+CLUSTER_RMAX_PC = float(os.environ.get("CGOLS_CLUSTER_RMAX_PC", "750"))
+CLUSTER_RSCALE_PC = float(os.environ.get("CGOLS_CLUSTER_RSCALE_PC", "1000"))
+# Vertical placement: "uniform" in |z| <= ZMAX (Cholla), "gaussian" /
+# "exponential" with scale height ZSCALE truncated at ZMAX (young clusters and
+# core-collapse SNe: z_h ~ 50 pc in the Milky Way; SILCC uses a 50 pc Gaussian
+# for SN II), or "midplane" (z = 0; CGOLS IV/V use |z| < 5-10 pc).
+CLUSTER_VERTICAL = os.environ.get("CGOLS_CLUSTER_VERTICAL", "uniform")
+CLUSTER_ZMAX_PC = float(os.environ.get("CGOLS_CLUSTER_ZMAX_PC", "105"))
+CLUSTER_ZSCALE_PC = float(os.environ.get("CGOLS_CLUSTER_ZSCALE_PC", "50"))
+# Re-draws: "simultaneous" (Cholla: all clusters every LIFETIME) or
+# "staggered" (one slot every LIFETIME / N, so the source never jumps as a
+# whole). LIFETIME 15 Myr is model C; ~40 Myr is the SN-active life of a
+# cluster (the 8 Msun progenitor lifetime, CGOLS V / TIGRESS / Joung & Mac Low).
+CLUSTER_REDRAW = os.environ.get("CGOLS_CLUSTER_REDRAW", "simultaneous")
+CLUSTER_LIFETIME_MYR = float(os.environ.get("CGOLS_CLUSTER_LIFETIME_MYR", "15"))
+# Time of the first draw: the 5 Myr feedback onset, as in Cholla.
+CLUSTER_START_MYR = float(os.environ.get("CGOLS_CLUSTER_START_MYR", "5"))
+# Overlapping spheres: "sum" (every cluster injects exactly its share, overlaps
+# add up - Cholla's behaviour) or "union" (the union is one uniform region).
+CLUSTER_OVERLAP = os.environ.get("CGOLS_CLUSTER_OVERLAP", "sum")
+# Minimum centre-to-centre distance of coexisting clusters, pc (rejection
+# sampling). 0 = independent draws, as in Cholla; 2 x radius = disjoint.
+CLUSTER_MIN_SEP_PC = float(os.environ.get("CGOLS_CLUSTER_MIN_SEP_PC", "0"))
+# 1 = the clusters orbit with the circular velocity of the static potential at
+# their radius, as the CGOLS IV/V clusters do (stars move with the gas they
+# formed from: at R = 0.5 kpc one 15 Myr lifetime is ~ 3/4 of an orbit).
+# 0 = at rest in the box frame (Cholla model C).
+CLUSTER_COROTATE = os.environ.get("CGOLS_CLUSTER_COROTATE", "0") == "1"
+# Rate shares: "equal" (model C) or "power_law" (dN/dM ~ M^-2 on 1e4 - 5e6
+# Msun, share ~ M, as in CGOLS V, arXiv:2402.12474).
+CLUSTER_MASS_FUNCTION = os.environ.get("CGOLS_CLUSTER_MASS_FUNCTION", "equal")
+CLUSTER_SEED = int(os.environ.get("CGOLS_CLUSTER_SEED", "0"))
+if CLUSTERS:
+    for _name, _value, _allowed in (
+        ("CGOLS_CLUSTER_PLACEMENT", CLUSTER_PLACEMENT, ("cholla", "random")),
+        ("CGOLS_CLUSTER_RADIAL", CLUSTER_RADIAL, ("uniform_radius", "uniform_area", "exponential")),
+        ("CGOLS_CLUSTER_VERTICAL", CLUSTER_VERTICAL, ("uniform", "gaussian", "exponential", "midplane")),
+        ("CGOLS_CLUSTER_REDRAW", CLUSTER_REDRAW, ("simultaneous", "staggered")),
+        ("CGOLS_CLUSTER_OVERLAP", CLUSTER_OVERLAP, ("sum", "union")),
+        ("CGOLS_CLUSTER_MASS_FUNCTION", CLUSTER_MASS_FUNCTION, ("equal", "power_law")),
+    ):
+        if _value not in _allowed:
+            raise ValueError(f"{_name} must be one of {_allowed}, got {_value!r}")
+
 # Number of evenly-spaced intermediate snapshots to offload to the host during the
 # run (for the animation and the wind time-series). These are cheap 2D slices /
 # 1D reductions, not full 3D states (full states would be ~5 GB each and OOM the
@@ -696,7 +804,13 @@ STEP_RETRY = os.environ.get("CGOLS_STEP_RETRY", "1") == "1"
 # state .npy) so several experiment runs can coexist without clobbering each
 # other or the production outputs. Defaults to "_B" for a radiative run, so the
 # A- and B-series never share snapshot / checkpoint / log / figure filenames.
-RUN_TAG = os.environ.get("CGOLS_RUN_TAG", "_B" if COOLING else "")
+# Clustered feedback defaults to "_C" (radiative, the paper's model C) or
+# "_Cad" (adiabatic); the series runner tags them _C<dim> / _C<dim>ad.
+if CLUSTERS:
+    _DEFAULT_RUN_TAG = "_C" if COOLING else "_Cad"
+else:
+    _DEFAULT_RUN_TAG = "_B" if COOLING else ""
+RUN_TAG = os.environ.get("CGOLS_RUN_TAG", _DEFAULT_RUN_TAG)
 FIG_RUN_DIR = RUN_TAG.lstrip("_") or "untagged"
 
 # Full-state checkpointing, via astronomix's Orbax TO_DISK mode: the run is
@@ -857,6 +971,100 @@ def _cooling_params_kwargs():
 # Schedule: no feedback for the first 5 Myr (equilibration), then the low
 # state, a 5 Myr linear ramp up, 30 Myr in the high state, a 5 Myr ramp back
 # down, and the low state for the remaining 30 Myr (75 Myr total).
+def circular_angular_velocity(R):
+    """Mid-plane circular angular velocity of the static potential, code units.
+
+    Omega = v_c / R with v_c^2 = R dPhi/dR of the Miyamoto-Nagai disk plus the
+    NFW halo at z = 0 (analytic derivatives, host-side floats). Used to let the
+    clusters co-rotate (CGOLS_CLUSTER_COROTATE=1).
+    """
+    R = max(float(R), 1e-6)
+    disk_ab = R_disk_code + z_disk_code
+    dphi_disk = G_code * M_disk_code * R / (R**2 + disk_ab**2) ** 1.5
+    f_c = math.log(1 + c) - c / (1 + c)
+    dphi_halo = G_code * M_halo_code / f_c * (
+        math.log(1 + R / R_halo_code) / R**2 - 1.0 / (R * (R_halo_code + R))
+    )
+    return math.sqrt(R * (dphi_disk + dphi_halo)) / R
+
+
+_CLUSTER_PARAMS_CACHE = {}
+
+
+def build_cgols_cluster_params():
+    """Draw the model-C clusters (CGOLS_CLUSTER_* knobs), code units.
+
+    Drawn once per process and cached. The full schedule - every occupant of
+    every slot - is printed to the run log and written next to the frames
+    (SNAPSHOTS_DIR/clusters.npz + clusters.txt), so a run's cluster positions
+    can always be recovered, whichever placement produced them.
+    """
+    if "params" in _CLUSTER_PARAMS_CACHE:
+        return _CLUSTER_PARAMS_CACHE["params"]
+
+    pc = (1 * u.pc).to(code_units.code_length).value
+    myr = (1 * u.Myr).to(code_units.code_time).value
+    settings = ClusterPlacementSettings(
+        num_clusters=NUM_CLUSTERS,
+        cluster_radius=CLUSTER_RADIUS_PC * pc,
+        start_time=CLUSTER_START_MYR * myr,
+        lifetime=CLUSTER_LIFETIME_MYR * myr,
+        end_time=TOTAL_TIME.to(u.Myr).value * myr,
+        redraw=CLUSTER_REDRAW,
+        radial_profile=CLUSTER_RADIAL,
+        radial_scale_length=CLUSTER_RSCALE_PC * pc,
+        max_radius=CLUSTER_RMAX_PC * pc,
+        vertical_profile=CLUSTER_VERTICAL,
+        vertical_scale_height=CLUSTER_ZSCALE_PC * pc,
+        max_height=CLUSTER_ZMAX_PC * pc,
+        min_separation=CLUSTER_MIN_SEP_PC * pc,
+        mass_function=(MASS_EQUAL if CLUSTER_MASS_FUNCTION == "equal" else MASS_POWER_LAW),
+        seed=CLUSTER_SEED,
+    )
+
+    clusters = None
+    placement = CLUSTER_PLACEMENT
+    if placement == "cholla":
+        clusters = cholla_cluster_schedule(settings)
+        if clusters is None:
+            rprint(
+                "WARNING: CGOLS_CLUSTER_PLACEMENT=cholla needs glibc's rand(), which "
+                "this C library does not provide - falling back to the numpy draw "
+                f"(CGOLS_CLUSTER_SEED={CLUSTER_SEED}) from the same distributions."
+            )
+            placement = "random"
+    if clusters is None:
+        clusters = draw_cluster_schedule(
+            settings,
+            angular_velocity=circular_angular_velocity if CLUSTER_COROTATE else None,
+        )
+
+    summary = (
+        f"Model-C clusters ({placement} placement): {NUM_CLUSTERS} x "
+        f"R = {CLUSTER_RADIUS_PC:.4g} pc, {CLUSTER_RADIAL} in R < {CLUSTER_RMAX_PC:.4g} pc, "
+        f"{CLUSTER_VERTICAL} in |z| <= {CLUSTER_ZMAX_PC:.4g} pc, {CLUSTER_REDRAW} re-draws "
+        f"every {CLUSTER_LIFETIME_MYR:.4g} Myr from {CLUSTER_START_MYR:.4g} Myr, "
+        f"overlap {CLUSTER_OVERLAP}"
+    )
+    table = cluster_table(clusters)
+    rprint(summary)
+    rprint("  (code units: kpc, rad, kpc/(100 km/s); birth in code time)")
+    rprint(table)
+    if RANK0:
+        out_dir = _here(SNAPSHOTS_DIR)
+        os.makedirs(out_dir, exist_ok=True)
+        np.savez(
+            os.path.join(out_dir, "clusters.npz"),
+            placement=placement,
+            **{k: np.asarray(v) for k, v in clusters._asdict().items()},
+        )
+        with open(os.path.join(out_dir, "clusters.txt"), "w") as f:
+            f.write(summary + "\n" + table + "\n")
+
+    _CLUSTER_PARAMS_CACHE["params"] = clusters
+    return clusters
+
+
 def build_cgols_wind_params():
     mdot_to_code = lambda x: (x * u.M_sun / u.yr).to(
         code_units.code_mass / code_units.code_time
@@ -876,7 +1084,12 @@ def build_cgols_wind_params():
     # either way.
     onset_myr = 5.0 if STEP_ONSET else 6.0
     knot_times_myr = jnp.array([0.0, 5.0, onset_myr, 10.0, 40.0, 45.0])
+    # Model C shares the very same schedule among its clusters; the central
+    # path is built exactly as before (no clusters field), so A/B stay
+    # bit-identical.
+    cluster_kwargs = dict(clusters=build_cgols_cluster_params()) if CLUSTERS else {}
     return CGOLSWindParams(
+        **cluster_kwargs,
         # The paper's 300 pc gain region.
         injection_radius=(INJ_RAD * u.pc).to(code_units.code_length).value,
         schedule_times=knot_times_myr * myr_to_code,
@@ -1107,7 +1320,24 @@ def build_config():
             external_potential=True,
         ),
         donate_state=True,
-        cgols_wind_config=CGOLSWindConfig(cgols_wind=True, timestep_limit=WIND_DT_LIMIT),
+        # Model C (CGOLS_FEEDBACK=clusters) adds the cluster geometry; the
+        # central A/B config is built exactly as before.
+        cgols_wind_config=CGOLSWindConfig(
+            cgols_wind=True,
+            timestep_limit=WIND_DT_LIMIT,
+            **(
+                dict(
+                    injection_geometry=CLUSTER_SPHERES,
+                    cluster_overlap=(
+                        CLUSTER_OVERLAP_SUM
+                        if CLUSTER_OVERLAP == "sum"
+                        else CLUSTER_OVERLAP_UNION
+                    ),
+                )
+                if CLUSTERS
+                else {}
+            ),
+        ),
         # Intermediate output for the animation / wind time-series. We use the
         # host-offload callback path (activate_snapshot_callback) rather than the
         # on-device snapshot store (return_snapshots + return_states): the latter
@@ -2262,6 +2492,17 @@ def _snapshot_grid(config):
     return x, y, z, extent_xz, extent_xy
 
 
+def load_run_clusters(snapshots_dir=SNAPSHOTS_DIR):
+    """The cluster schedule a run wrote next to its frames, or None (model A/B)."""
+    path = os.path.join(_here(snapshots_dir), "clusters.npz")
+    if not os.path.exists(path):
+        return None
+    data = np.load(path)
+    return CGOLSClusterParams(
+        **{name: data[name] for name in CGOLSClusterParams._fields}
+    )
+
+
 def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="wind_animation.gif", fps=12):
     """Animate the intermediate snapshots: edge-on n, edge-on T, face-on n.
 
@@ -2312,10 +2553,30 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="wind_animat
     axC.set_title(r"$n$ - face-on (x-y, z=0)")
     plt.colorbar(im_c, ax=axC, label=r"n [cm$^{-3}$]")
 
-    # Mark the central wind-injection region on the spatial panels.
-    for ax in (axA, axC):
-        ax.add_patch(plt.Circle((0, 0), r_inj, fill=False, color="cyan", lw=0.8, ls="--"))
+    # Mark the wind-injection region(s) on the spatial panels: the central
+    # sphere, or the clusters alive at each frame's time (model C; the edge-on
+    # panel shows their x-z projection, the slice itself is at y = 0).
+    cluster_patches = []
+    clusters = load_run_clusters(snapshots_dir)
 
+    def _mark_injection(time_myr):
+        if clusters is None:
+            for ax in (axA, axC):
+                ax.add_patch(plt.Circle((0, 0), r_inj, fill=False, color="cyan", lw=0.8, ls="--"))
+            return
+        for patch in cluster_patches:
+            patch.remove()
+        cluster_patches.clear()
+        t_code = (time_myr * u.Myr).to(code_units.code_time).value
+        xyz, _ = cluster_positions(clusters, t_code)
+        r_c = float(clusters.cluster_radius)
+        for x, y, z in xyz:
+            for ax, centre in ((axA, (x, z)), (axC, (x, y))):
+                cluster_patches.append(
+                    ax.add_patch(plt.Circle(centre, r_c, fill=False, color="cyan", lw=0.6, ls="--"))
+                )
+
+    _mark_injection(t[0])
     suptitle = fig.suptitle(f"CGOLS wind - t = {t[0]:6.1f} Myr")
     plt.tight_layout()
 
@@ -2323,6 +2584,8 @@ def animate_wind_snapshots(config, snapshots_dir=SNAPSHOTS_DIR, out="wind_animat
         im_a.set_data(n_xz[i].T)
         im_b.set_data(T_xz[i].T)
         im_c.set_data(n_xy[i].T)
+        if clusters is not None:
+            _mark_injection(t[i])
         suptitle.set_text(f"CGOLS wind - t = {t[i]:6.1f} Myr")
         return im_a, im_b, im_c, suptitle
 
