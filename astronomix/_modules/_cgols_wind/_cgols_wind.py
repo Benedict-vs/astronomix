@@ -37,6 +37,7 @@ from jaxtyping import Array, Float
 
 # astronomix constants
 from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_MOMENTUM_REST,
     CLUSTER_OVERLAP_SUM,
     CLUSTER_OVERLAP_UNION,
     CLUSTER_SPHERES,
@@ -298,13 +299,18 @@ def _cgols_cluster_source(
 
     drho = mdot * dt * profile
 
-    # Keep the pre-existing kinetic energy, see _cgols_wind_source.
-    momentum_source_factor = jnp.where(
-        profile > 0,
-        jnp.sqrt(1 + drho / conserved_state[registered_variables.density_index])
-        - 1.0,
-        0.0,
-    )
+    # Keep the pre-existing kinetic energy, see _cgols_wind_source; or, with
+    # CLUSTER_MOMENTUM_REST, add the mass at rest (no momentum source), as
+    # Cholla does.
+    if config.cgols_wind_config.cluster_momentum == CLUSTER_MOMENTUM_REST:
+        momentum_source_factor = jnp.zeros_like(drho)
+    else:
+        momentum_source_factor = jnp.where(
+            profile > 0,
+            jnp.sqrt(1 + drho / conserved_state[registered_variables.density_index])
+            - 1.0,
+            0.0,
+        )
 
     # Assembled by stacking rather than by one .at[].set per variable; the
     # variables without a source (e.g. the dual-energy internal energy) stay

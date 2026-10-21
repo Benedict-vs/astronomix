@@ -6,7 +6,8 @@ random padded state at several times across the schedule, checking that
 
   - the injected mass and energy are exactly Mdot dt and Edot dt (summed over
     the cells; overlapping clusters included), to float32 rounding;
-  - the kinetic energy of every cell is unchanged (momentum rescaling);
+  - the kinetic energy of every cell is unchanged (momentum rescaling), or,
+    with CGOLS_CLUSTER_MOMENTUM=rest, the momentum is unchanged;
   - no other variable receives a source;
   - the wind-onset dt limit is finite while the source is on (+inf before).
 
@@ -54,6 +55,10 @@ OPTION_SETS = {
         "CGOLS_CLUSTER_MASS_FUNCTION": "power_law",
     },
     "27 clusters": {"CGOLS_CLUSTER_PLACEMENT": "random", "CGOLS_NUM_CLUSTERS": "27"},
+    "preset paper_text": {"CGOLS_CLUSTER_PRESET": "paper_text"},
+    "preset physical": {"CGOLS_CLUSTER_PRESET": "physical"},
+    "momentum rest": {"CGOLS_CLUSTER_MOMENTUM": "rest"},
+    "physical + rest": {"CGOLS_CLUSTER_PRESET": "physical", "CGOLS_CLUSTER_MOMENTUM": "rest"},
 }
 
 
@@ -107,7 +112,11 @@ def child():
         de = np.sum(np.asarray(source[rv.energy_index], np.float64)) * dx**3
         rel_m = abs(dm / (mdot * dt) - 1) if mdot > 0 else abs(dm)
         rel_e = abs(de / (edot * dt) - 1) if edot > 0 else abs(de)
-        dke = float(jnp.max(jnp.abs(kinetic(state + source) / kinetic(state) - 1)))
+        if cgols.CLUSTER_MOMENTUM == "rest":
+            # Mass added at rest: no momentum source at all.
+            dke = float(jnp.max(jnp.abs(source[momenta])))
+        else:
+            dke = float(jnp.max(jnp.abs(kinetic(state + source) / kinetic(state) - 1)))
         other = max(
             [float(jnp.max(jnp.abs(source[i]))) for i in range(rv.num_vars) if i not in sourced]
             or [0.0]
@@ -121,7 +130,7 @@ def child():
         worst = max(worst, rel_m, rel_e, dke if dke > 1e-5 else 0.0, other, 0.0 if ok_limit else 1.0)
         print(
             f"  t = {t_myr:5.1f} Myr: |dM/(Mdot dt) - 1| = {rel_m:.1e}, "
-            f"|dE/(Edot dt) - 1| = {rel_e:.1e}, max |dKE/KE| = {dke:.1e}, "
+            f"|dE/(Edot dt) - 1| = {rel_e:.1e}, max |dKE/KE| (rest: |dm|) = {dke:.1e}, "
             f"other vars {other:.0e}, dt limit {dt_limit:.2e}"
         )
     print(f"RESULT worst {worst:.2e} {'PASS' if worst < 1e-5 else 'FAIL'}")

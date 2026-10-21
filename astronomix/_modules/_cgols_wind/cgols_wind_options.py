@@ -27,6 +27,14 @@ CLUSTER_OVERLAP_SUM = 0
 #: rate; overlapping clusters merge into a single, larger source.
 CLUSTER_OVERLAP_UNION = 1
 
+# Momentum of the mass injected by the clusters.
+#: Rescale the cell momentum by sqrt(rho_new / rho_old), keeping the kinetic
+#: energy, so exactly Edot enters as heat (the central-sphere convention).
+CLUSTER_MOMENTUM_SCALE = 0
+#: The injected mass carries no momentum (Cholla): the cell momentum is kept,
+#: the gas slows down and its lost kinetic energy is thermalised on top of Edot.
+CLUSTER_MOMENTUM_REST = 1
+
 
 class CGOLSWindConfig(NamedTuple):
     """Static configuration of the CGOLS-style starburst feedback.
@@ -56,6 +64,10 @@ class CGOLSWindConfig(NamedTuple):
     #: Overlap treatment of the cluster spheres, ``CLUSTER_OVERLAP_SUM`` or
     #: ``CLUSTER_OVERLAP_UNION``. Ignored for the central sphere.
     cluster_overlap: int = CLUSTER_OVERLAP_SUM
+
+    #: Momentum of the injected mass, ``CLUSTER_MOMENTUM_SCALE`` or
+    #: ``CLUSTER_MOMENTUM_REST``. Ignored for the central sphere.
+    cluster_momentum: int = CLUSTER_MOMENTUM_SCALE
 
 
 class CGOLSClusterParams(NamedTuple):

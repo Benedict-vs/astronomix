@@ -288,6 +288,7 @@ def _glibc_rand():
 
 def cholla_cluster_schedule(
     settings: ClusterPlacementSettings,
+    angular_velocity: Optional[Callable[[float], float]] = None,
 ) -> Optional[CGOLSClusterParams]:
     """The cluster positions of Cholla's own model-C runs, replayed exactly.
 
@@ -305,10 +306,13 @@ def cholla_cluster_schedule(
     paper's realisation, assuming Titan's C library was glibc (its generator
     is the only one this replays). Only the simultaneous, equal-share, static
     scheme exists in Cholla; ``settings`` supplies the cluster count, the
-    radius, ``max_radius`` (R_s), ``max_height`` (z_s) and the times.
+    radius, ``max_radius`` (R_s), ``max_height`` (z_s) and the times. With
+    ``angular_velocity`` the same clusters are born at Cholla's positions and
+    then orbit the z axis (a deliberate deviation from the static paper model).
 
     Args:
         settings: The placement settings (distribution fields are ignored).
+        angular_velocity: Optional ``Omega(R)``, see :func:`draw_cluster_schedule`.
 
     Returns:
         The cluster parameters, or ``None`` when the C library is not glibc
@@ -340,7 +344,11 @@ def cholla_cluster_schedule(
         radii=jnp.asarray(radii),
         azimuths=jnp.asarray(azimuths),
         heights=jnp.asarray(heights),
-        angular_velocities=jnp.zeros(births.shape),
+        angular_velocities=jnp.asarray(
+            np.vectorize(angular_velocity)(radii)
+            if angular_velocity is not None
+            else np.zeros(births.shape)
+        ),
         rate_fractions=jnp.ones(births.shape),
     )
 
