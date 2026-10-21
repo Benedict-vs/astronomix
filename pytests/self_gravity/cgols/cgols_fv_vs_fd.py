@@ -107,6 +107,13 @@ def outflow_metrics(frames):
     return metrics
 
 
+def _coarsen(field, shape):
+    """Block-average a 2D field down to ``shape`` (integer factors only)."""
+    factor_x = field.shape[0] // shape[0]
+    factor_z = field.shape[1] // shape[1]
+    return field.reshape(shape[0], factor_x, shape[1], factor_z).mean(axis=(1, 3))
+
+
 def slice_metrics(frames_fd, frames_fv, time_myr):
     """
     Median and mean absolute log10 difference of the edge-on density and
@@ -117,9 +124,12 @@ def slice_metrics(frames_fd, frames_fv, time_myr):
     index_fv = frame_at(frames_fv, time_myr)
     result = {}
     for key in ("n_xz", "T_xz"):
-        difference = np.abs(
-            np.log10(frames_fv[key][index_fv]) - np.log10(frames_fd[key][index_fd])
-        )
+        # Runs at different resolutions are compared on the coarser grid
+        # (block average of log10 over the finer cells).
+        log_fv = np.log10(frames_fv[key][index_fv])
+        log_fd = np.log10(frames_fd[key][index_fd])
+        coarse_shape = tuple(min(a, b) for a, b in zip(log_fv.shape, log_fd.shape))
+        difference = np.abs(_coarsen(log_fv, coarse_shape) - _coarsen(log_fd, coarse_shape))
         result[f"{key}_median_dlog"] = float(np.median(difference))
         result[f"{key}_mean_dlog"] = float(np.mean(difference))
     # Hot-gas mass-weighted fraction of the slice (a proxy for the cavity).
