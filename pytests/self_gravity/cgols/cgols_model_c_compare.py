@@ -108,7 +108,7 @@ def main(runs):
     t_ref = np.linspace(0, 75, 751)
     for ax in axes[:3]:
         ax.plot(t_ref, injected_mass_rate(t_ref), color="0.6", lw=1, ls=":", label="injected")
-    print(f"{'run':10s} {'H':>4s} {'peak':>7s} {'<15-40>':>8s} {'<45-75>':>8s} {'M_out(75)':>10s}")
+    print(f"{'run':10s} {'H':>4s} {'peak':>7s} {'<15-40>':>8s} {'<45-75>':>8s} {'M_out(end)':>10s}")
     for k, (label, frames) in enumerate(data.items()):
         t = frames["time_myr"]
         style = dict(color=colors[k % len(colors)], lw=1.5,

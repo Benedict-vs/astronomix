@@ -605,7 +605,8 @@ CLUSTER_OVERLAP = os.environ.get("CGOLS_CLUSTER_OVERLAP", "sum")
 CLUSTER_MIN_SEP_PC = float(os.environ.get("CGOLS_CLUSTER_MIN_SEP_PC", "0"))
 # 1 = the clusters orbit with the circular velocity of the static potential at
 # their radius, as the CGOLS IV/V clusters do (stars move with the gas they
-# formed from: at R = 0.5 kpc one 15 Myr lifetime is ~ 3/4 of an orbit).
+# formed from: one 15 Myr lifetime is ~half an orbit at R = 0.5 kpc, where
+# v_c = 99 km/s and the period is 31 Myr).
 # 0 = at rest in the box frame (Cholla model C).
 CLUSTER_COROTATE = os.environ.get("CGOLS_CLUSTER_COROTATE", "0") == "1"
 # Rate shares: "equal" (model C) or "power_law" (dN/dM ~ M^-2 on 1e4 - 5e6
