@@ -678,11 +678,13 @@ COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 # A-256 knot. Both default ON; CGOLS_PP_WENO=0 / CGOLS_DUAL_ENERGY=0 for tests.
 PP_WENO = os.environ.get("CGOLS_PP_WENO", "1") == "1"
 DUAL_ENERGY = os.environ.get("CGOLS_DUAL_ENERGY", "1") == "1"
-# WENO nonlinear weights: Jiang-Shu (default, what every run so far used) or
-# WENO-Z (Borges et al. 2008), which keeps the optimal weights at smooth extrema
-# and is less dissipative - suggested for the turbulent wind / shell. Forward
-# runs only: the Pallas adjoints use JS weights (no jvp/vjp work with it on).
-WENO_Z = os.environ.get("CGOLS_WENO_Z", "0") == "1"
+# WENO nonlinear weights: WENO-Z (Borges et al. 2008, default) keeps the optimal
+# weights at smooth extrema and is less dissipative than Jiang-Shu - it resolves
+# the KH mixing at the wind-disk interface and avoids the asymmetric halo
+# artifacts JS showed in model B (128-512 validation, Oct 2026), at +5% (A) to
+# +30% (B) wall time. CGOLS_WENO_Z=0 restores JS. Forward runs only: the Pallas
+# adjoints use JS weights, so cgols_sensitivity.py forces it off.
+WENO_Z = os.environ.get("CGOLS_WENO_Z", "1") == "1"
 # Step retry (upstream PositivityConfig.step_retry): a step that leaves a
 # non-finite value or a non-positive density / pressure is redone from the same
 # state at half the step size (up to 6 times). A safety net behind the wind

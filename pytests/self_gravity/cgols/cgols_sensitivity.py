@@ -148,6 +148,9 @@ def build_pipeline():
         # driver (host-side segmented loop) - not traceable under jvp, so force
         # the in-memory path here.
         snapshot_storage_mode=ON_DEVICE,
+        # WENO-Z is the cgols default but has no jvp/vjp path (the Pallas
+        # adjoints use Jiang-Shu weights).
+        weno_z=False,
     )
 
     # Override only the end time; keep the loaded potential, floors and the paper
