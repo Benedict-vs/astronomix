@@ -14,6 +14,11 @@ plus the operator-split, sub-cycled CIE cooling described in the cooling section
 at the end of this file (outputs are tagged ``_B`` so the two series never
 collide).
 
+``CGOLS_MHD=1`` is an experimental ideal-MHD variant beyond the paper: an
+observationally (M82) motivated toroidal disk field at constant plasma beta,
+evolved with constrained transport (knobs and references at the MHD switch and
+in _magnetic_field_ics; analysis in cgols_mhd_compare.py / cgols_mhd_static.py).
+
 Fidelity vs Schneider & Robertson 2018
 --------------------------------------
 Everything the paper specifies about the *problem* is matched: the static
@@ -289,6 +294,7 @@ from astronomix import (
     construct_primitive_state,
     get_registered_variables,
     restart_from_latest_checkpoint,
+    setup_magnetic_fields_from_vector_potential,
     time_integration,
 )
 from astronomix.option_classes.simulation_config import (
@@ -328,6 +334,7 @@ from astronomix._modules._cooling.cooling_options import (
     CoolingParams,
 )
 from astronomix.parallel import barrier
+from astronomix._spatial_operators._differencing import _interface_field_divergence
 from astronomix.analysis_helpers.emission import (
     EmissionMapSettings,
     emission_conversions,
@@ -583,6 +590,10 @@ STEP_ONSET = os.environ.get("CGOLS_STEP_ONSET", "1") == "1"
 # steps (>=4.6x slack afterwards at 256). CGOLS_WIND_DT_LIMIT=0 to disable.
 WIND_DT_LIMIT = os.environ.get("CGOLS_WIND_DT_LIMIT", "1") == "1"
 
+# Central starburst wind on/off. CGOLS_WIND=0 turns the run into a static
+# equilibrium check of the initial conditions (e.g. of the magnetised disk).
+WIND = os.environ.get("CGOLS_WIND", "1") == "1"
+
 # Outer boundary condition: "diode" (outflow-only, the paper's choice and the
 # default) or "open" (plain zero-gradient copy, which lets the static potential
 # pull ghost-reservoir gas back into the box - slow artificial accretion off
@@ -697,6 +708,36 @@ WENO_Z = os.environ.get("CGOLS_WENO_Z", "1") == "1"
 # onset time-step limit; costs one admissibility reduction per step. Adaptive
 # stepping only, so it stays off in bench mode (fixed steps).
 STEP_RETRY = os.environ.get("CGOLS_STEP_RETRY", "1") == "1"
+
+# Ideal MHD (CGOLS_MHD=1; default off, so a bare run stays the hydro A/B series
+# of the paper, bit for bit). Switches the finite-difference solver to HOW-MHD:
+# the same WENO5 + LSRK4 with PP-WENO and dual energy, plus face-centred
+# magnetic fields evolved by constrained transport (div B = 0 to round-off in
+# the interior). The initial field is set up in _magnetic_field_ics() from a
+# vector potential, motivated by the M82 observations (see the notes there):
+#   CGOLS_B_GEOMETRY  toroidal (default) - an azimuthal disk field at constant
+#                       plasma beta, confined to the disk gas; the hot halo
+#                       starts unmagnetised.
+#                     vertical - a uniform B_z through the whole box only.
+#                     mixed    - both.
+#   CGOLS_B_BETA      midplane beta = P_gas / P_B of the toroidal component
+#                       (default 1: ~0.1 mG in the starburst core of the
+#                       smoothed IC, the radio equipartition value).
+#   CGOLS_B0_UG       the uniform vertical field in microgauss (vertical /
+#                       mixed only; default 1).
+#   CGOLS_CT_UPWIND   upwind dissipation of the CT edge EMFs (default 1; see
+#                       SimulationConfig.ct_upwind_dissipation). A field
+#                       oblique to the grid - the toroidal field always is -
+#                       otherwise lets grid-scale modes grow.
+MHD = os.environ.get("CGOLS_MHD", "0") == "1"
+B_GEOMETRY = os.environ.get("CGOLS_B_GEOMETRY", "toroidal")
+if B_GEOMETRY not in ("toroidal", "vertical", "mixed"):
+    raise SystemExit(
+        f"CGOLS_B_GEOMETRY must be 'toroidal', 'vertical' or 'mixed', got {B_GEOMETRY!r}"
+    )
+B_BETA = float(os.environ.get("CGOLS_B_BETA", "1"))
+B0_UG = float(os.environ.get("CGOLS_B0_UG", "1"))
+CT_UPWIND = os.environ.get("CGOLS_CT_UPWIND", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
@@ -1017,6 +1058,160 @@ def _gaussian_smooth_3d(field, sigma):
 
 
 # ---------------------------------------------------------------------------
+# Initial magnetic field (CGOLS_MHD=1)
+# ---------------------------------------------------------------------------
+# Observational motivation (M82; full notes in the cgols-mhd branch history):
+#   * Geometry. SOFIA/HAWC+ 53 um polarimetry shows the field perpendicular to
+#     the disk along the ~700 pc wide outflow, while at 154 um and in the radio
+#     the field away from the nucleus is planar / spiral in the disk (Jones et
+#     al. 2019, ApJL 870, L9; Adebahr et al. 2017, A&A 608, A29). Lopez-
+#     Rodriguez et al. (2021, ApJ 914, 24) conclude the wind field is "frozen
+#     into the ionized outflowing medium": the vertical field is carried by the
+#     wind, not primordial. So the IC field is purely TOROIDAL in the disk and
+#     the vertical wind field has to emerge - which is the test.
+#   * Strength. Radio equipartition gives 98 uG in the core and ~17-25 uG in
+#     the halo (Adebahr et al. 2013, A&A 555, A23; 2017); the DCF 0.3-1 mG of
+#     Lopez-Rodriguez+21 belongs to a nucleus ~30x denser than the CGOLS disk
+#     (Sigma_0 = 155 Msun/pc^2, for which Thompson et al. 2006's hydrostatic
+#     equipartition gives ~75 uG). A constant midplane beta = 1 puts ~0.1 mG
+#     in the smoothed IC core, the equipartition value, at the beta ~ 0.5-1
+#     Lopez-Rodriguez+21 measure. The halo field is wind-carried, so the hot
+#     halo starts unmagnetised (an optional uniform B_z, CGOLS_B0_UG, threads
+#     it with open field lines instead).
+#   * Simulations use the same menu: an azimuthal field at constant beta
+#     (TIGRESS, Kim & Ostriker 2017: beta = 10; SILCC, Walch et al. 2015:
+#     B ~ sqrt(rho)) or a uniform vertical field (Meliani et al. 2024, M82).
+
+#: Lower bound on the gas pressure that the toroidal field leaves, as a fraction
+#: of the HSE total pressure. Binds only for beta << 1 or in interpolation noise.
+MIN_GAS_PRESSURE_FRACTION = 0.05
+
+#: Inner taper radius of the toroidal field (kpc). A finite B_phi on the axis is
+#: a line current with a 1/R hoop stress; B_phi ~ R inside this radius instead.
+#: Small, so the starburst core keeps its field (one cell at CGOLS_DIM=128).
+B_AXIS_TAPER_KPC = 0.1
+
+#: The toroidal field is switched off smoothly between these radii (kpc), so the
+#: vector potential is exactly flat near the box faces (the discrete curl of
+#: the helper wraps around the box) and nothing threads the x/y boundaries.
+B_OUTER_TAPER_KPC = (3.5, 4.5)
+
+
+def _code_field_to_microgauss():
+    """Factor from the code magnetic field (P_B = B^2 / 2) to microgauss.
+
+    The solver uses Heaviside-Lorentz units, B_code = B_G / sqrt(4 pi P_code),
+    with P_code the code pressure in cgs, so that B_code^2 / 2 = B_G^2 / 8 pi.
+    """
+    code_pressure_cgs = (1 * code_units.code_pressure).to(u.erg / u.cm**3).value
+    return math.sqrt(4.0 * math.pi * code_pressure_cgs) * 1e6
+
+
+def _magnetic_field_ics(config, x1, y1, P_total, disk_fraction):
+    """The initial cell- and face-centred magnetic field (CGOLS_MHD=1).
+
+    Toroidal part (geometry toroidal / mixed): an axisymmetric azimuthal field
+    with midplane plasma beta CGOLS_B_BETA in the disk gas,
+        B_phi^2 / 2 = f_disk P_tot / (1 + beta),
+    where P_tot is the HSE pressure of the hydro IC and f_disk the disk mass
+    fraction, so beta = P_gas / P_B wherever the gas is all disk once the
+    caller takes P_B out of the gas pressure, and the halo stays field-free.
+    It is tapered on the axis and beyond 3.5 kpc (see the constants above).
+    A purely toroidal field exerts no vertical force, so with the total
+    pressure unchanged the vertical HSE of the hydro IC holds exactly.
+
+    The field comes from the vector potential A = A_z(R, z) z_hat, with
+    A_z = -int_0^R B_phi dR', through the solver's own staggered sixth-order
+    curl (setup_magnetic_fields_from_vector_potential), so div B vanishes to
+    round-off under the discrete divergence that constrained transport
+    preserves. The radial profile is read off the y = 0 row of the IC (the IC
+    is axisymmetric by construction) and integrated with the trapezoid rule.
+
+    Vertical part (geometry vertical / mixed): a uniform B_z of CGOLS_B0_UG,
+    added to the faces directly (a uniform field has no periodic potential).
+
+    Args:
+        config: The simulation configuration.
+        x1: The 1D x cell-centre axis (box centred, code units).
+        y1: The 1D y cell-centre axis (box centred, code units).
+        P_total: The HSE total pressure of the smoothed hydro IC.
+        disk_fraction: The disk mass fraction of the smoothed gas density.
+
+    Returns:
+        (B_x, B_y, B_z, bx_face, by_face, bz_face) in code units.
+    """
+    num_x, num_y, num_z = config.num_cells.x, config.num_cells.y, config.num_cells.z
+    mid_x, mid_y = num_x // 2, num_y // 2
+    half_box_x, half_box_y = config.box_size.x / 2, config.box_size.y / 2
+
+    if B_GEOMETRY in ("toroidal", "mixed"):
+        # ---- Radial B_phi(R, z) profile from the y = 0 row ----
+        radius_row = jnp.sqrt(x1[mid_x:] ** 2 + y1[mid_y] ** 2)
+        inner_r, outer_r = B_OUTER_TAPER_KPC
+        taper = (1.0 - jnp.exp(-((radius_row / B_AXIS_TAPER_KPC) ** 2))) * jnp.where(
+            radius_row < inner_r,
+            1.0,
+            jnp.where(
+                radius_row > outer_r,
+                0.0,
+                jnp.cos(0.5 * jnp.pi * (radius_row - inner_r) / (outer_r - inner_r)) ** 2,
+            ),
+        )
+        field_row = taper[:, None] * jnp.sqrt(
+            2.0
+            * disk_fraction[mid_x:, mid_y, :]
+            * P_total[mid_x:, mid_y, :]
+            / (1.0 + B_BETA)
+        )  # (num_x / 2, num_z)
+
+        # ---- A_z(R, z) = -int_0^R B_phi dR', starting at the axis ----
+        radius_table = jnp.concatenate([jnp.zeros(1), radius_row])
+        field_table = jnp.concatenate([jnp.zeros((1, num_z)), field_row], axis=0)
+        potential_table = -jnp.concatenate(
+            [
+                jnp.zeros((1, num_z)),
+                jnp.cumsum(
+                    0.5
+                    * (field_table[1:] + field_table[:-1])
+                    * jnp.diff(radius_table)[:, None],
+                    axis=0,
+                ),
+            ],
+            axis=0,
+        )  # (num_x / 2 + 1, num_z)
+
+        def vector_potential(X, Y, Z):
+            """A = (0, 0, A_z) on the staggered edge grid of the helper.
+
+            The helper's coordinates run over [0, L]; A_z only needs the
+            cylindrical radius, and its z argument always sits on the cell
+            centres, so each z level is a 1D interpolation of its table column.
+            """
+            radius = jnp.sqrt((X[:, :, 0] - half_box_x) ** 2 + (Y[:, :, 0] - half_box_y) ** 2)
+            potential_z = jax.vmap(
+                lambda column: jnp.interp(radius, radius_table, column),
+                in_axes=1,
+                out_axes=2,
+            )(potential_table)
+            zero = jnp.zeros_like(potential_z)
+            return zero, zero, potential_z
+
+        B_x, B_y, B_z, bx_face, by_face, bz_face = (
+            setup_magnetic_fields_from_vector_potential(config, vector_potential)
+        )
+    else:
+        zero = jnp.zeros((num_x, num_y, num_z))
+        B_x = B_y = B_z = bx_face = by_face = bz_face = zero
+
+    if B_GEOMETRY in ("vertical", "mixed"):
+        uniform_field = B0_UG / _code_field_to_microgauss()
+        B_z = B_z + uniform_field
+        bz_face = bz_face + uniform_field
+
+    return B_x, B_y, B_z, bx_face, by_face, bz_face
+
+
+# ---------------------------------------------------------------------------
 # Initial-condition build
 # ---------------------------------------------------------------------------
 def build_config():
@@ -1055,6 +1250,13 @@ def build_config():
         )
     else:
         rprint("Radiative cooling OFF (adiabatic A-series); set CGOLS_COOLING=1 for the B-series")
+    if MHD:
+        rprint(
+            f"MHD ON: geometry {B_GEOMETRY}, midplane beta {B_BETA:g}, "
+            f"uniform B_z {(f'{B0_UG:g} uG' if B_GEOMETRY != 'toroidal' else 'none')}, CT upwind dissipation "
+            f"{'on' if CT_UPWIND else 'off'}; 1 code field unit = "
+            f"{_code_field_to_microgauss():.4g} uG (diag-line max|B| is in code units)"
+        )
 
     config = SimulationConfig(
         memory_analysis=True,
@@ -1096,6 +1298,9 @@ def build_config():
         weno_positivity_preserving=PP_WENO,
         dual_energy=DUAL_ENERGY,
         weno_z=WENO_Z,
+        # Ideal MHD (CGOLS_MHD=1). Conditional kwargs, so the hydro config
+        # stays byte-identical (a static argument: any change recompiles).
+        **(dict(mhd=True, ct_upwind_dissipation=CT_UPWIND) if MHD else {}),
         positivity_config=PositivityConfig(
             step_retry=STEP_RETRY and not BENCH_STEPS,
         ),
@@ -1130,7 +1335,7 @@ def build_config():
             external_potential=True,
         ),
         donate_state=True,
-        cgols_wind_config=CGOLSWindConfig(cgols_wind=True, timestep_limit=WIND_DT_LIMIT),
+        cgols_wind_config=CGOLSWindConfig(cgols_wind=WIND, timestep_limit=WIND_DT_LIMIT),
         # Intermediate output for the animation / wind time-series. We use the
         # host-offload callback path (activate_snapshot_callback) rather than the
         # on-device snapshot store (return_snapshots + return_states): the latter
@@ -1421,9 +1626,17 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         P_top_2d = K_const * rho_halo[:, :, -1:] ** gamma
         P_bottom_2d = K_const * rho_halo[:, :, :1] ** gamma
         rho_total = rho_disk + rho_halo
+        # MHD: the disk mass fraction of the smoothed gas confines the toroidal
+        # field to the disk (smoothing is linear, so smoothing the disk part
+        # alone gives the disk share of the smoothed total).
+        disk_fraction = (
+            _gaussian_smooth_3d(rho_disk, SMOOTHING_SIGMA_CELLS) if MHD else None
+        )
         del rho_disk, rho_halo
 
         rho_total = _gaussian_smooth_3d(rho_total, SMOOTHING_SIGMA_CELLS)
+        if MHD:
+            disk_fraction = jnp.clip(disk_fraction / rho_total, 0.0, 1.0)
         P_total = vertical_hse_pressure(
             rho_total, Phi_total, dz, P_top_2d, P_bottom_2d
         )
@@ -1442,9 +1655,29 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
 
         a_phi = dPhi_dR + dP_dR / rho_total
         del dPhi_dR, dP_dR
+        if MHD:
+            # The total (gas + magnetic) pressure keeps the HSE profile built
+            # above; the field takes its share out of the gas pressure. The
+            # toroidal field's hoop stress B_phi^2 / R pulls inward, which the
+            # rotation has to balance on top of gravity and the pressure
+            # gradient: v_phi^2 = R a_phi + B_phi^2 / rho.
+            magnetic_fields = _magnetic_field_ics(
+                config, x1, y1, P_total, disk_fraction
+            )
+            del disk_fraction
+            toroidal_field_squared = magnetic_fields[0] ** 2 + magnetic_fields[1] ** 2
+            P_total = jnp.maximum(
+                P_total - 0.5 * toroidal_field_squared, MIN_GAS_PRESSURE_FRACTION * P_total
+            )
+            a_phi = a_phi + toroidal_field_squared / (rho_total * R_cyl)
+            del toroidal_field_squared
         v_phi = jnp.sqrt(jnp.maximum(a_phi * R_cyl, 0.0))
         del a_phi
     else:
+        if MHD:
+            raise SystemExit(
+                "CGOLS_MHD=1 needs the smoothed IC path (CGOLS_SMOOTHING_SIGMA > 0)."
+            )
         rho_total = rho_disk + rho_halo
         # Build P_total without ever holding both 3D pressure components.
         P_total = rho_disk * c_s_d**2 + K_const * rho_halo**gamma
@@ -1519,6 +1752,33 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         "T_midplane": P_mid / rho_mid * T_factor,
         "T_zaxis": P_zax / rho_zax * T_factor,
     }
+    magnetic_kwargs = {}
+    if MHD:
+        B_x, B_y, B_z, bx_face, by_face, bz_face = magnetic_fields
+        del magnetic_fields
+        magnetic_pressure = 0.5 * (B_x**2 + B_y**2 + B_z**2)
+        field_to_microgauss = _code_field_to_microgauss()
+        diagnostics["B_midplane_uG"] = (
+            jnp.sqrt(2.0 * magnetic_pressure[mid_x:, mid_y, mid_z]) * field_to_microgauss
+        )
+        diagnostics["B_zaxis_uG"] = (
+            jnp.sqrt(2.0 * magnetic_pressure[mid_x, mid_y, mid_z:]) * field_to_microgauss
+        )
+        diagnostics["beta_midplane"] = P_mid / jnp.maximum(
+            magnetic_pressure[mid_x:, mid_y, mid_z], 1e-30
+        )
+        diagnostics["B_max_uG"] = jnp.sqrt(2.0 * magnetic_pressure.max()) * field_to_microgauss
+        diagnostics["magnetic_energy"] = magnetic_pressure.sum() * dx * dy * dz
+        del magnetic_pressure
+        magnetic_kwargs = dict(
+            magnetic_field_x=B_x,
+            magnetic_field_y=B_y,
+            magnetic_field_z=B_z,
+            interface_magnetic_field_x=bx_face,
+            interface_magnetic_field_y=by_face,
+            interface_magnetic_field_z=bz_face,
+        )
+        del B_x, B_y, B_z, bx_face, by_face, bz_face
     diagnostics = {k: _replicate(v, sharding) for k, v in diagnostics.items()}
     del rho_mid, rho_zax, P_mid, P_zax
 
@@ -1531,7 +1791,9 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         velocity_z=uz,
         gas_pressure=P_total,
         sharding=sharding,
+        **magnetic_kwargs,
     )
+    del magnetic_kwargs
     del rho_total, ux, uy, uz, P_total
 
     return initial_state, diagnostics
@@ -1585,6 +1847,29 @@ def _plot_ic_diagnostics(config, diagnostics):
         rprint(
             f"Initial {name + ' max:':<15} {float(diagnostics[name + '_max']):.3e}"
         )
+
+    if MHD:
+        B_mid = np.asarray(diagnostics["B_midplane_uG"])
+        beta_mid = np.asarray(diagnostics["beta_midplane"])
+        pc_x = np.asarray(x1[mid_x:]) * pc_per_code
+        rprint(
+            f"MHD IC ({B_GEOMETRY}, beta={B_BETA:g}"
+            + (f", B0_z={B0_UG:g} uG" if B_GEOMETRY != "toroidal" else "")
+            + "): "
+            f"max|B| = {float(diagnostics['B_max_uG']):.1f} uG, "
+            f"E_mag = {float(diagnostics['magnetic_energy']):.4e} code"
+        )
+        for R_pc in (100, 300, 1000, 2000, 3000, 4000):
+            i = int(np.argmin(np.abs(pc_x - R_pc)))
+            rprint(
+                f"  midplane R = {pc_x[i]:6.0f} pc: |B| = {B_mid[i]:7.2f} uG, "
+                f"beta = {beta_mid[i]:.3g}"
+            )
+        B_z_axis = np.asarray(diagnostics["B_zaxis_uG"])
+        z_pc = np.asarray(z1[mid_z:]) * pc_per_code
+        for z_target in (0, 200, 500, 1000, 3000):
+            k = int(np.argmin(np.abs(z_pc - z_target)))
+            rprint(f"  z-axis z = {z_pc[k]:6.0f} pc: |B| = {B_z_axis[k]:7.2f} uG")
 
     # ---- Diagnostic plot: rotation curve (midplane), from 1D potential slices ----
     x_full = x1
@@ -1852,7 +2137,7 @@ def make_snapshot_callable(
         emission_unit_conversions = emission_conversions(code_units, mu)
         xray_table = load_xray_emissivity_table()
 
-    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz, emission):
+    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz, emission, magnetic):
         # jax.debug.callback fires on every process with the same (explicitly
         # all-gathered, see _replicated below) global planes; one writer only,
         # or 32 ranks race on frame_NNNN.npz.
@@ -1873,6 +2158,10 @@ def make_snapshot_callable(
             **{
                 f"emission_{name}": np.asarray(emission_map, dtype=np.float32)
                 for name, emission_map in emission.items()
+            },
+            **{
+                name: np.asarray(value, dtype=np.float32)
+                for name, value in magnetic.items()
             },
         )
 
@@ -1915,6 +2204,56 @@ def make_snapshot_callable(
         return jax.lax.with_sharding_constraint(
             x, jax.NamedSharding(sharding.mesh, P())
         )
+
+    field_to_microgauss = _code_field_to_microgauss()
+
+    def _magnetic_frame_products(state, registered_variables, P_xz, my, g, hi):
+        """The MHD frame entries (see the note in ``snapshot_callable``)."""
+        magnetic_index = registered_variables.magnetic_index
+        face_index = registered_variables.interface_magnetic_field_index
+        B_x = state[magnetic_index.x]
+        B_y = state[magnetic_index.y]
+        B_z = state[magnetic_index.z]
+        B_x_xz = B_x[g:hi, my, g:hi]
+        B_y_xz = B_y[g:hi, my, g:hi]
+        B_z_xz = B_z[g:hi, my, g:hi]
+        magnetic_pressure_xz = 0.5 * (B_x_xz**2 + B_y_xz**2 + B_z_xz**2)
+
+        magnetic_energy_density = 0.5 * (
+            B_x[g:hi, g:hi, g:hi] ** 2
+            + B_y[g:hi, g:hi, g:hi] ** 2
+            + B_z[g:hi, g:hi, g:hi] ** 2
+        )
+        max_field = jnp.sqrt(2.0 * jnp.max(magnetic_energy_density))
+
+        # Divergence of the face field on the padded grid, then masked: the
+        # sixth-order stencil wraps around the padded box, so only cells at
+        # least three cells inside the ghost layer are meaningful at all.
+        divergence = jnp.abs(
+            _interface_field_divergence(
+                state[face_index.x], state[face_index.y], state[face_index.z], dx
+            )
+        )
+        physical = jnp.ones(divergence.shape, dtype=bool)
+        deep_interior = jnp.ones(divergence.shape, dtype=bool)
+        for axis, size in enumerate(divergence.shape):
+            index = jax.lax.broadcasted_iota(jnp.int32, divergence.shape, axis)
+            physical &= (index >= g) & (index < size - g)
+            deep_interior &= (index >= g + 3) & (index < size - g - 3)
+        normalisation = dx / jnp.maximum(max_field, 1e-30)
+
+        return {
+            "B_xz_uG": jnp.sqrt(2.0 * magnetic_pressure_xz) * field_to_microgauss,
+            "beta_xz": P_xz / jnp.maximum(magnetic_pressure_xz, 1e-30),
+            "Bx_xz_uG": B_x_xz * field_to_microgauss,
+            "By_xz_uG": B_y_xz * field_to_microgauss,
+            "Bz_xz_uG": B_z_xz * field_to_microgauss,
+            "magnetic_energy": jnp.sum(magnetic_energy_density) * dx**3,
+            "max_B_uG": max_field * field_to_microgauss,
+            "divB_rel_interior": jnp.max(jnp.where(deep_interior, divergence, 0.0))
+            * normalisation,
+            "divB_rel_all": jnp.max(jnp.where(physical, divergence, 0.0)) * normalisation,
+        }
 
     def snapshot_callable(time, state, registered_variables):
         rho = state[registered_variables.density_index]
@@ -1968,6 +2307,20 @@ def make_snapshot_callable(
                 emission_settings,
             )
 
+        # MHD frame products (CGOLS_MHD=1; none otherwise, so the hydro frames
+        # are unchanged): edge-on |B| (uG), plasma beta and the three field
+        # components (for the field-geometry streamlines), the total magnetic
+        # energy, and max |div B| dx / max |B| of the face field over the deep
+        # interior and over every physical cell. The divergence is the sixth-
+        # order one that constrained transport preserves; the boundary layer
+        # is reported separately because the open ghost fill of the face
+        # fields is not CT-consistent there.
+        magnetic = {}
+        if MHD:
+            magnetic = _magnetic_frame_products(
+                state, registered_variables, P_xz, my, g, hi
+            )
+
         jax.debug.callback(
             _save_frame,
             time,
@@ -1977,6 +2330,7 @@ def make_snapshot_callable(
             _replicated(mdot_z),
             _replicated(vr_xz),
             {name: _replicated(emission_map) for name, emission_map in emission.items()},
+            {name: _replicated(value) for name, value in magnetic.items()},
             partitioned=CALLBACK_PARTITIONED,
         )
 
@@ -2007,6 +2361,13 @@ def load_snapshots(out_dir=SNAPSHOTS_DIR):
     # velocity carry vr_xz; older frame sets simply do not have the key.
     if all("vr_xz" in fr.files for fr in frames):
         out["vr_xz"] = np.stack([fr["vr_xz"] for fr in frames])
+    # MHD runs (CGOLS_MHD=1) also store the magnetic slices and scalars.
+    for key in (
+        "B_xz_uG", "beta_xz", "Bx_xz_uG", "By_xz_uG", "Bz_xz_uG",
+        "magnetic_energy", "max_B_uG", "divB_rel_interior", "divB_rel_all",
+    ):
+        if all(key in fr.files for fr in frames):
+            out[key] = np.stack([fr[key] for fr in frames])
     return out
 
 
