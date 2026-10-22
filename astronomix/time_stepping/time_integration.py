@@ -95,6 +95,7 @@ from astronomix.data_classes.simulation_helper_data import (
     get_helper_data,
 )
 from astronomix._geometry.boundaries import _boundary_handler
+from astronomix._spatial_operators._differencing import _interface_field_divergence
 from astronomix._pallas_helpers import pallas_mesh_context
 
 # progress bar
@@ -1275,6 +1276,46 @@ def _integrate_core(
                 * config.grid_spacing ** config.dimensionality
             )
 
+        # Finite-difference MHD: the field strength, the lowest plasma beta and
+        # the constrained-transport divergence error, max |div B| dx / max |B|
+        # over the cells at least three cells inside the ghost layer (the
+        # sixth-order stencil wraps around the padded box, and the open ghost
+        # fill of the face fields is not CT-consistent). Hydro runs pass none
+        # of these and keep their line unchanged.
+        magnetic_diagnostics = {}
+        if config.mhd and config.solver_mode == FINITE_DIFFERENCE:
+            magnetic_index = registered_variables.magnetic_index
+            face_index = registered_variables.interface_magnetic_field_index
+            magnetic_pressure = 0.5 * (
+                prim[magnetic_index.x] ** 2
+                + prim[magnetic_index.y] ** 2
+                + prim[magnetic_index.z] ** 2
+            )
+            max_field = jnp.sqrt(2.0 * jnp.max(magnetic_pressure))
+            divergence = jnp.abs(
+                _interface_field_divergence(
+                    prim[face_index.x],
+                    prim[face_index.y],
+                    prim[face_index.z],
+                    config.grid_spacing,
+                )
+            )
+            g = config.num_ghost_cells if config.boundary_handling == GHOST_CELLS else 0
+            deep_interior = jnp.ones(divergence.shape, dtype=bool)
+            for ax, n in enumerate(divergence.shape):
+                idx = jax.lax.broadcasted_iota(jnp.int32, divergence.shape, ax)
+                deep_interior = deep_interior & (idx >= g + 3) & (idx < n - g - 3)
+            magnetic_diagnostics = dict(
+                max_magnetic_field=max_field,
+                min_plasma_beta=jnp.min(
+                    prim[registered_variables.pressure_index]
+                    / jnp.maximum(magnetic_pressure, 1e-30)
+                ),
+                relative_divergence=jnp.max(jnp.where(deep_interior, divergence, 0.0))
+                * config.grid_spacing
+                / jnp.maximum(max_field, 1e-30),
+            )
+
         # When the progress bar is also on, fold the completion fraction into the
         # diagnostics line (matching the bar's t / t_end measure) so the
         # percentage replaces the bar rather than fighting it for the in-place
@@ -1286,6 +1327,7 @@ def _integrate_core(
                 max_speed, max_temperature, has_nan,
                 max_density, max_density_index, fraction,
                 total_mass=total_mass,
+                **magnetic_diagnostics,
             )
         else:
             jax.debug.callback(
@@ -1293,6 +1335,7 @@ def _integrate_core(
                 max_speed, max_temperature, has_nan,
                 max_density, max_density_index,
                 total_mass=total_mass,
+                **magnetic_diagnostics,
             )
 
     t_final, loop_state, snapshot_store, num_iterations = integrate(
