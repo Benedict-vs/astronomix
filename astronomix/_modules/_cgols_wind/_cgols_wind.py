@@ -16,6 +16,13 @@ expressed. The schedule is evaluated at the start-of-step time; its
 Myr-scale features are vastly longer than a hydro timestep, so the
 first-order time sampling inside the RK stages is irrelevant.
 
+With ``CGOLSWindConfig.injection_geometry = CLUSTER_SPHERES`` the same
+total rates are instead shared among a set of star-cluster spheres (model C
+of the suite, Schneider, Robertson & Thompson 2018, arXiv:1803.01005: eight
+R = 150 pc clusters re-drawn every 15 Myr), see
+:func:`_cluster_injection_profile`. The central-sphere path is unchanged by
+that option.
+
 Structured after ``_stellar_wind.stellar_wind._wind_ei3D_source``:
 operates on the conserved state and returns a dt-scaled source term for
 the finite-difference RK integrators.
@@ -28,6 +35,16 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float
 
+# astronomix constants
+from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_MOMENTUM_CLUSTER,
+    CLUSTER_MOMENTUM_REST,
+    CLUSTER_OVERLAP_SUM,
+    CLUSTER_OVERLAP_UNION,
+    CLUSTER_SPHERES,
+)
+
+# astronomix containers
 from astronomix._modules._cgols_wind.cgols_wind_options import CGOLSWindParams
 from astronomix.data_classes.simulation_helper_data import HelperData
 from astronomix.option_classes.simulation_config import STATE_TYPE, SimulationConfig
@@ -59,6 +76,17 @@ def _cgols_wind_source(
     Returns:
         The source term to add to the conserved state.
     """
+
+    if config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES:
+        return _cgols_cluster_source(
+            cgols_wind_params,
+            conserved_state,
+            dt,
+            current_time,
+            config,
+            helper_data,
+            registered_variables,
+        )
 
     source_term = jnp.zeros_like(conserved_state)
 
@@ -117,6 +145,301 @@ def _cgols_wind_source(
     return source_term
 
 
+def _cluster_injection_profile(
+    cgols_wind_params: CGOLSWindParams,
+    current_time: Union[float, Float[Array, ""]],
+    config: SimulationConfig,
+    helper_data: HelperData,
+    with_velocity: bool = False,
+):
+    """Spatial profile of the cluster feedback, normalised to unit integral.
+
+    Returns ``S`` with ``sum(S) * dx^3 = 1`` whenever a cluster is alive, so a
+    total rate ``Mdot`` enters as the volumetric rate ``Mdot * S``.
+
+    Each cluster contributes the edge-weighted sphere of the central path,
+    ``w_k = clip((R_c + dx / 2 - |x - x_k|) / dx, 0, 1)``, centred on its
+    current position. With ``CLUSTER_OVERLAP_SUM`` every cluster is
+    normalised on its own, ``S = sum_k f_k w_k / (sum(w_k) dx^3)`` with the
+    living clusters' rate fractions ``f_k`` summing to one, so each cluster
+    injects exactly its share wherever it sits and overlapping spheres add
+    up. With ``CLUSTER_OVERLAP_UNION`` the union ``w = max_k w_k`` is one
+    uniform region, ``S = w / (sum(w) dx^3)``, and the rate fractions only
+    decide which slots are alive.
+
+    The distances are built from the replicated 1D cell-center axes by
+    broadcasting, so the profile is elementwise in the grid plus one global
+    reduction per cluster: it shards without any gather or scatter.
+
+    With ``with_velocity`` the profile comes with the velocity moments of the
+    clusters that feed each cell: ``(S, S v_x, S v_y, S |v|^2 / 2)`` with
+    ``S v = sum_k S_k v_k`` (``CLUSTER_OVERLAP_SUM``, every cluster's ejecta
+    carry its own velocity) or ``S v_w`` with the ``w_k``-weighted mean
+    velocity ``v_w`` of the overlapping spheres (``CLUSTER_OVERLAP_UNION``).
+    A cluster at cylindrical radius ``R`` and azimuth ``phi`` moves with
+    ``v = Omega R (-sin phi, cos phi, 0)``.
+
+    Args:
+        cgols_wind_params: The CGOLS wind parameters (uses ``clusters``).
+        current_time: The current simulation time; selects the living cluster
+            of every slot and its orbital phase.
+        config: The simulation configuration.
+        helper_data: The helper data (uses ``cell_centers_x/y/z``).
+        with_velocity: Also return the velocity moments (static).
+
+    Returns:
+        The injection profile on the (padded) grid of ``helper_data``, or the
+        tuple ``(S, S v_x, S v_y, S |v|^2 / 2)`` with ``with_velocity``.
+    """
+
+    if config.dimensionality != 3:
+        raise ValueError("CGOLS cluster feedback requires a 3D Cartesian grid.")
+
+    clusters = cgols_wind_params.clusters
+    dx = config.grid_spacing
+    cluster_radius = clusters.cluster_radius
+
+    # ---- the living occupant of every slot ----
+    # Occupant e of slot s lives from birth_times[e, s] until the birth of
+    # occupant e + 1; before its first birth a slot is empty.
+    num_born = jnp.sum(clusters.birth_times <= current_time, axis=0)
+    alive = num_born > 0
+    occupant = jnp.maximum(num_born - 1, 0)[None, :]
+
+    def _current(per_occupant):
+        return jnp.take_along_axis(per_occupant, occupant, axis=0)[0]
+
+    birth_time = _current(clusters.birth_times)
+    radius = _current(clusters.radii)
+    azimuth = _current(clusters.azimuths) + _current(
+        clusters.angular_velocities
+    ) * (current_time - birth_time)
+    height = _current(clusters.heights)
+    rate_fraction = jnp.where(alive, _current(clusters.rate_fractions), 0.0)
+    rate_fraction = rate_fraction / jnp.maximum(jnp.sum(rate_fraction), 1e-30)
+
+    # Cluster positions in box coordinates. The box center is the origin of
+    # the cylindrical cluster coordinates, as it is the center of the disk.
+    center_x = config.box_size.x / 2 + radius * jnp.cos(azimuth)
+    center_y = config.box_size.y / 2 + radius * jnp.sin(azimuth)
+    center_z = config.box_size.z / 2 + height
+
+    # ---- per-cluster edge-weighted spheres ----
+    # Squared offsets per axis, (num_slots, N_axis) each; the 3D distance is
+    # their broadcast sum, never a stored coordinate field.
+    offset_x2 = (helper_data.cell_centers_x[None, :] - center_x[:, None]) ** 2
+    offset_y2 = (helper_data.cell_centers_y[None, :] - center_y[:, None]) ** 2
+    offset_z2 = (helper_data.cell_centers_z[None, :] - center_z[:, None]) ** 2
+
+    def _sphere_weights(slot):
+        distance = jnp.sqrt(
+            offset_x2[slot][:, None, None]
+            + offset_y2[slot][None, :, None]
+            + offset_z2[slot][None, None, :]
+        )
+        return jnp.clip((cluster_radius + dx / 2 - distance) / dx, 0.0, 1.0)
+
+    # The slot count is an array shape, hence static: the loops below unroll
+    # into one fused elementwise pass and one reduction per cluster.
+    num_slots = clusters.birth_times.shape[1]
+    overlap = config.cgols_wind_config.cluster_overlap
+
+    if with_velocity:
+        # Orbital velocity of every cluster centre, d/dt of the position above.
+        orbital_speed = radius * _current(clusters.angular_velocities)
+        velocity_x = -orbital_speed * jnp.sin(azimuth)
+        velocity_y = orbital_speed * jnp.cos(azimuth)
+        half_speed2 = 0.5 * (velocity_x**2 + velocity_y**2)
+
+    if overlap == CLUSTER_OVERLAP_SUM:
+        profile = 0.0
+        if with_velocity:
+            momentum_x = momentum_y = kinetic = 0.0
+        for slot in range(num_slots):
+            weights = _sphere_weights(slot)
+            volume = jnp.sum(weights) * dx**3
+            # A cluster entirely off the grid (volume 0) injects nothing.
+            slot_profile = rate_fraction[slot] / jnp.maximum(volume, 1e-30) * weights
+            profile = profile + slot_profile
+            if with_velocity:
+                momentum_x = momentum_x + slot_profile * velocity_x[slot]
+                momentum_y = momentum_y + slot_profile * velocity_y[slot]
+                kinetic = kinetic + slot_profile * half_speed2[slot]
+        if with_velocity:
+            return profile, momentum_x, momentum_y, kinetic
+        return profile
+
+    if overlap == CLUSTER_OVERLAP_UNION:
+        union = 0.0
+        if with_velocity:
+            weight_sum = weighted_vx = weighted_vy = 0.0
+        for slot in range(num_slots):
+            slot_weights = jnp.where(alive[slot], _sphere_weights(slot), 0.0)
+            union = jnp.maximum(union, slot_weights)
+            if with_velocity:
+                weight_sum = weight_sum + slot_weights
+                weighted_vx = weighted_vx + slot_weights * velocity_x[slot]
+                weighted_vy = weighted_vy + slot_weights * velocity_y[slot]
+        volume = jnp.sum(union) * dx**3
+        profile = union / jnp.maximum(volume, 1e-30)
+        if with_velocity:
+            # The union region is one source; a cell in several spheres gets
+            # their weight-averaged velocity.
+            mean_vx = weighted_vx / jnp.maximum(weight_sum, 1e-30)
+            mean_vy = weighted_vy / jnp.maximum(weight_sum, 1e-30)
+            return (
+                profile,
+                profile * mean_vx,
+                profile * mean_vy,
+                profile * 0.5 * (mean_vx**2 + mean_vy**2),
+            )
+        return profile
+
+    raise ValueError(f"Unknown CGOLS cluster_overlap mode {overlap}.")
+
+
+def _cgols_cluster_source(
+    cgols_wind_params: CGOLSWindParams,
+    conserved_state: STATE_TYPE,
+    dt: Float[Array, ""],
+    current_time: Union[float, Float[Array, ""]],
+    config: SimulationConfig,
+    helper_data: HelperData,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """dt-scaled source term of the cluster feedback (CGOLS model C).
+
+    The physics is that of the central sphere -- uniform volumetric mass and
+    thermal-energy rates -- with the uniform sphere replaced by the normalised
+    cluster profile of :func:`_cluster_injection_profile`. The momentum of the
+    injected mass follows ``config.cgols_wind_config.cluster_momentum``:
+    ``CLUSTER_MOMENTUM_SCALE`` rescales the cell momentum to keep its kinetic
+    energy (the central-sphere convention, no net momentum, exactly Edot as
+    heat); ``CLUSTER_MOMENTUM_REST`` adds the mass at rest (Cholla);
+    ``CLUSTER_MOMENTUM_CLUSTER`` adds it with its cluster's orbital velocity,
+    ``d(rho v) = drho v_c`` and ``dE = Edot dt S + drho |v_c|^2 / 2`` (at rest
+    plus Edot in the cluster frame, Galilean-boosted to the box frame).
+
+    Args:
+        cgols_wind_params: The CGOLS wind parameters (rates schedule, clusters).
+        conserved_state: The conserved state array.
+        dt: The (stage-effective) time step.
+        current_time: The current simulation time.
+        config: The simulation configuration.
+        helper_data: The helper data (uses ``cell_centers_x/y/z``).
+        registered_variables: The registered variables.
+
+    Returns:
+        The source term to add to the conserved state.
+    """
+
+    mdot = jnp.interp(
+        current_time,
+        cgols_wind_params.schedule_times,
+        cgols_wind_params.schedule_mass_rates,
+    )
+    edot = jnp.interp(
+        current_time,
+        cgols_wind_params.schedule_times,
+        cgols_wind_params.schedule_energy_rates,
+    )
+
+    momentum_mode = config.cgols_wind_config.cluster_momentum
+    if momentum_mode == CLUSTER_MOMENTUM_CLUSTER:
+        return _cgols_cluster_source_comoving(
+            cgols_wind_params,
+            conserved_state,
+            dt,
+            current_time,
+            mdot,
+            edot,
+            config,
+            helper_data,
+            registered_variables,
+        )
+
+    profile = _cluster_injection_profile(
+        cgols_wind_params, current_time, config, helper_data
+    )
+
+    drho = mdot * dt * profile
+
+    # Keep the pre-existing kinetic energy, see _cgols_wind_source; or, with
+    # CLUSTER_MOMENTUM_REST, add the mass at rest (no momentum source), as
+    # Cholla does.
+    if config.cgols_wind_config.cluster_momentum == CLUSTER_MOMENTUM_REST:
+        momentum_source_factor = jnp.zeros_like(drho)
+    else:
+        momentum_source_factor = jnp.where(
+            profile > 0,
+            jnp.sqrt(1 + drho / conserved_state[registered_variables.density_index])
+            - 1.0,
+            0.0,
+        )
+
+    # Assembled by stacking rather than by one .at[].set per variable; the
+    # variables without a source (e.g. the dual-energy internal energy) stay
+    # zero.
+    sources = {
+        registered_variables.density_index: drho,
+        registered_variables.momentum_index.x: (
+            conserved_state[registered_variables.momentum_index.x]
+            * momentum_source_factor
+        ),
+        registered_variables.momentum_index.y: (
+            conserved_state[registered_variables.momentum_index.y]
+            * momentum_source_factor
+        ),
+        registered_variables.momentum_index.z: (
+            conserved_state[registered_variables.momentum_index.z]
+            * momentum_source_factor
+        ),
+        registered_variables.energy_index: edot * dt * profile,
+    }
+    zeros = jnp.zeros_like(drho)
+    return jnp.stack(
+        [sources.get(index, zeros) for index in range(conserved_state.shape[0])]
+    )
+
+
+def _cgols_cluster_source_comoving(
+    cgols_wind_params: CGOLSWindParams,
+    conserved_state: STATE_TYPE,
+    dt: Float[Array, ""],
+    current_time: Union[float, Float[Array, ""]],
+    mdot: Float[Array, ""],
+    edot: Float[Array, ""],
+    config: SimulationConfig,
+    helper_data: HelperData,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """Cluster source with the ejecta moving with their cluster.
+
+    ``CLUSTER_MOMENTUM_CLUSTER``: in its own rest frame a cluster adds mass at
+    rest and Edot as heat; boosted to the box frame by the cluster velocity
+    ``v_c`` that is ``d(rho v) = drho v_c`` and ``dE = edot dt S +
+    drho |v_c|^2 / 2``. The totals are exact: ``sum d(rho v) dx^3 = Mdot dt
+    <v_c>`` and ``sum dE dx^3 = (Edot + Mdot <|v_c|^2> / 2) dt``, the share-
+    weighted cluster means. No momentum along z: the clusters orbit in planes
+    parallel to the mid-plane.
+    """
+    profile, momentum_x, momentum_y, kinetic = _cluster_injection_profile(
+        cgols_wind_params, current_time, config, helper_data, with_velocity=True
+    )
+    mass_scale = mdot * dt
+    sources = {
+        registered_variables.density_index: mass_scale * profile,
+        registered_variables.momentum_index.x: mass_scale * momentum_x,
+        registered_variables.momentum_index.y: mass_scale * momentum_y,
+        registered_variables.energy_index: edot * dt * profile
+        + mass_scale * kinetic,
+    }
+    zeros = jnp.zeros_like(profile)
+    return jnp.stack(
+        [sources.get(index, zeros) for index in range(conserved_state.shape[0])]
+    )
+
+
 @partial(jax.jit, static_argnames=["config", "registered_variables"])
 def cgols_wind_time_step_limit(
     cgols_wind_params: CGOLSWindParams,
@@ -145,12 +468,23 @@ def cgols_wind_time_step_limit(
         cgols_wind_params.schedule_energy_rates,
     )
     dx = config.grid_spacing
-    weights = jnp.clip(
-        (cgols_wind_params.injection_radius + dx / 2 - helper_data.r) / dx, 0.0, 1.0
-    )
-    V = jnp.sum(weights) * dx**3
-    rho = primitive_state[registered_variables.density_index]
-    q_max = jnp.max(edot / V * weights / rho)
+    if config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES:
+        # The same bound with the cluster profile in place of w / V: q peaks
+        # in the densest gas of the most concentrated living cluster.
+        profile = _cluster_injection_profile(
+            cgols_wind_params, current_time, config, helper_data
+        )
+        rho = primitive_state[registered_variables.density_index]
+        q_max = jnp.max(edot * profile / rho)
+    else:
+        weights = jnp.clip(
+            (cgols_wind_params.injection_radius + dx / 2 - helper_data.r) / dx,
+            0.0,
+            1.0,
+        )
+        V = jnp.sum(weights) * dx**3
+        rho = primitive_state[registered_variables.density_index]
+        q_max = jnp.max(edot / V * weights / rho)
     dt = (C_cfl * dx) ** (2.0 / 3.0) / jnp.cbrt(gamma * (gamma - 1.0) * q_max)
     return jnp.where(q_max > 0, dt, jnp.inf)
 
