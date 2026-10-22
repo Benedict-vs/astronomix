@@ -34,6 +34,14 @@ CLUSTER_MOMENTUM_SCALE = 0
 #: The injected mass carries no momentum (Cholla): the cell momentum is kept,
 #: the gas slows down and its lost kinetic energy is thermalised on top of Edot.
 CLUSTER_MOMENTUM_REST = 1
+#: The injected mass moves with its cluster (the ejecta leave the stars with the
+#: stars' velocity): momentum += drho * v_cluster and energy += Edot dt +
+#: drho |v_cluster|^2 / 2, i.e. mass added at rest plus Edot as heat in the
+#: cluster's own frame, Galilean-boosted to the box frame. The mixing of the
+#: ejecta with gas moving at a different velocity thermalises
+#: rho drho / (rho + drho) |v_gas - v_cluster|^2 / 2, as an inelastic collision
+#: does. For clusters at rest this is CLUSTER_MOMENTUM_REST.
+CLUSTER_MOMENTUM_CLUSTER = 2
 
 
 class CGOLSWindConfig(NamedTuple):
@@ -65,8 +73,9 @@ class CGOLSWindConfig(NamedTuple):
     #: ``CLUSTER_OVERLAP_UNION``. Ignored for the central sphere.
     cluster_overlap: int = CLUSTER_OVERLAP_SUM
 
-    #: Momentum of the injected mass, ``CLUSTER_MOMENTUM_SCALE`` or
-    #: ``CLUSTER_MOMENTUM_REST``. Ignored for the central sphere.
+    #: Momentum of the injected mass, ``CLUSTER_MOMENTUM_SCALE``,
+    #: ``CLUSTER_MOMENTUM_REST`` or ``CLUSTER_MOMENTUM_CLUSTER``. Ignored for
+    #: the central sphere.
     cluster_momentum: int = CLUSTER_MOMENTUM_SCALE
 
 

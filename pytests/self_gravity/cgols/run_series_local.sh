@@ -11,12 +11,13 @@
 #
 # A = adiabatic (the paper's A-series). B = radiative: cooling on with the
 # settings of the B-512 runs (run_bseries_local.sh), the 10% cooling-dt rule
-# off. C = the clustered feedback of model C (CGOLS_FEEDBACK=clusters, paper
-# defaults, see cgols.py) with B's cooling - the paper's model C; Cad = the
-# same clusters adiabatic, tagged _C<dim>ad so the eventual radiative _C<dim>
-# production runs keep their names. All use cgols.py's positivity-preserving
-# WENO + dual energy. Model C needs CGOLS_DIM >= 256 to resolve its 150 pc
-# clusters (3.8 cells); 128 is a smoke test.
+# off. C = the clustered feedback of model C (CGOLS_FEEDBACK=clusters, the
+# physical default of cgols.py; CGOLS_CLUSTER_PRESET=cholla for CGOLS I's
+# clusters) with B's cooling; Cad = the same clusters adiabatic, tagged
+# _C<dim>ad so the eventual radiative _C<dim> production runs keep their
+# names. All use cgols.py's positivity-preserving WENO + dual energy. Model C
+# needs CGOLS_DIM >= 256 to resolve its 119 pc complexes (3.0 cells; the
+# cholla preset's 150 pc: 3.8); 128 is a smoke test.
 #
 # CGOLS_IC_MODE=insitu builds the initial conditions in-process: files from
 # before the two-sided HSE fix (ef6b3f0) must not be reused. CGOLS_CHECKPOINT_KEEP=0

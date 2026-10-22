@@ -13,8 +13,10 @@ paper's radiative B-series (arXiv:1803.01005): the same ICs and wind injection
 plus the operator-split, sub-cycled CIE cooling described in the cooling section
 at the end of this file (outputs are tagged ``_B`` so the two series never
 collide). ``CGOLS_FEEDBACK=clusters`` replaces the central injection sphere by
-the eight re-drawn star clusters of the paper's model C (see the
-CGOLS_CLUSTER_* knobs; tagged ``_Cad`` adiabatic / ``_C`` radiative).
+clustered feedback, model C (by default 16 co-rotating, staggered star-cluster
+complexes calibrated on M82; ``CGOLS_CLUSTER_PRESET=cholla`` gives CGOLS I's
+eight static, re-drawn clusters; see the CGOLS_CLUSTER_* knobs; tagged ``_Cad``
+adiabatic / ``_C`` radiative).
 
 Fidelity vs Schneider & Robertson 2018
 --------------------------------------
@@ -315,6 +317,7 @@ from astronomix.option_classes.simulation_config import (
     finalize_config,
 )
 from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_MOMENTUM_CLUSTER,
     CLUSTER_MOMENTUM_REST,
     CLUSTER_MOMENTUM_SCALE,
     CLUSTER_OVERLAP_SUM,
@@ -535,142 +538,227 @@ INJ_RAD = 300 # pc
 
 # ---- Feedback geometry: central sphere (models A/B) or clusters (model C) ----
 # CGOLS_FEEDBACK=central (default) is the single 300 pc sphere of models A and
-# B. CGOLS_FEEDBACK=clusters is the clustered feedback of model C (Schneider,
-# Robertson & Thompson 2018, arXiv:1803.01005, Sec. 2.2.2): the SAME total
-# rates and the same total injection volume, split into 8 spheres of 150 pc
-# (8 x 150^3 = 300^3), placed at random in the central disk and all moved
-# every 15 Myr. The schedule, the rate/energy split and the injection physics
-# (uniform volumetric rates, edge-cell weighting, momentum rescaled so exactly
-# Edot enters as heat - deviation 1 above) are those of the central sphere, so
-# A and C differ in the geometry only.
+# B. CGOLS_FEEDBACK=clusters is clustered supernova feedback, model C of the
+# suite (Schneider, Robertson & Thompson 2018, arXiv:1803.01005, Sec. 2.2.2;
+# named in CGOLS I, arXiv:1803.01008): the SAME total rate schedule and the
+# same total injection volume (N R^3 = 300^3 pc^3), shared among star-cluster
+# complexes in the disk. The rate/energy split and the injection physics
+# (uniform volumetric rates, edge-cell weighting) are those of the central
+# sphere.
 #
-# The defaults of every CGOLS_CLUSTER_* knob reproduce model C AS RUN, i.e.
-# Cholla's Grid3D::Add_Supernovae (evaneschneider/cholla 645a076), which
-# differs from the paper's wording in two numbers: "within the central 1.5 kpc"
-# is a diameter (R_s = 0.75 kpc), and "up to 100 pc" is z_s = 105 pc. Cholla
-# draws R uniformly in [0, R_s) - uniform in RADIUS, not in area, so the
-# clusters crowd towards the centre - phi uniformly, z uniformly in
-# [-z_s, z_s], re-seeding rand() with int(t_since_onset / 15 Myr) + 1, i.e.
-# new positions at 20, 35, 50 and 65 Myr. Overlapping spheres simply add.
-# The alternatives are physically motivated options on top (see
-# astronomix/_modules/_cgols_wind/cluster_placement.py).
+# DEFAULT = the physical model (CGOLS_CLUSTER_PRESET unset, alias "physical"):
+# star-cluster complexes that follow the star formation of THIS run's gas disk,
+# meant for a Milky-Way-like edge-on disk (GECKOS) with the CGOLS I rates:
+#   - 16 complexes of R = 119 pc (16 R^3 = 300^3). At SFR 20 Msun/yr and a
+#     40 Myr SN window ~8e8 Msun of stars are SN-active, i.e. ~1e4 clusters
+#     for dN/dM ~ M^-2 (slope 1.9 +/- 0.2 in M82, Levy+2024 arXiv:2408.04135;
+#     McCrady & Graham 2007 arXiv:0704.0478); every slot is a merged
+#     superbubble complex of hundreds of clusters, so the shares are equal
+#     (the mass function is aggregated within each complex). R >= 3 dx is the
+#     usual resolution floor of an injection region (TIGRESS, Fielding+2018
+#     arXiv:1807.08758; SILCC uses 4 dx): R = 119 pc is 3.0 dx at 256^3 and
+#     6.1 dx at 512^3, so the default is the same at both.
+#   - Radial: Kennicutt-Schmidt on the IC gas disk, Sigma_SFR ~ Sigma_gas^1.4
+#     (Kennicutt 1998) with Sigma_gas ~ exp(-R / R_gas), R_gas = 1.6 kpc
+#     (CGOLS I Sec. 2; the IC's outer cut-off only acts beyond 4.5 kpc), i.e.
+#     an exponential surface density of scale R_gas / 1.4 = 1.14 kpc
+#     (RSCALE_PC=ks, KS_INDEX=1.4), truncated at RMAX = 2 kpc. CGOLS V spreads
+#     its clusters over the whole disk with N ~ R exp(-R / 1 kpc) out to
+#     4.5 kpc (arXiv:2402.12474); young clusters and SNe in Milky-Way-like
+#     disks follow the molecular gas / the exponential star-forming disk. The
+#     2 kpc cut keeps the feedback in the inner disk (median R = 1.1 kpc),
+#     not disk-wide. Spacing: the median nearest-neighbour distance of the 16
+#     centres is ~415 pc = 3.5 R (10.6 cells at 256^3, 21 at 512^3); 1.5% of
+#     the pairs overlap and ~20% of the complexes touch a neighbour (cholla:
+#     221 pc = 1.5 R, 20% / 70%; m82: 93 pc = 0.8 R, 33% / 95%).
+#   - Vertical: Gaussian, sigma = 50 pc, truncated at 150 pc: young clusters /
+#     SN II in Milky-Way-like disks (SILCC, Walch+2015 arXiv:1412.2749, after
+#     Tammann+1994; Milky Way open clusters < 200 Myr have z_h ~ 48 pc,
+#     Bonatto+2006; Joung & Mac Low 2006 use an exponential 90 pc).
+#   - Lifetimes: staggered, 36 Myr each (the ~4 -> 40 Myr core-collapse window
+#     of a single stellar population; TIGRESS, Cholla's supernova.h, CGOLS V
+#     uses 40 Myr). The slots are pre-aged evenly at the 5 Myr onset, so one
+#     complex is replaced every 36 / 16 = 2.25 Myr and the source never jumps
+#     as a whole (CGOLS I ties a large shell at 4-5 kpc to its simultaneous
+#     re-draw at 20 Myr).
+#   - Kinematics: the complexes co-rotate with Omega(R) of the static
+#     potential (CGOLS IV/V, arXiv:2002.10468 / 2402.12474; young clusters
+#     share the disk rotation, e.g. Konstantopoulos+2009 arXiv:0906.2006), and
+#     their ejecta move with them (CGOLS_CLUSTER_MOMENTUM=cluster: d(rho v) =
+#     drho v_c, dE = Edot dt + drho v_c^2 / 2, i.e. mass at rest plus Edot in
+#     the cluster frame; TIGRESS injects in the star-particle frame). The
+#     kinetic energy of the ejecta is ~1% of Edot (v_c <~ 140 km/s against
+#     sqrt(2 Edot / Mdot) ~ 1200 km/s), but the angular momentum is not: the
+#     ~4e8 Msun injected in the high state would otherwise spin down the gas
+#     they mix with.
 #
-# Resolution: a 150 pc sphere is only 1.9 cells in radius at CGOLS_DIM=128
-# (dx = 78 pc), 3.8 at 256 and 7.7 at 512 - the paper ran C at 512-2048. The
-# edge weighting keeps the injected totals exact at any resolution, but below
-# 256 the clusters are unresolved point-like sources and the |z| <= 105 pc
-# scatter is under 1.5 cells: 256 is the minimum for a meaningful model C,
-# 128 is a smoke test.
+# Presets for comparison (CGOLS_CLUSTER_PRESET): every preset defines every
+# knob; any CGOLS_CLUSTER_* knob given explicitly still overrides its value.
+#   m82        - the default, but with M82's compact nuclear starburst: surface
+#                density ~ exp(-R / 150 pc) truncated at 500 pc (M82's radio
+#                SNRs: scale length 144 (+22/-18) pc, Herrero-Illana+2012
+#                arXiv:1203.2927; SSCs within ~300-500 pc, McCrady & Graham
+#                2007, Westmoquette+2009 arXiv:0902.0064) and a Gaussian
+#                sigma_z = 30 pc truncated at 60 pc (M82's 5 GHz SN disk is
+#                750 x 105 pc at i ~ 80 deg, Strickland & Heckman 2009
+#                arXiv:0903.4175). The 16 spheres overlap heavily, so at
+#                20-40 pc resolution this sits close to model A.
+#   cholla     - model C AS RUN in CGOLS I, Cholla's Grid3D::Add_Supernovae
+#                (evaneschneider/cholla 645a076): 8 equal static spheres of
+#                150 pc, R uniform in [0, 750 pc) (uniform in RADIUS, so
+#                centrally concentrated - the paper's "central 1.5 kpc" is a
+#                diameter), z uniform in |z| <= 105 pc, all re-drawn every
+#                15 Myr from the 5 Myr onset (Cholla's own glibc rand()
+#                sequence, so the paper's realisation). Momentum "scale" (the
+#                A/B convention), so A and this C differ in geometry only.
+#   paper_text - the paper's wording taken literally: R < 1.5 kpc uniform in
+#                area, |z| <= 100 pc, everything else as cholla (numpy draw).
+#   physical   - alias of the default.
+#
+# Resolution: model C needs CGOLS_DIM >= 256 (R = 119 pc is 1.5 dx at 128,
+# the cholla preset's 150 pc 1.9 dx); 128 is a smoke test. The edge weighting
+# keeps the injected totals exact at any resolution.
 FEEDBACK = os.environ.get("CGOLS_FEEDBACK", "central")
 if FEEDBACK not in ("central", "clusters"):
     raise ValueError(f"CGOLS_FEEDBACK must be 'central' or 'clusters', got {FEEDBACK!r}")
 CLUSTERS = FEEDBACK == "clusters"
-# Presets (CGOLS_CLUSTER_PRESET) set the defaults of the CGOLS_CLUSTER_* knobs
-# below; any knob given explicitly still overrides its preset value.
-#   (unset)    - "default": cholla, but co-rotating.
-#   cholla     - model C exactly as run by Cholla (static clusters).
-#   paper_text - the paper's wording taken literally: R < 1.5 kpc uniform in
-#                area, |z| <= 100 pc, everything else as cholla (numpy draw).
-#   physical   - young-cluster / core-collapse SN tracers: a 50 pc Gaussian in
-#                z (truncated at 150 pc; MW young clusters z_h ~ 50 pc, SILCC's
-#                SN II Gaussian of 50 pc), staggered re-draws with 40 Myr
-#                lifetimes (the SN-active life of a cluster, CGOLS V /
-#                TIGRESS), co-rotating with Omega(R) of the potential (CGOLS
-#                IV/V); radial placement as cholla (numpy draw).
-# Without a preset the knobs below apply as written: Cholla's model C, except
-# that the clusters co-rotate with the disk (CGOLS_CLUSTER_COROTATE=1) - a
-# deliberate deviation from CGOLS I, whose clusters sit still in the box frame.
-CLUSTER_PRESET = os.environ.get("CGOLS_CLUSTER_PRESET", "default")
-_CLUSTER_PRESETS = {
-    "default": {},
-    "cholla": {"COROTATE": "0"},
-    "paper_text": {
-        "COROTATE": "0",
-        "PLACEMENT": "random",
-        "RADIAL": "uniform_area",
-        "RMAX_PC": "1500",
-        "ZMAX_PC": "100",
-    },
-    "physical": {
-        "PLACEMENT": "random",
-        "VERTICAL": "gaussian",
-        "ZSCALE_PC": "50",
-        "ZMAX_PC": "150",
-        "REDRAW": "staggered",
-        "LIFETIME_MYR": "40",
-        "COROTATE": "1",
-    },
+_CLUSTER_PHYSICAL = {
+    "PLACEMENT": "random",
+    "NUM": "16",
+    "RADIAL": "exponential",
+    "RMAX_PC": "2000",
+    "RSCALE_PC": "ks",
+    "KS_INDEX": "1.4",
+    "VERTICAL": "gaussian",
+    "ZMAX_PC": "150",
+    "ZSCALE_PC": "50",
+    "REDRAW": "staggered",
+    "LIFETIME_MYR": "36",
+    "START_MYR": "5",
+    "OVERLAP": "sum",
+    "MOMENTUM": "cluster",
+    "MIN_SEP_PC": "0",
+    "COROTATE": "1",
+    "MASS_FUNCTION": "equal",
+    "SEED": "0",
 }
+_CLUSTER_CHOLLA = {
+    "PLACEMENT": "cholla",
+    "NUM": "8",
+    "RADIAL": "uniform_radius",
+    "RMAX_PC": "750",
+    "RSCALE_PC": "1000",
+    "KS_INDEX": "1.4",
+    "VERTICAL": "uniform",
+    "ZMAX_PC": "105",
+    "ZSCALE_PC": "50",
+    "REDRAW": "simultaneous",
+    "LIFETIME_MYR": "15",
+    "START_MYR": "5",
+    "OVERLAP": "sum",
+    "MOMENTUM": "scale",
+    "MIN_SEP_PC": "0",
+    "COROTATE": "0",
+    "MASS_FUNCTION": "equal",
+    "SEED": "0",
+}
+_CLUSTER_PRESETS = {
+    "default": _CLUSTER_PHYSICAL,
+    "physical": _CLUSTER_PHYSICAL,
+    "m82": dict(
+        _CLUSTER_PHYSICAL,
+        RMAX_PC="500",
+        RSCALE_PC="150",
+        ZMAX_PC="60",
+        ZSCALE_PC="30",
+    ),
+    "cholla": _CLUSTER_CHOLLA,
+    "paper_text": dict(
+        _CLUSTER_CHOLLA,
+        PLACEMENT="random",
+        RADIAL="uniform_area",
+        RMAX_PC="1500",
+        ZMAX_PC="100",
+    ),
+}
+CLUSTER_PRESET = os.environ.get("CGOLS_CLUSTER_PRESET", "default")
 if CLUSTER_PRESET not in _CLUSTER_PRESETS:
     raise ValueError(
         f"CGOLS_CLUSTER_PRESET must be one of {tuple(_CLUSTER_PRESETS)}, got {CLUSTER_PRESET!r}"
     )
 
 
-def _cluster_knob(name, default):
+def _cluster_knob(name, default=None):
     """CGOLS_CLUSTER_<name>: the explicit env value, else the preset's, else default."""
     return os.environ.get(
         f"CGOLS_CLUSTER_{name}", _CLUSTER_PRESETS[CLUSTER_PRESET].get(name, default)
     )
 
 
-# "cholla" (default): replay Cholla's own glibc rand() sequence, i.e. the
-# paper's exact realisation (if Titan's C library was glibc); falls back to
-# "random" with a warning where the C library is not glibc. "random": a
-# numpy draw from CGOLS_CLUSTER_SEED and the distributions below. Only
-# "random" honours the RADIAL/VERTICAL/REDRAW/MIN_SEP/MASS knobs; both honour
-# COROTATE.
-CLUSTER_PLACEMENT = _cluster_knob("PLACEMENT", "cholla")
-NUM_CLUSTERS = int(os.environ.get("CGOLS_NUM_CLUSTERS", "8"))
-# Same total volume as the central sphere by default (150 pc for 8).
+# "random": a numpy draw from CGOLS_CLUSTER_SEED and the distributions below
+# (the default). "cholla": replay Cholla's own glibc rand() sequence, i.e. the
+# CGOLS I realisation (if Titan's C library was glibc); falls back to "random"
+# with a warning where the C library is not glibc. Only "random" honours the
+# RADIAL/VERTICAL/REDRAW/MIN_SEP/MASS knobs; both honour COROTATE.
+CLUSTER_PLACEMENT = _cluster_knob("PLACEMENT")
+# Number of clusters alive at any time (CGOLS_NUM_CLUSTERS is the older name).
+NUM_CLUSTERS = int(os.environ.get("CGOLS_NUM_CLUSTERS", _cluster_knob("NUM")))
+# Same total volume as the central sphere by default (119 pc for 16, 150 pc
+# for 8).
 CLUSTER_RADIUS_PC = float(
     _cluster_knob("RADIUS_PC", f"{INJ_RAD / NUM_CLUSTERS ** (1 / 3):.6g}")
 )
-# Radial placement: "uniform_radius" (Cholla: dN/dR = const inside RMAX),
-# "uniform_area" (constant surface density, the literal paper reading), or
-# "exponential" (N ~ R exp(-R / RSCALE), CGOLS V's disk-wide clusters with
-# RSCALE = 1 kpc; the Kennicutt-Schmidt Sigma_SFR ~ Sigma_gas^1.4 of this gas
-# disk would give R_gas / 1.4 = 1.14 kpc).
-CLUSTER_RADIAL = _cluster_knob("RADIAL", "uniform_radius")
-CLUSTER_RMAX_PC = float(_cluster_knob("RMAX_PC", "750"))
-CLUSTER_RSCALE_PC = float(_cluster_knob("RSCALE_PC", "1000"))
-# Vertical placement: "uniform" in |z| <= ZMAX (Cholla), "gaussian" /
-# "exponential" with scale height ZSCALE truncated at ZMAX (young clusters and
-# core-collapse SNe: z_h ~ 50 pc in the Milky Way; SILCC uses a 50 pc Gaussian
-# for SN II), or "midplane" (z = 0; CGOLS IV/V use |z| < 5-10 pc).
-CLUSTER_VERTICAL = _cluster_knob("VERTICAL", "uniform")
-CLUSTER_ZMAX_PC = float(_cluster_knob("ZMAX_PC", "105"))
-CLUSTER_ZSCALE_PC = float(_cluster_knob("ZSCALE_PC", "50"))
-# Re-draws: "simultaneous" (Cholla: all clusters every LIFETIME) or
-# "staggered" (one slot every LIFETIME / N, so the source never jumps as a
-# whole). LIFETIME 15 Myr is model C; ~40 Myr is the SN-active life of a
-# cluster (the 8 Msun progenitor lifetime, CGOLS V / TIGRESS / Joung & Mac Low).
-CLUSTER_REDRAW = _cluster_knob("REDRAW", "simultaneous")
-CLUSTER_LIFETIME_MYR = float(_cluster_knob("LIFETIME_MYR", "15"))
+# Radial placement: "exponential" (surface density ~ exp(-R / RSCALE), i.e.
+# dN/dR ~ R exp(-R / RSCALE), truncated at RMAX), "uniform_radius" (Cholla:
+# dN/dR = const inside RMAX) or "uniform_area" (constant surface density, the
+# literal paper reading). RSCALE_PC=ks (the default) is the Kennicutt-Schmidt
+# scale of the IC gas disk, R_gas / KS_INDEX (Sigma_SFR ~ Sigma_gas^KS_INDEX
+# with Sigma_gas ~ exp(-R / R_gas)): 1.6 kpc / 1.4 = 1.14 kpc. The m82 preset
+# uses 150 pc / 500 pc, CGOLS V's disk-wide clusters 1 kpc / 4.5 kpc.
+CLUSTER_RADIAL = _cluster_knob("RADIAL")
+CLUSTER_RMAX_PC = float(_cluster_knob("RMAX_PC"))
+CLUSTER_KS_INDEX = float(_cluster_knob("KS_INDEX"))
+# Resolved against R_gas in build_cgols_cluster_params (None = "ks").
+CLUSTER_RSCALE_PC = (
+    None if _cluster_knob("RSCALE_PC") == "ks" else float(_cluster_knob("RSCALE_PC"))
+)
+# Vertical placement: "gaussian" / "exponential" with scale height ZSCALE
+# truncated at ZMAX, "uniform" in |z| <= ZMAX (Cholla), or "midplane" (z = 0).
+CLUSTER_VERTICAL = _cluster_knob("VERTICAL")
+CLUSTER_ZMAX_PC = float(_cluster_knob("ZMAX_PC"))
+CLUSTER_ZSCALE_PC = float(_cluster_knob("ZSCALE_PC"))
+# Re-draws: "staggered" (slots pre-aged evenly, one replaced every
+# LIFETIME / N) or "simultaneous" (Cholla: all clusters every LIFETIME).
+CLUSTER_REDRAW = _cluster_knob("REDRAW")
+CLUSTER_LIFETIME_MYR = float(_cluster_knob("LIFETIME_MYR"))
 # Time of the first draw: the 5 Myr feedback onset, as in Cholla.
-CLUSTER_START_MYR = float(_cluster_knob("START_MYR", "5"))
+CLUSTER_START_MYR = float(_cluster_knob("START_MYR"))
 # Overlapping spheres: "sum" (every cluster injects exactly its share, overlaps
 # add up - Cholla's behaviour) or "union" (the union is one uniform region).
-CLUSTER_OVERLAP = _cluster_knob("OVERLAP", "sum")
-# Momentum of the injected mass: "scale" (default, the A/B convention: the
-# cell momentum is rescaled so its kinetic energy is kept and exactly Edot
-# becomes heat) or "rest" (Cholla: the new mass carries no momentum, so the
-# cell slows down and the kinetic energy it loses is thermalised on top of
-# Edot - relevant for clusters sitting in the rotating disk).
-CLUSTER_MOMENTUM = _cluster_knob("MOMENTUM", "scale")
+CLUSTER_OVERLAP = _cluster_knob("OVERLAP")
+# Momentum of the injected mass: "cluster" (the default: the ejecta move with
+# their cluster, d(rho v) = drho v_c and dE = Edot dt + drho v_c^2 / 2; the
+# mixing with gas moving at another velocity is thermalised, as in an
+# inelastic collision), "scale" (the A/B convention: the cell momentum is
+# rescaled so its kinetic energy is kept and exactly Edot becomes heat; the
+# ejecta effectively get ~half the gas velocity) or "rest" (Cholla: the new
+# mass carries no momentum, the cell slows down and the kinetic energy it
+# loses is thermalised on top of Edot). For static clusters "cluster" is
+# "rest".
+CLUSTER_MOMENTUM = _cluster_knob("MOMENTUM")
 # Minimum centre-to-centre distance of coexisting clusters, pc (rejection
-# sampling). 0 = independent draws, as in Cholla; 2 x radius = disjoint.
-CLUSTER_MIN_SEP_PC = float(_cluster_knob("MIN_SEP_PC", "0"))
-# 1 (default) = the clusters orbit with the circular velocity of the static potential at
-# their radius, as the CGOLS IV/V clusters do (stars move with the gas they
-# formed from: one 15 Myr lifetime is ~half an orbit at R = 0.5 kpc, where
-# v_c = 99 km/s and the period is 31 Myr).
-# 0 = at rest in the box frame (Cholla model C; CGOLS_CLUSTER_PRESET=cholla).
-CLUSTER_COROTATE = _cluster_knob("COROTATE", "1") == "1"
-# Rate shares: "equal" (model C) or "power_law" (dN/dM ~ M^-2 on 1e4 - 5e6
-# Msun, share ~ M, as in CGOLS V, arXiv:2402.12474).
-CLUSTER_MASS_FUNCTION = _cluster_knob("MASS_FUNCTION", "equal")
-CLUSTER_SEED = int(_cluster_knob("SEED", "0"))
+# sampling). 0 = independent draws; 2 x radius = disjoint.
+CLUSTER_MIN_SEP_PC = float(_cluster_knob("MIN_SEP_PC"))
+# 1 = the clusters orbit with the circular velocity of the static potential at
+# their radius, as the CGOLS IV/V clusters do (v_c = 68 / 99 km/s and the
+# period 27 / 31 Myr at R = 0.3 / 0.5 kpc). 0 = at rest in the box frame
+# (CGOLS I model C).
+CLUSTER_COROTATE = _cluster_knob("COROTATE") == "1"
+# Rate shares: "equal" or "power_law" (dN/dM ~ M^-2 on 1e4 - 5e6 Msun, share
+# ~ M, as CGOLS V's individual clusters, arXiv:2402.12474; with a few dozen
+# slots that is far noisier than M82's ~1e4 clusters).
+CLUSTER_MASS_FUNCTION = _cluster_knob("MASS_FUNCTION")
+CLUSTER_SEED = int(_cluster_knob("SEED"))
 if CLUSTERS:
     for _name, _value, _allowed in (
         ("CGOLS_CLUSTER_PLACEMENT", CLUSTER_PLACEMENT, ("cholla", "random")),
@@ -678,7 +766,7 @@ if CLUSTERS:
         ("CGOLS_CLUSTER_VERTICAL", CLUSTER_VERTICAL, ("uniform", "gaussian", "exponential", "midplane")),
         ("CGOLS_CLUSTER_REDRAW", CLUSTER_REDRAW, ("simultaneous", "staggered")),
         ("CGOLS_CLUSTER_OVERLAP", CLUSTER_OVERLAP, ("sum", "union")),
-        ("CGOLS_CLUSTER_MOMENTUM", CLUSTER_MOMENTUM, ("scale", "rest")),
+        ("CGOLS_CLUSTER_MOMENTUM", CLUSTER_MOMENTUM, ("cluster", "scale", "rest")),
         ("CGOLS_CLUSTER_MASS_FUNCTION", CLUSTER_MASS_FUNCTION, ("equal", "power_law")),
     ):
         if _value not in _allowed:
@@ -1051,6 +1139,19 @@ def circular_angular_velocity(R):
 _CLUSTER_PARAMS_CACHE = {}
 
 
+def cluster_radial_scale_pc():
+    """Scale length of the exponential cluster surface density, pc.
+
+    CGOLS_CLUSTER_RSCALE_PC, or for "ks" the Kennicutt-Schmidt scale of the IC
+    gas disk: Sigma_SFR ~ Sigma_gas^n with Sigma_gas ~ exp(-R / R_gas) is
+    exp(-n R / R_gas), i.e. R_gas / n (1.6 kpc / 1.4 = 1.14 kpc; the IC's
+    outer cut-off only acts beyond R_trunc = 4.5 kpc).
+    """
+    if CLUSTER_RSCALE_PC is not None:
+        return CLUSTER_RSCALE_PC
+    return R_gas.to(u.pc).value / CLUSTER_KS_INDEX
+
+
 def build_cgols_cluster_params():
     """Draw the model-C clusters (CGOLS_CLUSTER_* knobs), code units.
 
@@ -1072,7 +1173,7 @@ def build_cgols_cluster_params():
         end_time=TOTAL_TIME.to(u.Myr).value * myr,
         redraw=CLUSTER_REDRAW,
         radial_profile=CLUSTER_RADIAL,
-        radial_scale_length=CLUSTER_RSCALE_PC * pc,
+        radial_scale_length=cluster_radial_scale_pc() * pc,
         max_radius=CLUSTER_RMAX_PC * pc,
         vertical_profile=CLUSTER_VERTICAL,
         vertical_scale_height=CLUSTER_ZSCALE_PC * pc,
@@ -1106,7 +1207,9 @@ def build_cgols_cluster_params():
         f"Model-C clusters (preset {CLUSTER_PRESET}, {placement} placement, "
         f"momentum {CLUSTER_MOMENTUM}"
         f"{', co-rotating' if CLUSTER_COROTATE else ''}): {NUM_CLUSTERS} x "
-        f"R = {CLUSTER_RADIUS_PC:.4g} pc, {CLUSTER_RADIAL} in R < {CLUSTER_RMAX_PC:.4g} pc, "
+        f"R = {CLUSTER_RADIUS_PC:.4g} pc, {CLUSTER_RADIAL}"
+        f"{f' (scale {cluster_radial_scale_pc():.4g} pc)' if CLUSTER_RADIAL == 'exponential' else ''}"
+        f" in R < {CLUSTER_RMAX_PC:.4g} pc, "
         f"{CLUSTER_VERTICAL} in |z| <= {CLUSTER_ZMAX_PC:.4g} pc, {CLUSTER_REDRAW} re-draws "
         f"every {CLUSTER_LIFETIME_MYR:.4g} Myr from {CLUSTER_START_MYR:.4g} Myr, "
         f"overlap {CLUSTER_OVERLAP}"
@@ -1398,11 +1501,11 @@ def build_config():
                         if CLUSTER_OVERLAP == "sum"
                         else CLUSTER_OVERLAP_UNION
                     ),
-                    cluster_momentum=(
-                        CLUSTER_MOMENTUM_SCALE
-                        if CLUSTER_MOMENTUM == "scale"
-                        else CLUSTER_MOMENTUM_REST
-                    ),
+                    cluster_momentum={
+                        "scale": CLUSTER_MOMENTUM_SCALE,
+                        "rest": CLUSTER_MOMENTUM_REST,
+                        "cluster": CLUSTER_MOMENTUM_CLUSTER,
+                    }[CLUSTER_MOMENTUM],
                 )
                 if CLUSTERS
                 else {}
