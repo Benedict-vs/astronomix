@@ -121,7 +121,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
 
 # units and constants
 from astropy import units as u
@@ -384,6 +383,21 @@ def product_maps(snapshot, metallicity):
     return products
 
 
+# Fixed, run-independent log10 colour ranges of the projected maps (MAP_UNITS
+# keys), so maps of different resolutions/runs compare directly. The median
+# emitting pixel of A-512 / A-1024 at 60 Myr sits ~5 decades below the peak
+# (S_X ~ 4e-9 vs 5e-4), so a peak-relative 4-decade scale hid the faint,
+# extended wind emission; the X-ray floor of 1e-10 is one decade below CGOLS I
+# Fig. 9's.
+MAP_LOG_COLOR_RANGES = {
+    "xray_cgols": (-10.0, -3.0),  # log10 erg s^-1 cm^-2 sr^-1 (all X-ray models)
+    "halpha": (-24.0, -12.0),  # log10 erg s^-1 cm^-2 arcsec^-2
+}
+# Black -> red -> saturated yellow at the bright end, like the CGOLS I maps
+# (magma ends in a washed-out cream).
+EMISSION_COLORMAP = "inferno"
+
+
 def map_unit_name(product):
     """The emission.MAP_UNITS key of a derived product."""
     return "xray_cgols" if product.startswith("xray") else product
@@ -515,9 +529,9 @@ def plot_maps(maps, metadata, tag, figure_directory):
     ]
     # Pixels without emitting gas (outside a temperature window) are zero;
     # draw them as the colormap's floor rather than as holes.
-    emission_colormap = plt.get_cmap("magma").with_extremes(bad="black")
+    emission_colormap = plt.get_cmap(EMISSION_COLORMAP).with_extremes(bad="black")
     for suffix, panels, label in (
-        ("maps_xray", panels_xray, r"$S_X$ [erg s$^{-1}$ cm$^{-2}$ sr$^{-1}$]"),
+        ("maps_xray", panels_xray, r"$\log_{10} S_X$ [erg s$^{-1}$ cm$^{-2}$ sr$^{-1}$]"),
         ("maps_halpha", panels_halpha, None),
     ):
         available = [(key, title) for key, title in panels if key in maps]
@@ -530,17 +544,22 @@ def plot_maps(maps, metadata, tag, figure_directory):
             if positive.size == 0:
                 axis.set_title(title + "\n(empty)")
                 continue
-            vmax = np.percentile(positive, 99.9)
-            norm = LogNorm(vmin=vmax * 1e-4, vmax=vmax)
+            unit_name = map_unit_name(key[:-3])
+            if unit_name in MAP_LOG_COLOR_RANGES:
+                vmin, vmax = MAP_LOG_COLOR_RANGES[unit_name]
+            else:
+                vmax = np.log10(np.percentile(positive, 99.9))
+                vmin = vmax - 8.0
             shown = axis.imshow(
-                np.where(image > 0, image, np.nan).T,
+                np.log10(np.where(image > 0, image, np.nan)).T,
                 origin="lower",
                 extent=_map_extent(image.shape),
-                norm=norm,
+                vmin=vmin,
+                vmax=vmax,
                 cmap=emission_colormap,
             )
             unit = MAP_UNITS[map_unit_name(key[:-3])][0]
-            figure.colorbar(shown, ax=axis, shrink=0.8, label=label or unit)
+            figure.colorbar(shown, ax=axis, shrink=0.8, label=label or f"log10 [{unit}]")
             axis.set_title(title, fontsize=9)
             axis.set_xlabel("x [kpc]")
             axis.set_ylabel("z [kpc]")
