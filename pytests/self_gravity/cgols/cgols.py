@@ -51,7 +51,8 @@ Four deliberate deviations remain:
      equivalents.
 
 Structurally different numerics (equivalent physics, never bit-identical):
-WENO5 finite-difference + RK4_LSRK at CFL 0.9 in float32 on the PALLAS backend
+WENO5 finite-difference + RK4_LSRK at CFL 0.9 in float32 (CGOLS_X64=1: float64)
+on the PALLAS backend
 vs Cholla's VL + PLMC + HLLC finite-volume (2nd order) at CFL 0.3 in double.
 CGOLS_CFL=0.3 gives the closer CFL match at ~3x cost. At this resolution the
 right comparison target is the paper's own A-512 run (Fig. 11), not the A-2048
@@ -78,6 +79,23 @@ import signal
 import time
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
+
+# Opt-in double precision. CGOLS_X64=1 runs the IC build, the external
+# potential, the params and the whole time integration in float64 (frames stay
+# float32 on disk - they are diagnostics; checkpoints and the final-state .npy
+# keep the state dtype). Exported as JAX_ENABLE_X64 BEFORE jax is imported so
+# even astronomix's import-time array defaults are float64; the explicit
+# jax.config.update after the imports below makes it authoritative either way.
+# Side effects of CGOLS_X64=1 (default runs are untouched): IC_MODE defaults to
+# "insitu" (a fresh float64 IC every run), the IC file tag and the DEFAULT run
+# tag get an "_x64" suffix. Both solvers stay on Pallas in float64: the FD WENO
+# kernels carry dedicated double-precision paths, and the fv VL2 stage kernel
+# (_van_leer_pallas) has no x64 fallback - it is regression-tested in float64
+# against AthenaPK on GPU. (Only the non-VL2 FV kernel in _pallas_evolve.py
+# falls back to native JAX under x64.) Default 0 = float32 production.
+X64 = os.environ.get("CGOLS_X64", "0") == "1"
+if X64:
+    os.environ["JAX_ENABLE_X64"] = "1"
 # ruff: noqa: E402
 
 # ==== GPU selection / multi-GPU domain decomposition ====
@@ -366,7 +384,13 @@ from astronomix.analysis_helpers.emission import (
     load_xray_emissivity_table,
 )
 
-jax.config.update("jax_enable_x64", False)
+jax.config.update("jax_enable_x64", X64)
+
+rprint(
+    "[precision] "
+    + ("float64 (CGOLS_X64=1)" if X64 else "float32 (default; CGOLS_X64=1 for float64)"),
+    flush=True,
+)
 
 if jax.process_count() > 1:
     rprint(
@@ -817,8 +841,11 @@ _validate_shard_split(SHARD_SPLIT, (RESOLUTION, RESOLUTION, 2 * RESOLUTION))
 #              cheap next to a 48 h leg.
 # Defaults to insitu exactly where the file path stops working, so DIM <= 1024,
 # run_ic_horeka.sh and every analysis script are untouched.
+# CGOLS_X64=1 also defaults to insitu: the saved .npy ICs are float32, and an
+# in-process float64 build needs no extra CGOLS_CREATE_IC step.
 IC_MODE = os.environ.get(
-    "CGOLS_IC_MODE", "insitu" if (RESOLUTION >= 2048 or DISTRIBUTED) else "file"
+    "CGOLS_IC_MODE",
+    "insitu" if (RESOLUTION >= 2048 or DISTRIBUTED or X64) else "file",
 )
 if IC_MODE not in ("file", "insitu"):
     raise SystemExit(f"CGOLS_IC_MODE must be 'file' or 'insitu', got {IC_MODE!r}")
@@ -828,7 +855,9 @@ INSITU_IC = IC_MODE == "insitu"
 # ...), so runs at different resolutions never overwrite each other's initial
 # state: changing CGOLS_DIM automatically selects (or, with CGOLS_CREATE_IC=1,
 # builds) the matching IC files. Override only for special IC variants.
-IC_TAG = os.environ.get("CGOLS_IC_TAG", f"_d{RESOLUTION}")
+# CGOLS_X64=1 adds "_x64", so a float64 CGOLS_CREATE_IC never overwrites the
+# float32 files (set CGOLS_IC_TAG=_d<dim> to run float64 from the float32 IC).
+IC_TAG = os.environ.get("CGOLS_IC_TAG", f"_d{RESOLUTION}" + ("_x64" if X64 else ""))
 
 # Benchmark mode: when CGOLS_BENCH_STEPS > 0 the run does exactly that many
 # fixed-size timesteps (no CFL — physically meaningless, but the per-step compute
@@ -1009,6 +1038,10 @@ if CLUSTERS:
     _DEFAULT_RUN_TAG = "_C" if COOLING else "_Cad"
 else:
     _DEFAULT_RUN_TAG = "_B" if COOLING else ""
+# CGOLS_X64=1 suffixes the DEFAULT tag with "_x64"; an explicit CGOLS_RUN_TAG
+# is used verbatim (pick one that differs from the float32 run's).
+if X64:
+    _DEFAULT_RUN_TAG += "_x64"
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", _DEFAULT_RUN_TAG)
 FIG_RUN_DIR = RUN_TAG.lstrip("_") or "untagged"
 
@@ -2469,6 +2502,15 @@ def load_initial_conditions():
             f"IC file {_ic_state_path()} has grid {initial_state.shape[1:]} but "
             f"CGOLS_DIM={RESOLUTION} expects {expected} - wrong CGOLS_IC_TAG?"
         )
+    if X64 and initial_state.dtype != jnp.float64:
+        # A float32 IC file under CGOLS_X64=1 (e.g. CGOLS_IC_TAG=_d<dim>):
+        # upcast, so only the solver precision differs from the float32 run.
+        rprint(
+            f"[precision] upcasting {initial_state.dtype} IC file "
+            f"{_ic_state_path()} to float64"
+        )
+        initial_state = initial_state.astype(jnp.float64)
+        Phi_total = Phi_total.astype(jnp.float64)
     config = finalize_config(config, initial_state.shape)
     return initial_state, config, build_simulation_params(Phi_total), registered_variables
 
