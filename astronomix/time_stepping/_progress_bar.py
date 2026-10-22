@@ -72,6 +72,7 @@ def _show_diagnostics(
     t, min_density, min_pressure, max_speed, max_temperature, has_nan,
     max_density=None, max_density_index=None,
     fraction=None, total_mass=None,
+    max_magnetic_field=None, min_plasma_beta=None, relative_divergence=None,
 ) -> None:
     """Host-side per-step diagnostic line.
 
@@ -144,10 +145,20 @@ def _show_diagnostics(
         dm = f"{m - prev:+.3e}" if prev is not None else "n/a"
         mass = f"  mass={m:.7e} dM={dm}"
 
+    # MHD runs only: max |B| (code units), the lowest plasma beta and the
+    # relative divergence error max |div B| dx / max |B| of the face field.
+    magnetic = ""
+    if max_magnetic_field is not None:
+        magnetic = (
+            f"  max|B|={float(max_magnetic_field):.3e}"
+            f"  min_beta={float(min_plasma_beta):.3e}"
+            f"  divB={float(relative_divergence):.2e}"
+        )
+
     msg = (
         f"{pct}[diag] t={float(t):.6e}  min_rho={float(min_density):.3e}  "
         f"min_P={float(min_pressure):.3e}  max|v|={float(max_speed):.3e}  "
-        f"max_T(code)={float(max_temperature):.3e}{max_rho}{mass}{flag}"
+        f"max_T(code)={float(max_temperature):.3e}{max_rho}{mass}{magnetic}{flag}"
     )
 
     log_path = os.environ.get("ASTRONOMIX_DIAG_LOG")
