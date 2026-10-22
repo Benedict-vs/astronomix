@@ -149,7 +149,9 @@ RK4_LSRK = 3
 #: finite-volume solver to the AthenaPK-equivalent scheme, which for MHD
 #: carries the cell-centred field together with the GLM cleaning scalar psi
 #: (Dedner et al. 2002). The scheme is Cartesian. Self-gravity and an external
-#: potential enter through Athena++'s coupling (``ATHENA_SECOND_ORDER``); the
+#: potential enter through Athena++'s coupling (``ATHENA_SECOND_ORDER``), a
+#: static external potential alone optionally through the cell-centred
+#: ``SIMPLE_SOURCE`` (which, unlike Athena++'s, runs on the Pallas stages); the
 #: scheme has no stellar-wind-tracer or cosmic-ray terms, and
 #: ``finalize_config`` rejects those combinations (spherical geometry, as for
 #: every spherical configuration, is switched to MUSCL instead).
@@ -1470,10 +1472,19 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         # variables, so these combinations would be silently ignored
         # (geometry) or fail on the extra state variables. Spherical geometry
         # was already switched to MUSCL above. Gravity enters through
-        # Athena++'s coupling, the only one built on the VL2 stages.
+        # Athena++'s coupling. The one exception is a static external
+        # potential without self-gravity with SIMPLE_SOURCE requested: its
+        # cell-centred rho a / rho v.a source is added after each stage, which
+        # keeps the fused Pallas stage kernels usable (they never write out
+        # the face mass fluxes Athena++'s energy source needs).
+        external_simple_source = (
+            not config.gravity_config.self_gravity
+            and config.gravity_config.self_gravity_version == SIMPLE_SOURCE
+        )
         if (
             config.gravity_config.gravity
             and config.gravity_config.self_gravity_version != ATHENA_SECOND_ORDER
+            and not external_simple_source
         ):
             print("Setting the Athena++ (ATHENA_SECOND_ORDER) gravity coupling for the VL2 scheme.")
             config = config._replace(
@@ -1550,6 +1561,11 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
             "The HLLD Riemann solver is only available with the VL2 time "
             "integrator (time_integrator=VL2)."
         )
+
+    # Of the finite-volume schemes only VL2 adds the CGOLS wind source; the
+    # others would silently run without it.
+    if config.cgols_wind_config.cgols_wind and config.solver_mode == FINITE_VOLUME and not uses_vl2:
+        raise ValueError("The CGOLS wind of the finite-volume solver requires time_integrator=VL2.")
 
     # The upwind EMF dissipation acts on the constrained-transport interface
     # fields, which only the finite-difference MHD scheme carries.

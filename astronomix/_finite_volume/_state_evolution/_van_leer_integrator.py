@@ -12,7 +12,12 @@ external potential) couple as in Athena++, whose VL2 integrator this is: every
 stage adds the source of ``_add_athena_gravity_source`` built from the
 potential of the stage's initial state and the stage's Riemann mass fluxes,
 optionally with the time-centred energy source of Mullen, Hanawa & Gammie
-(2021). The gravity source runs on the native backend only.
+(2021). The gravity source runs on the native backend only. A static external
+potential without self-gravity can instead couple through the cell-centred
+``SIMPLE_SOURCE`` (``rho a`` / ``rho v . a``, as the finite-difference solver),
+which, like the CGOLS wind source, is added after each stage from the stage's
+initial state and so runs with the Pallas stages as well (see
+``_add_stage_sources``).
 
 One step of size ``dt`` from the primitive state ``W^n`` (conserved form
 ``U^n``) reads, exactly as AthenaPK's task list::
@@ -53,12 +58,14 @@ import jax.numpy as jnp
 
 # astronomix constants
 from astronomix.option_classes.simulation_config import (
+    ATHENA_SECOND_ORDER,
     GHOST_CELLS,
     HLL,
     HLLC,
     HLLD,
     LAX_FRIEDRICHS,
     POSITIVITY_HARD_FLOOR,
+    SIMPLE_SOURCE,
     STATE_TYPE,
 )
 
@@ -95,6 +102,8 @@ from astronomix._modules._gravity._gravity import (
     _add_athena_gravity_source,
     _compute_total_potential,
 )
+from astronomix._modules._cgols_wind._cgols_wind import _cgols_wind_source
+from astronomix._stencil_operations._stencil_operations import _stencil_add
 
 
 # -------------------------------------------------------------
@@ -771,6 +780,163 @@ def _first_order_flux_correction(
 # -------------------------------------------------------------
 
 
+def _uses_athena_gravity(config: SimulationConfig) -> bool:
+    """
+    Whether gravity couples through Athena++'s flux-based source inside the
+    (native) stages, rather than through the cell-centred stage source.
+    """
+    return (
+        config.gravity_config.gravity
+        and config.gravity_config.self_gravity_version == ATHENA_SECOND_ORDER
+    )
+
+
+def _uses_cell_centred_gravity(config: SimulationConfig) -> bool:
+    """
+    Whether a static external potential couples through the cell-centred
+    ``SIMPLE_SOURCE`` added after each stage (``finalize_config`` keeps that
+    coupling only without self-gravity).
+    """
+    return (
+        config.gravity_config.gravity
+        and config.gravity_config.self_gravity_version == SIMPLE_SOURCE
+    )
+
+
+def _uses_stage_sources(config: SimulationConfig) -> bool:
+    """Whether any source is added after the stages' flux update."""
+    return _uses_cell_centred_gravity(config) or config.cgols_wind_config.cgols_wind
+
+
+def _external_gravitational_acceleration(
+    config: SimulationConfig,
+    params: SimulationParams,
+    registered_variables: RegisteredVariables,
+    reference_density,
+):
+    """
+    The cell-centred acceleration ``-grad(phi)`` of the static external
+    potential, one field per axis, from the second-order centred difference
+    (the order of the VL2 scheme; it only needs the one ghost-cell layer the
+    potential carries, so the boundary-adjacent cells see no wrap-around).
+
+    Args:
+        config: The simulation configuration.
+        params: The simulation parameters (the pre-padded potential).
+        registered_variables: The registered variables.
+        reference_density: A density field with the state's (padded) layout.
+
+    Returns:
+        The list of acceleration components.
+    """
+    potential = _vl2_gravitational_potential(
+        reference_density,
+        config,
+        params,
+        registered_variables,
+    )
+    return [
+        -_stencil_add(
+            potential,
+            indices=(1, -1),
+            factors=(1.0, -1.0),
+            axis=axis,
+        ) / (2.0 * config.grid_spacing)
+        for axis in range(config.dimensionality)
+    ]
+
+
+def _add_stage_sources(
+    new_primitive_state: STATE_TYPE,
+    stage_primitive_state: STATE_TYPE,
+    stage_time_step,
+    acceleration,
+    current_time,
+    gamma,
+    config: SimulationConfig,
+    params: SimulationParams,
+    helper_data: HelperData,
+    registered_variables: RegisteredVariables,
+) -> STATE_TYPE:
+    """
+    Add the sources that are not built from the stage's fluxes: the
+    cell-centred external gravity and the CGOLS central wind.
+
+    Both are evaluated from the stage's initial state ``W_stage``, so a stage
+    reads ``U = U_base - beta dt [L(W_stage) - S(W_stage)]`` as in a
+    method-of-lines Runge-Kutta stage, and the update is the same whether the
+    flux part ran natively or in the fused Pallas kernel. The wind schedule is
+    evaluated at the start-of-step time in both stages, as in the
+    finite-difference integrators.
+
+    Args:
+        new_primitive_state: The primitive state after the stage's flux update.
+        stage_primitive_state: The primitive state the stage's fluxes came from.
+        stage_time_step: The stage's time-step weight ``beta * dt``.
+        acceleration: The external acceleration components (or ``None``).
+        current_time: The start-of-step simulation time.
+        gamma: The adiabatic index.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        helper_data: The (padded) helper data, ``r`` for the wind.
+        registered_variables: The registered variables.
+
+    Returns:
+        The primitive state with the sources added (ghost cells not updated).
+    """
+    if not _uses_stage_sources(config):
+        return new_primitive_state
+
+    conserved_state = _conserved_from_primitive_vl2(
+        new_primitive_state,
+        gamma,
+        config,
+        registered_variables,
+    )
+    stage_density = stage_primitive_state[registered_variables.density_index]
+    velocity_indices = _velocity_component_indices(registered_variables)
+
+    if _uses_cell_centred_gravity(config):
+        # rho a in the momentum and rho v . a in the energy equation, the
+        # finite-difference solver's SIMPLE_SOURCE coupling.
+        energy_source = 0.0
+        for axis in range(config.dimensionality):
+            momentum_index = velocity_indices[axis]
+            conserved_state = conserved_state.at[momentum_index].add(
+                stage_time_step * stage_density * acceleration[axis]
+            )
+            energy_source = energy_source + (
+                stage_density * stage_primitive_state[momentum_index] * acceleration[axis]
+            )
+        conserved_state = conserved_state.at[registered_variables.energy_index].add(
+            stage_time_step * energy_source
+        )
+
+    if config.cgols_wind_config.cgols_wind:
+        conserved_state = conserved_state + _cgols_wind_source(
+            params.cgols_wind_params,
+            _conserved_from_primitive_vl2(
+                stage_primitive_state,
+                gamma,
+                config,
+                registered_variables,
+            ),
+            stage_time_step,
+            current_time,
+            config,
+            helper_data,
+            registered_variables,
+        )
+
+    return _primitive_from_conserved_vl2(
+        conserved_state,
+        gamma,
+        config,
+        params,
+        registered_variables,
+    )
+
+
 def _vl2_gravitational_potential(
     density,
     config: SimulationConfig,
@@ -872,7 +1038,7 @@ def _vl2_stage(
     )
 
     end_potential = None
-    if config.gravity_config.gravity:
+    if _uses_athena_gravity(config):
         density_index = registered_variables.density_index
         work_potential = stage_potential
         if config.gravity_config.time_centred_energy_source:
@@ -1089,13 +1255,16 @@ def _evolve_state_vl2(
     params: SimulationParams,
     helper_data: HelperData,
     registered_variables: RegisteredVariables,
+    current_time: Union[float, Float[Array, ""]] = 0.0,
 ) -> STATE_TYPE:
     """
     Advance the primitive state by one VL2 step: a donor-cell predictor to the
     half step, then the corrector with the van Leer limited PLM, or with donor
     cell when ``config.first_order_fallback`` is set (``config.limiter`` is not
     read). Runs on the Pallas backend when it supports the configuration and
-    natively otherwise; with gravity always natively.
+    natively otherwise; with Athena++'s gravity coupling always natively. The
+    stage sources (cell-centred external gravity, CGOLS wind) are added after
+    either backend's stages.
 
     Args:
         primitive_state: The primitive state ``W^n``.
@@ -1103,8 +1272,9 @@ def _evolve_state_vl2(
         gamma: The adiabatic index.
         config: The simulation configuration.
         params: The simulation parameters.
-        helper_data: The helper data (unused, kept for the common signature).
+        helper_data: The (padded) helper data (``r`` for the CGOLS wind).
         registered_variables: The registered variables.
+        current_time: The start-of-step simulation time (CGOLS wind schedule).
 
     Returns:
         The primitive state ``W^{n+1}``.
@@ -1124,10 +1294,36 @@ def _evolve_state_vl2(
     )
     predictor_damping_factor, corrector_damping_factor = damping_factors
 
-    # The gravity source needs every face's mass flux, which the fused Pallas
-    # stage kernels never write out (they form the flux divergence in
-    # registers), so with gravity the stages run natively.
-    if not config.gravity_config.gravity and _vl2_pallas_supported(primitive_state, config):
+    # The static external acceleration of the cell-centred coupling, shared by
+    # both stages.
+    acceleration = None
+    if _uses_cell_centred_gravity(config):
+        acceleration = _external_gravitational_acceleration(
+            config,
+            params,
+            registered_variables,
+            primitive_state[registered_variables.density_index],
+        )
+
+    def add_stage_sources(new_stage_state, stage_state, stage_time_step):
+        """The stage sources of ``_add_stage_sources`` for one stage."""
+        return _add_stage_sources(
+            new_stage_state,
+            stage_state,
+            stage_time_step,
+            acceleration,
+            current_time,
+            gamma,
+            config,
+            params,
+            helper_data,
+            registered_variables,
+        )
+
+    # Athena++'s gravity source needs every face's mass flux, which the fused
+    # Pallas stage kernels never write out (they form the flux divergence in
+    # registers), so with that coupling the stages run natively.
+    if not _uses_athena_gravity(config) and _vl2_pallas_supported(primitive_state, config):
 
         # --------------- ↓ Pallas stages ↓ ----------------
 
@@ -1145,6 +1341,11 @@ def _evolve_state_vl2(
             config=config,
             params=params,
             registered_variables=registered_variables,
+        )
+        half_step_primitive_state = add_stage_sources(
+            half_step_primitive_state,
+            primitive_state,
+            0.5 * dt,
         )
         half_step_primitive_state = _update_ghost_cells(
             half_step_primitive_state,
@@ -1164,6 +1365,11 @@ def _evolve_state_vl2(
             params=params,
             registered_variables=registered_variables,
         )
+        new_primitive_state = add_stage_sources(
+            new_primitive_state,
+            half_step_primitive_state,
+            dt,
+        )
 
         # --------------- ↑ Pallas stages ↑ ----------------
 
@@ -1175,7 +1381,7 @@ def _evolve_state_vl2(
     # Poisson equation after every stage, so the predictor sees phi(rho^n) and
     # the corrector phi(rho^{n+1/2}).
     initial_potential = None
-    if config.gravity_config.gravity:
+    if _uses_athena_gravity(config):
         initial_potential = _vl2_gravitational_potential(
             primitive_state[registered_variables.density_index],
             config,
@@ -1203,6 +1409,11 @@ def _evolve_state_vl2(
         stage_potential=initial_potential,
         initial_potential=initial_potential,
     )
+    half_step_primitive_state = add_stage_sources(
+        half_step_primitive_state,
+        primitive_state,
+        0.5 * dt,
+    )
     half_step_primitive_state = _update_ghost_cells(
         half_step_primitive_state,
         config,
@@ -1214,7 +1425,7 @@ def _evolve_state_vl2(
     # the half-step density (before the floors, which only matters where they
     # act), so it is reused rather than solved again.
     half_step_potential = half_step_end_potential
-    if config.gravity_config.gravity and half_step_potential is None:
+    if _uses_athena_gravity(config) and half_step_potential is None:
         half_step_potential = _vl2_gravitational_potential(
             half_step_primitive_state[registered_variables.density_index],
             config,
@@ -1235,6 +1446,11 @@ def _evolve_state_vl2(
         registered_variables=registered_variables,
         stage_potential=half_step_potential,
         initial_potential=initial_potential,
+    )
+    new_primitive_state = add_stage_sources(
+        new_primitive_state,
+        half_step_primitive_state,
+        dt,
     )
 
     # --------------- ↑ Native stages ↑ ----------------
