@@ -323,7 +323,11 @@ def _cluster_injection_profile(
         return jnp.clip((cluster_radius + dx / 2 - distance) / dx, 0.0, 1.0)
 
     # The slot count is an array shape, hence static: the loops below unroll
-    # into one fused elementwise pass and one reduction per cluster.
+    # into one fused elementwise pass. The per-cluster volumes are reduced
+    # beforehand, one slot after the other (lax.map): a reduction per slot
+    # inside the unrolled sum would keep every slot's 3D weights alive at
+    # once, ~0.15 GB per slot at 512^3 on the GPU, so 128 clusters no longer
+    # fit an H200 (C512n128 asked for 154 GiB, 2026-10-23).
     num_slots = clusters.birth_times.shape[1]
     overlap = config.cgols_wind_config.cluster_overlap
 
@@ -335,14 +339,16 @@ def _cluster_injection_profile(
         half_speed2 = 0.5 * (velocity_x**2 + velocity_y**2)
 
     if overlap == CLUSTER_OVERLAP_SUM:
+        volumes = jax.lax.map(
+            lambda slot: jnp.sum(_sphere_weights(slot)), jnp.arange(num_slots)
+        ) * dx**3
         profile = 0.0
         if with_velocity:
             momentum_x = momentum_y = kinetic = 0.0
         for slot in range(num_slots):
             weights = _sphere_weights(slot)
-            volume = jnp.sum(weights) * dx**3
             # A cluster entirely off the grid (volume 0) injects nothing.
-            slot_profile = rate_fraction[slot] / jnp.maximum(volume, 1e-30) * weights
+            slot_profile = rate_fraction[slot] / jnp.maximum(volumes[slot], 1e-30) * weights
             profile = profile + slot_profile
             if with_velocity:
                 momentum_x = momentum_x + slot_profile * velocity_x[slot]
