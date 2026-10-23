@@ -20,8 +20,10 @@ With ``CGOLSWindConfig.injection_geometry = CLUSTER_SPHERES`` the same
 total rates are instead shared among a set of star-cluster spheres (model C
 of the suite, Schneider, Robertson & Thompson 2018, arXiv:1803.01005: eight
 R = 150 pc clusters re-drawn every 15 Myr), see
-:func:`_cluster_injection_profile`. The central-sphere path is unchanged by
-that option.
+:func:`_cluster_injection_profile`. ``SMOOTH_DISK`` replaces the spheres by
+their N -> infinity limit, a static axisymmetric profile Sigma(R) h(z) (see
+:func:`_smooth_disk_profile`), and otherwise shares the cluster path. The
+central-sphere path is unchanged by either option.
 
 Structured after ``_stellar_wind.stellar_wind._wind_ei3D_source``:
 operates on the conserved state and returns a dt-scaled source term for
@@ -42,6 +44,7 @@ from astronomix._modules._cgols_wind.cgols_wind_options import (
     CLUSTER_OVERLAP_SUM,
     CLUSTER_OVERLAP_UNION,
     CLUSTER_SPHERES,
+    SMOOTH_DISK,
 )
 
 # astronomix containers
@@ -77,7 +80,7 @@ def _cgols_wind_source(
         The source term to add to the conserved state.
     """
 
-    if config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES:
+    if config.cgols_wind_config.injection_geometry in (CLUSTER_SPHERES, SMOOTH_DISK):
         return _cgols_cluster_source(
             cgols_wind_params,
             conserved_state,
@@ -145,6 +148,80 @@ def _cgols_wind_source(
     return source_term
 
 
+def _smooth_disk_profile(
+    cgols_wind_params: CGOLSWindParams,
+    config: SimulationConfig,
+    helper_data: HelperData,
+    with_velocity: bool = False,
+):
+    """Smooth-disk feedback profile, normalised to unit integral.
+
+    ``S = <Sigma(R)> <h(z)> / (sum(<Sigma> <h>) dx^3)`` about the box center,
+    with ``Sigma`` and ``h`` interpolated from the ``smooth_disk`` tables (zero
+    beyond their last knot, which makes the tables' cut-offs sharp) and
+    averaged over each cell on a ``4 x 4`` (x, y) and ``8`` (z) sub-grid: a
+    disk thinner than a cell (sigma_z = 50 pc is 1.3 dx at 256^3) then still
+    deposits its share in the right cells instead of hinging on where the
+    cell centres fall. The
+    limit of :func:`_cluster_injection_profile` for infinitely many clusters
+    drawn from ``Sigma`` and ``h``, and returned in the same form, so the
+    cluster source terms apply unchanged. As there, the cylindrical radius
+    is built from the replicated 1D axes by broadcasting.
+
+    With ``with_velocity`` the ejecta move on circular orbits,
+    ``v = v_c(R) (-y, x) / R`` from the ``circular_velocity`` table, and the
+    velocity moments ``(S, S v_x, S v_y, S |v|^2 / 2)`` are returned.
+    """
+
+    if config.dimensionality != 3:
+        raise ValueError("CGOLS smooth-disk feedback requires a 3D Cartesian grid.")
+
+    disk = cgols_wind_params.smooth_disk
+    dx = config.grid_spacing
+    x = helper_data.cell_centers_x - config.box_size.x / 2
+    y = helper_data.cell_centers_y - config.box_size.y / 2
+    z = helper_data.cell_centers_z - config.box_size.z / 2
+    radius = jnp.sqrt(x[:, None] ** 2 + y[None, :] ** 2)
+
+    # Cell averages on the sub-grid (offsets in units of dx about the centre).
+    sub_xy = (jnp.arange(4) + 0.5) / 4 - 0.5
+    sub_z = (jnp.arange(8) + 0.5) / 8 - 0.5
+    sub_x = x[:, None] + sub_xy[None, :] * dx
+    sub_y = y[:, None] + sub_xy[None, :] * dx
+    sub_radius = jnp.sqrt(
+        sub_x[:, None, :, None] ** 2 + sub_y[None, :, None, :] ** 2
+    )
+    surface = jnp.mean(
+        jnp.interp(sub_radius, disk.radii, disk.surface_density, right=0.0),
+        axis=(2, 3),
+    )
+    vertical = jnp.mean(
+        jnp.interp(
+            z[:, None] + sub_z[None, :] * dx,
+            disk.heights,
+            disk.vertical_profile,
+            left=0.0,
+            right=0.0,
+        ),
+        axis=1,
+    )
+    weights = surface[:, :, None] * vertical[None, None, :]
+    profile = weights / jnp.maximum(jnp.sum(weights) * dx**3, 1e-30)
+    if not with_velocity:
+        return profile
+
+    speed = jnp.interp(radius, disk.radii, disk.circular_velocity)
+    inverse_radius = 1.0 / jnp.maximum(radius, 1e-30)
+    velocity_x = -speed * y[None, :] * inverse_radius
+    velocity_y = speed * x[:, None] * inverse_radius
+    return (
+        profile,
+        profile * velocity_x[:, :, None],
+        profile * velocity_y[:, :, None],
+        profile * (0.5 * speed**2)[:, :, None],
+    )
+
+
 def _cluster_injection_profile(
     cgols_wind_params: CGOLSWindParams,
     current_time: Union[float, Float[Array, ""]],
@@ -155,7 +232,8 @@ def _cluster_injection_profile(
     """Spatial profile of the cluster feedback, normalised to unit integral.
 
     Returns ``S`` with ``sum(S) * dx^3 = 1`` whenever a cluster is alive, so a
-    total rate ``Mdot`` enters as the volumetric rate ``Mdot * S``.
+    total rate ``Mdot`` enters as the volumetric rate ``Mdot * S``. For the
+    ``SMOOTH_DISK`` geometry this is :func:`_smooth_disk_profile` instead.
 
     Each cluster contributes the edge-weighted sphere of the central path,
     ``w_k = clip((R_c + dx / 2 - |x - x_k|) / dx, 0, 1)``, centred on its
@@ -191,6 +269,11 @@ def _cluster_injection_profile(
         The injection profile on the (padded) grid of ``helper_data``, or the
         tuple ``(S, S v_x, S v_y, S |v|^2 / 2)`` with ``with_velocity``.
     """
+
+    if config.cgols_wind_config.injection_geometry == SMOOTH_DISK:
+        return _smooth_disk_profile(
+            cgols_wind_params, config, helper_data, with_velocity
+        )
 
     if config.dimensionality != 3:
         raise ValueError("CGOLS cluster feedback requires a 3D Cartesian grid.")
@@ -468,7 +551,7 @@ def cgols_wind_time_step_limit(
         cgols_wind_params.schedule_energy_rates,
     )
     dx = config.grid_spacing
-    if config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES:
+    if config.cgols_wind_config.injection_geometry in (CLUSTER_SPHERES, SMOOTH_DISK):
         # The same bound with the cluster profile in place of w / V: q peaks
         # in the densest gas of the most concentrated living cluster.
         profile = _cluster_injection_profile(

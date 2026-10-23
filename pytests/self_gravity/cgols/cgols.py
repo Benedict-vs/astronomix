@@ -16,7 +16,9 @@ collide). ``CGOLS_FEEDBACK=clusters`` replaces the central injection sphere by
 clustered feedback, model C (by default 16 co-rotating, staggered star-cluster
 complexes calibrated on M82; ``CGOLS_CLUSTER_PRESET=cholla`` gives CGOLS I's
 eight static, re-drawn clusters; see the CGOLS_CLUSTER_* knobs; tagged ``_C``
-adiabatic / ``_Ccool`` radiative).
+adiabatic / ``_Ccool`` radiative). ``CGOLS_FEEDBACK=smooth`` is model C's limit
+of infinitely many clusters: the same total rates spread smoothly over the
+clusters' radial and vertical distributions (tagged ``_Csmooth``).
 
 ``CGOLS_MHD=1`` is an experimental ideal-MHD variant beyond the paper: an
 observationally (M82) motivated toroidal disk field at constant plasma beta,
@@ -351,7 +353,9 @@ from astronomix._modules._cgols_wind.cgols_wind_options import (
     CLUSTER_OVERLAP_SUM,
     CLUSTER_OVERLAP_UNION,
     CLUSTER_SPHERES,
+    SMOOTH_DISK,
     CGOLSClusterParams,
+    CGOLSSmoothDiskParams,
     CGOLSWindConfig,
     CGOLSWindParams,
 )
@@ -659,10 +663,24 @@ INJ_RAD = 300 # pc
 # Resolution: model C needs CGOLS_DIM >= 256 (R = 119 pc is 1.5 dx at 128,
 # the cholla preset's 150 pc 1.9 dx); 128 is a smoke test. The edge weighting
 # keeps the injected totals exact at any resolution.
+#
+# CGOLS_FEEDBACK=smooth is the N -> infinity limit of the default model C at
+# fixed total injection volume (R = 300 pc / N^(1/3) -> 0, the cluster-number
+# sweep _C<dim>n<N>): the time-averaged injection of N clusters is the
+# distribution of their centres smoothed by one sphere, and the fluctuations
+# about it fall as 1 / sqrt(N). So the same total rates are injected into the
+# static axisymmetric profile Sigma(R) h(z) the centres are drawn from -
+# CGOLS_CLUSTER_RADIAL / RSCALE_PC / KS_INDEX / RMAX_PC and VERTICAL /
+# ZSCALE_PC / ZMAX_PC of the preset (by default exp(-R / 1.14 kpc) to 2 kpc
+# times a Gaussian sigma_z = 50 pc to 150 pc) - and the ejecta orbit with
+# v_c(R) (CGOLS_CLUSTER_MOMENTUM / COROTATE as for the clusters). Unlike any
+# finite N it has no hot, low-density bubbles: Edot is spread over the dense
+# inner disk (sigma_z = 50 pc is 1.3 dx at 256, 2.6 dx at 512).
 FEEDBACK = os.environ.get("CGOLS_FEEDBACK", "central")
-if FEEDBACK not in ("central", "clusters"):
-    raise ValueError(f"CGOLS_FEEDBACK must be 'central' or 'clusters', got {FEEDBACK!r}")
+if FEEDBACK not in ("central", "clusters", "smooth"):
+    raise ValueError(f"CGOLS_FEEDBACK must be 'central', 'clusters' or 'smooth', got {FEEDBACK!r}")
 CLUSTERS = FEEDBACK == "clusters"
+SMOOTH = FEEDBACK == "smooth"
 _CLUSTER_PHYSICAL = {
     "PLACEMENT": "random",
     "NUM": "16",
@@ -800,6 +818,16 @@ CLUSTER_COROTATE = _cluster_knob("COROTATE") == "1"
 # slots that is far noisier than M82's ~1e4 clusters).
 CLUSTER_MASS_FUNCTION = _cluster_knob("MASS_FUNCTION")
 CLUSTER_SEED = int(_cluster_knob("SEED"))
+if SMOOTH:
+    # A smooth profile needs a finite surface density at R = 0 and a finite
+    # vertical extent.
+    for _name, _value, _allowed in (
+        ("CGOLS_CLUSTER_RADIAL", CLUSTER_RADIAL, ("uniform_area", "exponential")),
+        ("CGOLS_CLUSTER_VERTICAL", CLUSTER_VERTICAL, ("uniform", "gaussian", "exponential")),
+        ("CGOLS_CLUSTER_MOMENTUM", CLUSTER_MOMENTUM, ("cluster", "scale", "rest")),
+    ):
+        if _value not in _allowed:
+            raise ValueError(f"{_name} must be one of {_allowed} for CGOLS_FEEDBACK=smooth, got {_value!r}")
 if CLUSTERS:
     for _name, _value, _allowed in (
         ("CGOLS_CLUSTER_PLACEMENT", CLUSTER_PLACEMENT, ("cholla", "random")),
@@ -1036,6 +1064,8 @@ CT_UPWIND = os.environ.get("CGOLS_CT_UPWIND", "1") == "1"
 # (radiative); the series runner tags them _C<dim> / _C<dim>cool.
 if CLUSTERS:
     _DEFAULT_RUN_TAG = "_Ccool" if COOLING else "_C"
+elif SMOOTH:
+    _DEFAULT_RUN_TAG = "_Csmoothcool" if COOLING else "_Csmooth"
 else:
     _DEFAULT_RUN_TAG = "_B" if COOLING else ""
 # CGOLS_X64=1 suffixes the DEFAULT tag with "_x64"; an explicit CGOLS_RUN_TAG
@@ -1352,6 +1382,53 @@ def build_cgols_cluster_params():
     return clusters
 
 
+def build_cgols_smooth_disk_params(num_knots=4001):
+    """The smooth-disk limit of model C (CGOLS_FEEDBACK=smooth), code units.
+
+    Tables of the surface density Sigma(R) and the vertical profile h(z) the
+    model-C cluster centres are drawn from (exponential: dN/dR ~ R exp(-R /
+    R_s), i.e. Sigma ~ exp(-R / R_s); uniform_area: Sigma constant), each up
+    to its cut-off, and of the circular velocity v_c(R) of the static
+    potential for co-rotating ejecta (zero with CGOLS_CLUSTER_COROTATE=0).
+    """
+    pc = (1 * u.pc).to(code_units.code_length).value
+    max_radius = CLUSTER_RMAX_PC * pc
+    max_height = CLUSTER_ZMAX_PC * pc
+    radii = np.linspace(0.0, max_radius, num_knots)
+    heights = np.linspace(-max_height, max_height, num_knots)
+
+    if CLUSTER_RADIAL == "exponential":
+        surface_density = np.exp(-radii / (cluster_radial_scale_pc() * pc))
+    else:
+        surface_density = np.ones_like(radii)
+    scale_height = CLUSTER_ZSCALE_PC * pc
+    if CLUSTER_VERTICAL == "gaussian":
+        vertical = np.exp(-0.5 * (heights / scale_height) ** 2)
+    elif CLUSTER_VERTICAL == "exponential":
+        vertical = np.exp(-np.abs(heights) / scale_height)
+    else:
+        vertical = np.ones_like(heights)
+    circular_velocity = np.array(
+        [circular_angular_velocity(R) * R if CLUSTER_COROTATE else 0.0 for R in radii]
+    )
+
+    rprint(
+        f"Model-C smooth-disk limit (preset {CLUSTER_PRESET}, momentum {CLUSTER_MOMENTUM}"
+        f"{', co-rotating' if CLUSTER_COROTATE else ''}): Sigma {CLUSTER_RADIAL}"
+        f"{f' (scale {cluster_radial_scale_pc():.4g} pc)' if CLUSTER_RADIAL == 'exponential' else ''}"
+        f" in R < {CLUSTER_RMAX_PC:.4g} pc, h(z) {CLUSTER_VERTICAL}"
+        f"{f' (scale {CLUSTER_ZSCALE_PC:.4g} pc)' if CLUSTER_VERTICAL != 'uniform' else ''}"
+        f" in |z| <= {CLUSTER_ZMAX_PC:.4g} pc"
+    )
+    return CGOLSSmoothDiskParams(
+        radii=jnp.asarray(radii),
+        surface_density=jnp.asarray(surface_density),
+        circular_velocity=jnp.asarray(circular_velocity),
+        heights=jnp.asarray(heights),
+        vertical_profile=jnp.asarray(vertical),
+    )
+
+
 def build_cgols_wind_params():
     mdot_to_code = lambda x: (x * u.M_sun / u.yr).to(
         code_units.code_mass / code_units.code_time
@@ -1375,6 +1452,8 @@ def build_cgols_wind_params():
     # path is built exactly as before (no clusters field), so A/B stay
     # bit-identical.
     cluster_kwargs = dict(clusters=build_cgols_cluster_params()) if CLUSTERS else {}
+    if SMOOTH:
+        cluster_kwargs = dict(smooth_disk=build_cgols_smooth_disk_params())
     return CGOLSWindParams(
         **cluster_kwargs,
         # The paper's 300 pc gain region.
@@ -1797,7 +1876,7 @@ def build_config():
             external_potential=True,
         ),
         donate_state=True,
-        # Model C (CGOLS_FEEDBACK=clusters) adds the cluster geometry; the
+        # Model C (CGOLS_FEEDBACK=clusters / smooth) adds its geometry; the
         # central A/B config is built exactly as before. CGOLS_WIND=0 switches
         # the feedback off (static check).
         cgols_wind_config=CGOLSWindConfig(
@@ -1805,7 +1884,7 @@ def build_config():
             timestep_limit=WIND_DT_LIMIT,
             **(
                 dict(
-                    injection_geometry=CLUSTER_SPHERES,
+                    injection_geometry=SMOOTH_DISK if SMOOTH else CLUSTER_SPHERES,
                     cluster_overlap=(
                         CLUSTER_OVERLAP_SUM
                         if CLUSTER_OVERLAP == "sum"
@@ -1817,7 +1896,7 @@ def build_config():
                         "cluster": CLUSTER_MOMENTUM_CLUSTER,
                     }[CLUSTER_MOMENTUM],
                 )
-                if CLUSTERS
+                if CLUSTERS or SMOOTH
                 else {}
             ),
         ),

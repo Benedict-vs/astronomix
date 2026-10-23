@@ -2,10 +2,11 @@
 Configuration and parameter containers for the CGOLS starburst feedback.
 
 Defines the integer tags that select the injection geometry (one central
-sphere, CGOLS models A/B, or a set of star-cluster spheres, CGOLS model C)
+sphere, CGOLS models A/B, a set of star-cluster spheres, CGOLS model C, or
+the smooth disk profile that model C tends to for infinitely many clusters)
 and the overlap treatment of the cluster spheres, together with the static
 :class:`CGOLSWindConfig` and the dynamic :class:`CGOLSWindParams` /
-:class:`CGOLSClusterParams`.
+:class:`CGOLSClusterParams` / :class:`CGOLSSmoothDiskParams`.
 """
 
 # typing
@@ -17,6 +18,9 @@ import jax.numpy as jnp
 # Injection-geometry tags.
 CENTRAL_SPHERE = 0  # one sphere at the box center (CGOLS models A and B)
 CLUSTER_SPHERES = 1  # several star-cluster spheres (CGOLS model C)
+#: A static axisymmetric profile Sigma(R) h(z) (the N -> infinity limit of the
+#: cluster spheres at fixed total volume, see CGOLSSmoothDiskParams).
+SMOOTH_DISK = 2
 
 # How overlapping cluster spheres share a cell.
 #: Every cluster injects exactly its own share of the total rate into its own
@@ -64,9 +68,10 @@ class CGOLSWindConfig(NamedTuple):
     #: region by orders of magnitude.
     timestep_limit: bool = False
 
-    #: ``CENTRAL_SPHERE`` (one sphere of ``injection_radius`` at the box center)
-    #: or ``CLUSTER_SPHERES`` (the spheres of ``cgols_wind_params.clusters``,
-    #: 3D Cartesian only).
+    #: ``CENTRAL_SPHERE`` (one sphere of ``injection_radius`` at the box center),
+    #: ``CLUSTER_SPHERES`` (the spheres of ``cgols_wind_params.clusters``) or
+    #: ``SMOOTH_DISK`` (the profile of ``cgols_wind_params.smooth_disk``); the
+    #: last two are 3D Cartesian only.
     injection_geometry: int = CENTRAL_SPHERE
 
     #: Overlap treatment of the cluster spheres, ``CLUSTER_OVERLAP_SUM`` or
@@ -74,8 +79,9 @@ class CGOLSWindConfig(NamedTuple):
     cluster_overlap: int = CLUSTER_OVERLAP_SUM
 
     #: Momentum of the injected mass, ``CLUSTER_MOMENTUM_SCALE``,
-    #: ``CLUSTER_MOMENTUM_REST`` or ``CLUSTER_MOMENTUM_CLUSTER``. Ignored for
-    #: the central sphere.
+    #: ``CLUSTER_MOMENTUM_REST`` or ``CLUSTER_MOMENTUM_CLUSTER`` (for the smooth
+    #: disk: the ejecta move with ``smooth_disk.circular_velocity``). Ignored
+    #: for the central sphere.
     cluster_momentum: int = CLUSTER_MOMENTUM_SCALE
 
 
@@ -130,6 +136,43 @@ class CGOLSClusterParams(NamedTuple):
     rate_fractions: jnp.ndarray = jnp.ones((1, 1))
 
 
+class CGOLSSmoothDiskParams(NamedTuple):
+    """Smooth axisymmetric feedback profile, all in code units.
+
+    The injection is distributed as ``Sigma(R) h(z)`` about the box center
+    (``R`` cylindrical radius, ``z`` height), both given as tables that are
+    linearly interpolated and zero outside their range; the profile is
+    renormalised on the grid, so its overall scale is irrelevant. The rates
+    of the schedule in :class:`CGOLSWindParams` enter as volumetric rates
+    ``Mdot S`` with ``sum(S) dx^3 = 1``.
+
+    This is the limit of the cluster spheres for N -> infinity at fixed total
+    volume (R_c = R_0 / N^(1/3) -> 0): the time-averaged cluster injection is
+    the distribution of the cluster centres smoothed by one sphere, and its
+    fluctuations about that mean fall as 1 / sqrt(N). Drawing the centres
+    from a surface density ``Sigma`` and a height distribution ``h`` thus
+    tends to exactly this profile. It is static: rotation leaves an
+    axisymmetric profile unchanged and only enters through the momentum of
+    the ejecta, ``v = v_c(R) phi_hat`` from the ``circular_velocity`` table.
+    """
+
+    #: Radius knots of ``surface_density`` and ``circular_velocity``.
+    radii: jnp.ndarray = jnp.array([0.0, 1.0])
+
+    #: Relative surface density of the injection at ``radii``.
+    surface_density: jnp.ndarray = jnp.array([0.0, 0.0])
+
+    #: Azimuthal velocity of the ejecta at ``radii`` (momentum mode
+    #: ``CLUSTER_MOMENTUM_CLUSTER``), code velocity.
+    circular_velocity: jnp.ndarray = jnp.array([0.0, 0.0])
+
+    #: Height knots of ``vertical_profile`` (signed, relative to the mid-plane).
+    heights: jnp.ndarray = jnp.array([-1.0, 1.0])
+
+    #: Relative vertical distribution of the injection at ``heights``.
+    vertical_profile: jnp.ndarray = jnp.array([0.0, 0.0])
+
+
 class CGOLSWindParams(NamedTuple):
     """Dynamic parameters of the CGOLS wind, all in code units.
 
@@ -155,3 +198,6 @@ class CGOLSWindParams(NamedTuple):
 
     #: The feedback clusters, cluster-sphere geometry only.
     clusters: CGOLSClusterParams = CGOLSClusterParams()
+
+    #: The smooth injection profile, smooth-disk geometry only.
+    smooth_disk: CGOLSSmoothDiskParams = CGOLSSmoothDiskParams()

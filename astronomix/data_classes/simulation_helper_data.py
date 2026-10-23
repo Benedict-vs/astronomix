@@ -31,6 +31,7 @@ from astronomix.option_classes.simulation_config import (
 from astronomix._modules._cgols_wind.cgols_wind_options import (
     CENTRAL_SPHERE,
     CLUSTER_SPHERES,
+    SMOOTH_DISK,
 )
 
 # astronomix containers
@@ -176,12 +177,13 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
     if config.frame_tracking:
         needs_cell_centers_z = True
 
-    # CGOLS cluster feedback (model C): the distance of every cell to every
-    # cluster is assembled from the three replicated 1D axes by broadcasting,
-    # which shards like an elementwise op and needs no 3D coordinate field.
-    if (
-        config.cgols_wind_config.cgols_wind
-        and config.cgols_wind_config.injection_geometry == CLUSTER_SPHERES
+    # CGOLS cluster feedback (model C) and its smooth-disk limit: the distance
+    # of every cell to every cluster (or the cylindrical radius and height) is
+    # assembled from the three replicated 1D axes by broadcasting, which
+    # shards like an elementwise op and needs no 3D coordinate field.
+    if config.cgols_wind_config.cgols_wind and config.cgols_wind_config.injection_geometry in (
+        CLUSTER_SPHERES,
+        SMOOTH_DISK,
     ):
         needs_cell_centers_x = True
         needs_cell_centers_y = True

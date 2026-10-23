@@ -15,9 +15,19 @@ random padded state at several times across the schedule, checking that
   - no other variable receives a source;
   - the wind-onset dt limit is finite while the source is on (+inf before).
 
+The "smooth ..." sets (CGOLS_FEEDBACK=smooth, model C's N -> infinity limit)
+instead compare every cell's mass, momentum and energy source with an
+independent numpy evaluation of Sigma(R) h(z) and v_c(R), and check by
+sampling that the tables are the distributions the cluster centres are drawn
+from (Kolmogorov-Smirnov distance of 2e5 draws).
+
 Usage:
     JAX_PLATFORMS=cpu python cgols_model_c_check.py           # all option sets
     JAX_PLATFORMS=cpu python cgols_model_c_check.py --child   # current env only
+    MODEL_C_CHECK_ONLY=smooth python cgols_model_c_check.py   # sets whose label matches
+
+cgols.py calls autocvd, which waits for a free GPU even on the CPU: put a no-op
+autocvd module first on PYTHONPATH when the GPUs are busy.
 """
 
 import os
@@ -69,6 +79,17 @@ OPTION_SETS = {
     "cluster + union": {"CGOLS_CLUSTER_OVERLAP": "union"},
     "cholla + cluster": {"CGOLS_CLUSTER_PRESET": "cholla", "CGOLS_CLUSTER_MOMENTUM": "cluster", "CGOLS_CLUSTER_COROTATE": "1"},
     "cluster + power law": {"CGOLS_CLUSTER_MASS_FUNCTION": "power_law"},
+    "smooth (default)": {"CGOLS_FEEDBACK": "smooth"},
+    "smooth, static": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_COROTATE": "0"},
+    "smooth, scale": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_MOMENTUM": "scale"},
+    "smooth, rest": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_MOMENTUM": "rest"},
+    "smooth m82": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_PRESET": "m82"},
+    "smooth area, exp z": {
+        "CGOLS_FEEDBACK": "smooth",
+        "CGOLS_CLUSTER_RADIAL": "uniform_area",
+        "CGOLS_CLUSTER_VERTICAL": "exponential",
+    },
+    "smooth uniform z": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_VERTICAL": "uniform"},
 }
 
 
@@ -129,6 +150,30 @@ def child():
     dt = 1e-4
     myr = (1 * cgols.u.Myr).to(cgols.code_units.code_time).value
     worst = 0.0
+    if cgols.SMOOTH:
+        worst = _check_smooth_tables(cgols, wind_params.smooth_disk)
+        disk = wind_params.smooth_disk
+        x = np.asarray(helper_data.cell_centers_x, np.float64) - config.box_size.x / 2
+        y = np.asarray(helper_data.cell_centers_y, np.float64) - config.box_size.y / 2
+        z = np.asarray(helper_data.cell_centers_z, np.float64) - config.box_size.z / 2
+        X, Y, Z = np.meshgrid(x, y, z, indexing="ij")
+        R = np.hypot(X, Y)
+        knots = np.asarray(disk.radii, np.float64)
+        hk = np.asarray(disk.heights, np.float64)
+        # Cell averages over a 4 x 4 x 8 sub-grid, written out point by point.
+        weight = np.zeros_like(R)
+        for ox in (np.arange(4) + 0.5) / 4 - 0.5:
+            for oy in (np.arange(4) + 0.5) / 4 - 0.5:
+                Rs = np.hypot(X[:, :, :1] + ox * dx, Y[:, :, :1] + oy * dx)
+                sigma = np.where(Rs <= knots[-1], np.interp(Rs, knots, np.asarray(disk.surface_density)), 0.0)
+                for oz in (np.arange(8) + 0.5) / 8 - 0.5:
+                    Zs = Z[:1, :1, :] + oz * dx
+                    h = np.where(np.abs(Zs) <= hk[-1], np.interp(Zs, hk, np.asarray(disk.vertical_profile)), 0.0)
+                    weight += sigma * h / 128
+        smooth_profile = weight / (weight.sum() * dx**3)
+        v_c = np.interp(R, knots, np.asarray(disk.circular_velocity))
+        smooth_vx = -v_c * Y / np.maximum(R, 1e-30)
+        smooth_vy = v_c * X / np.maximum(R, 1e-30)
     for t_myr in (4.0, 5.0, 7.3, 21.0, 37.0, 52.0, 70.0):
         t = t_myr * myr
         source = _cgols_wind_source(wind_params, state, dt, t, config, helper_data, rv)
@@ -137,7 +182,26 @@ def child():
         dm = np.sum(np.asarray(source[rv.density_index], np.float64)) * dx**3
         de = np.sum(np.asarray(source[rv.energy_index], np.float64)) * dx**3
         rel_m = abs(dm / (mdot * dt) - 1) if mdot > 0 else abs(dm)
-        if cgols.CLUSTER_MOMENTUM == "cluster" and cgols.CLUSTER_OVERLAP == "union":
+        if cgols.SMOOTH:
+            # Cell by cell against the numpy profile, relative to its peak.
+            src = {k: np.asarray(source[k], np.float64) for k in range(rv.num_vars)}
+            peak = max(mdot * dt * smooth_profile.max(), 1e-300)
+            rel_m = max(rel_m, float(np.max(np.abs(src[rv.density_index] - mdot * dt * smooth_profile))) / peak)
+            if cgols.CLUSTER_MOMENTUM == "cluster":
+                v_scale = max(np.max(np.abs(v_c)), 1.0)  # code velocity, 100 km/s
+                dke = max(
+                    float(np.max(np.abs(src[rv.momentum_index.x] - mdot * dt * smooth_profile * smooth_vx))),
+                    float(np.max(np.abs(src[rv.momentum_index.y] - mdot * dt * smooth_profile * smooth_vy))),
+                    float(np.max(np.abs(src[rv.momentum_index.z]))),
+                ) / (peak * v_scale)
+                expected = edot * dt * smooth_profile + mdot * dt * smooth_profile * 0.5 * v_c**2
+                rel_e = float(np.max(np.abs(src[rv.energy_index] - expected))) / max(expected.max(), 1e-300)
+                print(f"    <v_c^2/2>_S / (Edot/Mdot) = {np.sum(smooth_profile * 0.5 * v_c**2) * dx**3 * mdot / max(edot, 1e-30):.2e}")
+            else:
+                expected = edot * dt * smooth_profile
+                rel_e = abs(de / (edot * dt) - 1) if edot > 0 else abs(de)
+                rel_e = max(rel_e, float(np.max(np.abs(src[rv.energy_index] - expected))) / max(expected.max(), 1e-300))
+        elif cgols.CLUSTER_MOMENTUM == "cluster" and cgols.CLUSTER_OVERLAP == "union":
             # One union region with the weight-averaged velocity per cell: the
             # energy is Edot dt plus the kinetic energy of the injected
             # momentum, cell by cell, and the momentum direction is that of
@@ -202,9 +266,49 @@ def child():
     print(f"RESULT worst {worst:.2e} {'PASS' if worst < 1e-5 else 'FAIL'}")
 
 
+def _check_smooth_tables(cgols, disk, num_draws=200_000):
+    """KS distance between the smooth tables and the cluster-centre draws."""
+    import numpy as np
+    from astronomix._modules._cgols_wind.cluster_placement import (
+        ClusterPlacementSettings,
+        _draw_height,
+        _draw_radius,
+    )
+
+    pc = (1 * cgols.u.pc).to(cgols.code_units.code_length).value
+    settings = ClusterPlacementSettings(
+        radial_profile=cgols.CLUSTER_RADIAL,
+        radial_scale_length=cgols.cluster_radial_scale_pc() * pc,
+        max_radius=cgols.CLUSTER_RMAX_PC * pc,
+        vertical_profile=cgols.CLUSTER_VERTICAL,
+        vertical_scale_height=cgols.CLUSTER_ZSCALE_PC * pc,
+        max_height=cgols.CLUSTER_ZMAX_PC * pc,
+    )
+    rng = np.random.default_rng(1)
+    radii = np.sort([_draw_radius(rng, settings) for _ in range(num_draws)])
+    heights = np.sort([_draw_height(rng, settings) for _ in range(num_draws)])
+
+    def ks(samples, knots, density):
+        # density per unit of the sampled coordinate -> CDF on the knots
+        cdf = np.concatenate([[0.0], np.cumsum(0.5 * (density[1:] + density[:-1]) * np.diff(knots))])
+        cdf /= cdf[-1]
+        empirical = np.arange(1, len(samples) + 1) / len(samples)
+        return float(np.max(np.abs(np.interp(samples, knots, cdf) - empirical)))
+
+    knots = np.asarray(disk.radii, np.float64)
+    d_r = ks(radii, knots, knots * np.asarray(disk.surface_density, np.float64))  # dN/dR = 2 pi R Sigma
+    d_z = ks(heights, np.asarray(disk.heights, np.float64), np.asarray(disk.vertical_profile, np.float64))
+    # 99.9% KS critical value for n = 2e5 is ~1.95 / sqrt(n) = 4.4e-3.
+    print(f"    KS distance tables vs cluster draws: R {d_r:.1e}, z {d_z:.1e}")
+    return 0.0 if max(d_r, d_z) < 1.95 / np.sqrt(num_draws) else 1.0
+
+
 def main():
     failures = []
+    only = os.environ.get("MODEL_C_CHECK_ONLY", "")
     for label, env in OPTION_SETS.items():
+        if only and only not in label:
+            continue
         child_env = dict(
             os.environ,
             JAX_PLATFORMS="cpu",
@@ -212,8 +316,8 @@ def main():
             CGOLS_DIM="64",
             CGOLS_SHARD_SPLIT="(1, 1, 1, 1)",
             CGOLS_RUN_TAG="_model_c_check",
-            **env,
         )
+        child_env.update(env)
         result = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--child"],
             env=child_env, capture_output=True, text=True,
