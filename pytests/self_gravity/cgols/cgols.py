@@ -15,8 +15,8 @@ at the end of this file (outputs are tagged ``_B`` so the two series never
 collide). ``CGOLS_FEEDBACK=clusters`` replaces the central injection sphere by
 clustered feedback, model C (by default 16 co-rotating, staggered star-cluster
 complexes calibrated on M82; ``CGOLS_CLUSTER_PRESET=cholla`` gives CGOLS I's
-eight static, re-drawn clusters; see the CGOLS_CLUSTER_* knobs; tagged ``_Cad``
-adiabatic / ``_C`` radiative).
+eight static, re-drawn clusters; see the CGOLS_CLUSTER_* knobs; tagged ``_C``
+adiabatic / ``_Ccool`` radiative).
 
 ``CGOLS_MHD=1`` is an experimental ideal-MHD variant beyond the paper: an
 observationally (M82) motivated toroidal disk field at constant plasma beta,
@@ -1032,10 +1032,10 @@ CT_UPWIND = os.environ.get("CGOLS_CT_UPWIND", "1") == "1"
 # state .npy) so several experiment runs can coexist without clobbering each
 # other or the production outputs. Defaults to "_B" for a radiative run, so the
 # A- and B-series never share snapshot / checkpoint / log / figure filenames.
-# Clustered feedback defaults to "_C" (radiative, the paper's model C) or
-# "_Cad" (adiabatic); the series runner tags them _C<dim> / _C<dim>ad.
+# Clustered feedback defaults to "_C" (adiabatic, like A) or "_Ccool"
+# (radiative); the series runner tags them _C<dim> / _C<dim>cool.
 if CLUSTERS:
-    _DEFAULT_RUN_TAG = "_C" if COOLING else "_Cad"
+    _DEFAULT_RUN_TAG = "_Ccool" if COOLING else "_C"
 else:
     _DEFAULT_RUN_TAG = "_B" if COOLING else ""
 # CGOLS_X64=1 suffixes the DEFAULT tag with "_x64"; an explicit CGOLS_RUN_TAG
