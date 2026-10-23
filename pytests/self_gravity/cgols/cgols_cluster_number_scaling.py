@@ -4,9 +4,9 @@ Reads the frames' ``mdot_z`` of the cluster-number sweep and plots, against N:
 the net outflow through |z| = 1, 5, 8 kpc (mean over the high state 15-40 Myr,
 and the peak) and the cumulative mass through |z| = 5 kpc at 75 Myr, for
 
-  S1  fixed total injection volume, R = 300 pc / N^(1/3)   (_C256adn<N>, N=16: _C256ad)
-  S2  fixed cluster radius R = 119 pc                      (_C256adR119n<N>)
-  S3  other random draws at N = 16 / 64                    (_C256ads2/s3, _C256adn64s2/s3)
+  S1  fixed total injection volume, R = 300 pc / N^(1/3)   (_C256n<N>, N=16: _C256)
+  S2  fixed cluster radius R = 119 pc                      (_C256R119n<N>)
+  S3  other random draws at N = 16 / 64                    (_C256s2/s3, _C256n64s2/s3)
 
 with the central-injection model A256 as reference and a log2(N) fit to S1.
 Runs below R = 3 dx (N >= 32 in S1 at 256^3) are marked.
@@ -24,18 +24,21 @@ FIG_DIR = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
 BOX_Z = 20.0  # kpc
 DX_PC = 10_000.0 / 256  # 256^3 cell size, pc
 
-S1 = {1: "C256adn1", 2: "C256adn2", 4: "C256adn4", 8: "C256adn8", 16: "C256ad",
-      32: "C256adn32", 64: "C256adn64", 128: "C256adn128"}
-S2 = {1: "C256adR119n1", 2: "C256adR119n2", 4: "C256adR119n4", 8: "C256adR119n8",
-      16: "C256ad", 32: "C256adR119n32", 64: "C256adR119n64"}
-SEEDS = {16: ("C256ad", "C256ads2", "C256ads3"), 64: ("C256adn64", "C256adn64s2", "C256adn64s3")}
+S1 = {1: "C256n1", 2: "C256n2", 4: "C256n4", 8: "C256n8", 16: "C256",
+      32: "C256n32", 64: "C256n64", 128: "C256n128"}
+S2 = {1: "C256R119n1", 2: "C256R119n2", 4: "C256R119n4", 8: "C256R119n8",
+      16: "C256", 32: "C256R119n32", 64: "C256R119n64"}
+SEEDS = {16: ("C256", "C256s2", "C256s3"), 64: ("C256n64", "C256n64s2", "C256n64s3")}
 REFERENCE = "A256"
 
 
 def load(run):
     """Times [Myr] and mdot_z [Msun/yr] (frames x z-planes) of a run, or None."""
-    frame_dir = os.path.join(SCRIPT_DIR, f"cgols_snapshots_{run}")
-    if not os.path.isdir(frame_dir):
+    candidates = [os.path.join(SCRIPT_DIR, f"cgols_snapshots_{run}")] + [
+        os.path.join(SCRIPT_DIR, f"cgols_snapshots_{group}", run) for group in ("Nsweep", "variants")
+    ]
+    frame_dir = next((d for d in candidates if os.path.isdir(d)), None)
+    if frame_dir is None:
         return None
     files = sorted(f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".npz"))
     frames = [np.load(os.path.join(frame_dir, f)) for f in files]

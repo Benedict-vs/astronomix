@@ -19,7 +19,7 @@ rate through each height, cumulative mass).
 Usage:
     python cgols_model_c_compare.py LABEL=SNAPSHOT_DIR [LABEL=SNAPSHOT_DIR ...]
     CGOLS_COMPARE_SUFFIX=_256 python cgols_model_c_compare.py \\
-        C256ad=cgols_snapshots_C256ad A256=/path/to/cgols_snapshots_A256
+        C256=cgols_snapshots_C256 A256=/path/to/cgols_snapshots_A256
 
 A run is clustered if its snapshot dir holds the clusters.npz cgols.py writes.
 """

@@ -7,15 +7,15 @@
 #   nohup ./run_series_local.sh > cgols_logs/series_local.log 2>&1 &            # A: 128 256 512
 #   CGOLS_SERIES=B nohup ./run_series_local.sh > cgols_logs/series_local_B.log 2>&1 &
 #   nohup ./run_series_local.sh 512 > cgols_logs/series_local.log 2>&1 &        # one size
-#   CGOLS_SERIES=Cad nohup ./run_series_local.sh 128 256 > cgols_logs/series_local_Cad.log 2>&1 &
+#   CGOLS_SERIES=C nohup ./run_series_local.sh 256 512 > cgols_logs/series_local_C.log 2>&1 &
 #
 # A = adiabatic (the paper's A-series). B = radiative: cooling on with the
 # settings of the B-512 runs (run_bseries_local.sh), the 10% cooling-dt rule
 # off. C = the clustered feedback of model C (CGOLS_FEEDBACK=clusters, the
 # physical default of cgols.py; CGOLS_CLUSTER_PRESET=cholla for CGOLS I's
-# clusters) with B's cooling; Cad = the same clusters adiabatic, tagged
-# _C<dim>ad so the eventual radiative _C<dim> production runs keep their
-# names. All use cgols.py's positivity-preserving WENO + dual energy. Model C
+# clusters), adiabatic like A: tagged _C<dim>, like _A<dim> / _B<dim>. Ccool =
+# the same clusters with B's cooling, tagged _C<dim>cool (B's cooling is
+# parked until the new cooling method). All use cgols.py's positivity-preserving WENO + dual energy. Model C
 # needs CGOLS_DIM >= 256 to resolve its 119 pc complexes (3.0 cells; the
 # cholla preset's 150 pc: 3.8); 128 is a smoke test.
 #
@@ -33,16 +33,16 @@ SERIES="${CGOLS_SERIES:-A}"
 case "$SERIES" in
     A) ;;
     B) export CGOLS_COOLING=1 CGOLS_COOLING_DT_LIMIT=0 CGOLS_COOLING_SUBCYCLES=32 ;;
-    C) export CGOLS_FEEDBACK=clusters \
+    C) export CGOLS_FEEDBACK=clusters CGOLS_COOLING=0 ;;
+    Ccool) export CGOLS_FEEDBACK=clusters \
            CGOLS_COOLING=1 CGOLS_COOLING_DT_LIMIT=0 CGOLS_COOLING_SUBCYCLES=32 ;;
-    Cad) export CGOLS_FEEDBACK=clusters CGOLS_COOLING=0 ;;
-    *) echo "CGOLS_SERIES must be A, B, C or Cad, got '$SERIES'" >&2; exit 1 ;;
+    *) echo "CGOLS_SERIES must be A, B, C or Ccool, got '$SERIES'" >&2; exit 1 ;;
 esac
 
 for dim in "${@:-128 256 512}"; do
     for d in $dim; do
-        # _<series><dim>, except Cad -> _C<dim>ad.
-        if [ "$SERIES" = Cad ]; then tag="_C${d}ad"; else tag="_${SERIES}${d}"; fi
+        # _<series><dim>, except Ccool -> _C<dim>cool.
+        if [ "$SERIES" = Ccool ]; then tag="_C${d}cool"; else tag="_${SERIES}${d}"; fi
         log="cgols_logs/run${tag}_console.log"
         echo "$(date -Is) ${SERIES}-${d}: start -> $log"
         CGOLS_DIM="$d" CGOLS_RUN_TAG="$tag" CGOLS_IC_MODE=insitu \
