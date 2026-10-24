@@ -57,6 +57,8 @@ def load(run):
     files = sorted(f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".npz"))
     frames = [np.load(os.path.join(frame_dir, f)) for f in files]
     t = np.array([float(fr["time_myr"]) for fr in frames])
+    if t.max() < 74.0:  # still running (or crashed): not a complete run
+        return None
     order = np.argsort(t)
     return t[order], np.stack([fr["mdot_z"] for fr in frames])[order]
 
