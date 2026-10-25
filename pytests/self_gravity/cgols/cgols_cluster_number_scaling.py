@@ -10,7 +10,10 @@ and the peak) and the cumulative mass through |z| = 5 kpc at 75 Myr, for
 
 with the central-injection model A256 as reference and a log2(N) fit to S1.
 At 512^3 only S1 exists (_C512n<N>, N=16: _C512, reference A512); the 256^3 S1
-means are overlaid for the resolution comparison. Runs not (yet) on disk are
+means are overlaid for the resolution comparison. The smooth-disk limit of model
+C (CGOLS_FEEDBACK=smooth, _Csmooth<dim>) is drawn as N = infinity, and a third
+panel shows the cumulative mass through |z| = 5 kpc at 75 Myr, which unlike the
+15-40 Myr mean also captures the smooth limit's burst-like disk ejection. Runs not (yet) on disk are
 skipped, so the figure can be redrawn while the sweep is still running.
 
     python cgols_cluster_number_scaling.py        # 256^3
@@ -35,14 +38,16 @@ SERIES = {
         "S2": {1: "C256R119n1", 2: "C256R119n2", 4: "C256R119n4", 8: "C256R119n8",
                16: "C256", 32: "C256R119n32", 64: "C256R119n64"},
         "SEEDS": {16: ("C256", "C256s2", "C256s3"), 64: ("C256n64", "C256n64s2", "C256n64s3")},
+        "SMOOTH": "Csmooth256",
     },
     512: {
         "S1": {1: "C512n1", 4: "C512n4", 16: "C512", 64: "C512n64", 128: "C512n128"},
         "S2": {},
         "SEEDS": {},
+        "SMOOTH": "Csmooth512",
     },
 }
-S1, S2, SEEDS = (SERIES[DIM][k] for k in ("S1", "S2", "SEEDS"))
+S1, S2, SEEDS, SMOOTH = (SERIES[DIM][k] for k in ("S1", "S2", "SEEDS", "SMOOTH"))
 REFERENCE = f"A{DIM}"
 
 
@@ -91,11 +96,13 @@ def main():
     fixed_volume = {n: metrics(r) for n, r in S1.items()}
     fixed_radius = {n: metrics(r) for n, r in S2.items()}
     lower = {n: metrics(r) for n, r in SERIES[256]["S1"].items()} if DIM != 256 else {}
+    smooth = metrics(SMOOTH)
+    lower_smooth = metrics(SERIES[256]["SMOOTH"]) if DIM != 256 else None
     ref = metrics(REFERENCE)
     seeds = {n: [m for m in (metrics(r) for r in runs) if m is not None] for n, runs in SEEDS.items()}
 
-    figure = plt.figure(figsize=(15, 5.2))
-    grid = figure.add_gridspec(1, 2, width_ratios=[1.25, 1.0])
+    figure = plt.figure(figsize=(21, 5.2))
+    grid = figure.add_gridspec(1, 3, width_ratios=[1.25, 1.0, 1.0])
 
     # Left: outflow through |z| = 5 kpc against time, one line per number of regions.
     axis = figure.add_subplot(grid[0])
@@ -118,7 +125,12 @@ def main():
              title="Outflow over time for N injection regions")
     axis.legend(fontsize=7.5, ncol=2, loc="upper right")
 
-    # Right: time-averaged outflow (15-40 Myr) against N, at three heights.
+    # The smooth-disk limit sits at a nominal x = 2 N_max, labelled infinity.
+    n_inf = 2 * max(S1)
+    ticks = [2**k for k in range(int(np.log2(n_inf)))] + [n_inf]
+    tick_labels = [f"$2^{{{k}}}$" for k in range(int(np.log2(n_inf)))] + [r"$\infty$"]
+
+    # Middle: time-averaged outflow (15-40 Myr) against N, at three heights.
     axis = figure.add_subplot(grid[1])
     for height, color in ((1.0, "C1"), (5.0, "C3"), (8.0, "C0")):
         n = np.array(ns)
@@ -138,15 +150,46 @@ def main():
                           label="spread of 3 random cluster draws" if (height == 1.0 and k == 16) else None)
         if ref is not None:
             axis.axhline(ref[height][0], color=color, ls="--", lw=0.9, alpha=0.7)
+        if smooth is not None:
+            axis.plot(n_inf, smooth[height][0], "*", color=color, ms=13, mec="k", mew=0.6,
+                      label="smooth limit (N = $\\infty$)" if height == 1.0 else None)
     if len(ns) >= 2:
         fit = np.polyfit(np.log2(ns), [fixed_volume[k][5.0][0] for k in ns], 1)
-        axis.text(0.98, 0.03, f"|z| = 5 kpc: {fit[1]:.1f} + {fit[0]:.1f} log$_2$N $M_\\odot$/yr\ndashed: model A",
+        axis.text(0.86, 0.03, f"|z| = 5 kpc: {fit[1]:.1f} + {fit[0]:.1f} log$_2$N $M_\\odot$/yr\ndashed: model A",
                   transform=axis.transAxes, ha="right", fontsize=8)
     axis.set_xscale("log", base=2)
+    axis.set_xticks(ticks, tick_labels)
     axis.set(xlabel="number of injection regions N", ylabel=r"mean outflow 15–40 Myr [$M_\odot$/yr]",
              title="Time-averaged outflow vs N")
     axis.grid(alpha=0.3)
     axis.legend(fontsize=7.5, loc="upper left")
+
+    # Right: cumulative mass through |z| = 5 kpc at 75 Myr against N.
+    axis = figure.add_subplot(grid[2])
+    axis.plot(ns, [fixed_volume[k]["cumulative"] / 1e8 for k in ns], "o-", color="C3", label=f"{DIM}$^3$")
+    nr = [k for k in S2 if fixed_radius[k] is not None]
+    if nr:
+        axis.plot(nr, [fixed_radius[k]["cumulative"] / 1e8 for k in nr], "s", mfc="none", color="C3", ms=7,
+                  alpha=0.7, label="fixed radius 119 pc")
+    for k, runs in seeds.items():
+        values = [m["cumulative"] / 1e8 for m in runs]
+        axis.errorbar(k, np.mean(values), yerr=np.std(values, ddof=1), fmt="none", ecolor="k", capsize=4)
+    nl = [k for k in lower if lower[k] is not None]
+    if nl:
+        axis.plot(nl, [lower[k]["cumulative"] / 1e8 for k in nl], ".:", color="C3", alpha=0.45, label="256$^3$")
+    if smooth is not None:
+        axis.plot(n_inf, smooth["cumulative"] / 1e8, "*", color="C3", ms=13, mec="k", mew=0.6,
+                  label="smooth limit")
+    if lower_smooth is not None:
+        axis.plot(n_inf, lower_smooth["cumulative"] / 1e8, "*", color="C3", ms=10, alpha=0.45)
+    if ref is not None:
+        axis.axhline(ref["cumulative"] / 1e8, color="0.25", ls="--", lw=1, label="model A")
+    axis.set_xscale("log", base=2)
+    axis.set_xticks(ticks, tick_labels)
+    axis.set(xlabel="number of injection regions N", ylabel=r"$M_\mathrm{out}$(75 Myr) through |z| = 5 kpc [$10^8 M_\odot$]",
+             title="Cumulative outflow vs N", ylim=(0, None))
+    axis.grid(alpha=0.3)
+    axis.legend(fontsize=7.5, loc="lower right")
 
     figure.suptitle(f"Model C, adiabatic, {DIM}$^3$: same total injected mass, energy and volume, split into N regions")
     figure.tight_layout()
@@ -159,6 +202,8 @@ def main():
     for n in ns:
         m = fixed_volume[n]
         print(f"{n:>4} {300 / n ** (1 / 3):7.0f} {m[5.0][0]:7.2f} {m[1.0][0]:7.2f} {m[8.0][0]:7.2f} {m['cumulative'] / 1e8:14.2f}")
+    if smooth:
+        print(f"   ∞ {'-':>7} {smooth[5.0][0]:7.2f} {smooth[1.0][0]:7.2f} {smooth[8.0][0]:7.2f} {smooth['cumulative'] / 1e8:14.2f}")
     if ref:
         print(f"   A {'300':>7} {ref[5.0][0]:7.2f} {ref[1.0][0]:7.2f} {ref[8.0][0]:7.2f} {ref['cumulative'] / 1e8:14.2f}")
 
