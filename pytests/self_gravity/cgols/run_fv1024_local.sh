@@ -7,6 +7,8 @@
 #
 #   bash run_fv1024_local.sh start      # fill the queue, start gather detached
 #   bash run_fv1024_local.sh final      # (called by gather on the 4 cards)
+#   bash run_fv1024_local.sh refill     # (called by gather when the queue runs
+#                                       #  dry: next FD/FV 128^3 seed pair)
 #
 # Queue state and logs: $GDIR (gather.log, logs/<job>.log, logs/final.log).
 # Seed runs land as cgols_snapshots_<tag> / cgols_logs/cgols_diag_<tag>.log
@@ -36,8 +38,16 @@ start)
   n=900; for s in $SEEDS; do job $((n+1))_A128fvs$s fv 128 $s; job $((n+2))_A128s$s fd 128 $s; n=$((n+2)); done
   ls "$GDIR/pending"
   GDIR=$GDIR NEED=4 FINAL="$C/run_fv1024_local.sh" FINAL_ARG=final DEADLINE="2026-11-02 12:00" \
+    REFILL="$C/run_fv1024_local.sh" REFILL_ARG=refill \
     setsid nohup bash "$C/gpuq/gather.sh" > /dev/null 2>&1 < /dev/null &
   echo "gather started (pid $!), log $GDIR/gather.log"
+  ;;
+refill)
+  # next unused 128^3 seed (short "9*" jobs, still useful for the scatter)
+  s=$(ls "$GDIR"/{pending,running,done,failed} 2>/dev/null | sed -n 's/^9[0-9]*_A128s\([0-9]*\)\.sh$/\1/p' | sort -n | tail -1)
+  s=$(( ${s:-0} + 1 ))
+  job "$(printf 9%04d $((2*s - 1)))_A128fvs$s" fv 128 $s; job "$(printf 9%04d $((2*s)))_A128s$s" fd 128 $s
+  echo "$(date -Is) refill: seed $s"
   ;;
 final)
   SSH=(ssh -o ControlPath=$HOME/.ssh/cm-horeka -o BatchMode=yes -o ConnectTimeout=20 hd_ah321@hk2-x86.scc.kit.edu)

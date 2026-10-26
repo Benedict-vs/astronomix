@@ -32,6 +32,10 @@
 # While $GDIR/NO_FINAL exists the FINAL launch is on hold: the cards only run
 # fillers (and are released when the queue runs dry). Remove it to arm FINAL.
 #
+#   REFILL     optional script (+ REFILL_ARG): while FINAL is armed and fewer
+#              than NEED cards are held, a worker that finds the queue empty
+#              runs it to add more fillers instead of releasing its card
+#
 # Filler jobs must not select a GPU themselves (autocvd would wait on our own
 # card): put gpuq/autocvd_shim first on PYTHONPATH.
 HERE=$(dirname "$(readlink -f "$0")")
@@ -48,6 +52,15 @@ worker(){   # $1 = card; runs fillers until the queue is empty or STOP is set
   while true; do
     [ -e "$GDIR/STOP" ] && return 0
     job=$(ls "$GDIR/pending" 2>/dev/null | sort | head -1)
+    if [ -z "$job" ] && [ -n "${REFILL:-}" ] && [ ! -e "$GDIR/NO_FINAL" ]; then
+      if mkdir "$GDIR/refill.lock" 2>/dev/null; then   # one worker refills at a time
+        bash "$REFILL" ${REFILL_ARG:-} >> "$GDIR/logs/refill.log" 2>&1
+        rmdir "$GDIR/refill.lock"; log "GPU $g queue empty -> refilled: $(ls "$GDIR/pending" | paste -sd' ')"
+      else
+        sleep 2
+      fi
+      continue
+    fi
     [ -z "$job" ] && return 0
     mv "$GDIR/pending/$job" "$GDIR/running/$job" 2>/dev/null || continue
     log "GPU $g start $job"
