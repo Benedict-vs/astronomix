@@ -15,6 +15,18 @@ tile by tile, like cgols_emission.py, and measures per snapshot
   phases   the mass-weighted (log n, log T) histogram of |z| > 1 kpc;
   axis     mass-weighted n, T, v_out against z inside R < 0.3 kpc, for the
            comparison with the Chevalier & Clegg (1985) free wind;
+  entropy  the fluxes and masses again split by the entropy K = T / n^(2/3)
+           [K cm^2], which adiabatic gas keeps except at shocks and in mixing,
+           so it labels the gas by origin: log K < 5.5 entrained disk gas,
+           5.5-6.8 mixed (wind-disk mixing layers), 6.8-7.9 wind (injected at
+           ~7.1, raised at shocks), > 7.9 unmixed initial halo (8.24);
+  geometry per height z the plane area and mass in every entropy bin and in
+           every temperature phase, and the area of fast outflowing gas
+           (v_out > FAST_WIND_KMS, the free-wind cone; the swept-up halo
+           shares the wind's entropy, so entropy cannot outline the cone):
+           the cone radius sqrt(A_fast / pi), its opening angle and the
+           radial width of the mixed gas A_mixed / (2 pi R_cone) (kpc-wide:
+           the disk-halo interface, not a thin layer on the cone wall);
 
 and caches them in data/studies/convergence3d<tag>.npz (resumable). With
 --plot it compares cached runs (figures/cgols/comparisons/
@@ -65,6 +77,9 @@ CODE_MASS_MSUN = float((1 * CODE_UNITS.code_mass).to(u.M_sun).value)
 CONVERSIONS = emission_conversions(CODE_UNITS)
 
 HEIGHTS_KPC = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0])
+ENTROPY_EDGES = (5.5, 6.8, 7.9)  # log10 K [K cm^2]
+ENTROPY_BINS = ("entrained", "mixed", "wind", "halo")
+FAST_WIND_KMS = 600.0  # ~half the free-wind speed (~1150 km/s)
 PHASE_EDGES_K = (3e4, 5e5)  # cold | warm | hot
 PHASES = ("cold", "warm", "hot")
 RADIUS_EDGES_KPC = (0.5, 1.0, 2.0)  # R < 0.5 | 0.5-1 | 1-2 | > 2
@@ -107,7 +122,18 @@ def measure_checkpoint(step_directory):
     planes = [(np.argmin(np.abs(z - h)), np.argmin(np.abs(z + h))) for h in HEIGHTS_KPC]
     num_h, num_p, num_r = len(HEIGHTS_KPC), len(PHASES), len(RADIUS_EDGES_KPC) + 1
 
+    num_k = len(ENTROPY_BINS)
     out = {
+        "mdot_net_K": np.zeros((num_h, num_k)),
+        "mdot_out_K": np.zeros((num_h, num_k)),
+        "pdot_out_K": np.zeros((num_h, num_k)),
+        "edot_net_K": np.zeros((num_h, num_k)),
+        "mass_disk_K": np.zeros(num_k),
+        "mass_halo_K": np.zeros(num_k),
+        "zarea_K": np.zeros((num_k, nz)),
+        "zmass_K": np.zeros((num_k, nz)),
+        "zarea_T": np.zeros((num_p, nz)),
+        "zarea_fast": np.zeros(nz),
         "mdot_net": np.zeros((num_h, num_p)),
         "mdot_out": np.zeros((num_h, num_p)),
         "pdot_out": np.zeros((num_h, num_p)),
@@ -144,6 +170,11 @@ def measure_checkpoint(step_directory):
         del block
         temperature = pressure / rho * np.float32(CONVERSIONS.kelvin_per_code_specific_energy)
         phase = np.digitize(temperature, PHASE_EDGES_K).astype(np.int8)
+        log_entropy = np.log10(
+            temperature / (rho * np.float32(CONVERSIONS.total_number_density_per_code_density)) ** np.float32(2 / 3)
+        )
+        kbin = np.digitize(log_entropy, ENTROPY_EDGES).astype(np.int8)
+        del log_entropy
         radius = np.hypot(x[xs][:, None], y[ys][None, :]).astype(np.float32)
         radius_bin = np.digitize(radius, RADIUS_EDGES_KPC)
 
@@ -153,6 +184,7 @@ def measure_checkpoint(step_directory):
                 r, v_out, p = rho[:, :, k], side * vz[:, :, k], pressure[:, :, k]
                 v2 = vx[:, :, k] ** 2 + vy[:, :, k] ** 2 + vz[:, :, k] ** 2
                 ph = phase[:, :, k]
+                kb = kbin[:, :, k]
                 mass_flux = r * v_out * dx**2
                 outflowing = v_out > 0
                 energy_flux = (0.5 * r * v2 + GAMMA / (GAMMA - 1) * p) * v_out * dx**2
@@ -163,6 +195,12 @@ def measure_checkpoint(step_directory):
                     out["mdot_out"][h, q] += mass_flux[sel & outflowing].sum(dtype=np.float64)
                     out["pdot_out"][h, q] += momentum_flux[sel].sum(dtype=np.float64)
                     out["edot_net"][h, q] += energy_flux[sel].sum(dtype=np.float64)
+                for b in range(num_k):
+                    sel = kb == b
+                    out["mdot_net_K"][h, b] += mass_flux[sel].sum(dtype=np.float64)
+                    out["mdot_out_K"][h, b] += mass_flux[sel & outflowing].sum(dtype=np.float64)
+                    out["pdot_out_K"][h, b] += momentum_flux[sel].sum(dtype=np.float64)
+                    out["edot_net_K"][h, b] += energy_flux[sel].sum(dtype=np.float64)
                 out["mdot_net_radius"][h] += np.bincount(
                     radius_bin.ravel(), weights=mass_flux.ravel().astype(np.float64), minlength=num_r
                 )
@@ -173,6 +211,16 @@ def measure_checkpoint(step_directory):
             sel = phase == q
             out["mass_disk"][q] += cell_mass[:, :, in_disk][sel[:, :, in_disk]].sum(dtype=np.float64)
             out["mass_halo"][q] += cell_mass[:, :, ~in_disk][sel[:, :, ~in_disk]].sum(dtype=np.float64)
+
+        for b in range(num_k):
+            sel = kbin == b
+            out["mass_disk_K"][b] += cell_mass[:, :, in_disk][sel[:, :, in_disk]].sum(dtype=np.float64)
+            out["mass_halo_K"][b] += cell_mass[:, :, ~in_disk][sel[:, :, ~in_disk]].sum(dtype=np.float64)
+            out["zarea_K"][b] += sel.sum(axis=(0, 1)) * dx**2
+            out["zmass_K"][b] += np.where(sel, cell_mass, 0).sum(axis=(0, 1), dtype=np.float64)
+        for q in range(num_p):
+            out["zarea_T"][q] += (phase == q).sum(axis=(0, 1)) * dx**2
+        out["zarea_fast"] += (vz * sign_z > np.float32(FAST_WIND_KMS / 100.0)).sum(axis=(0, 1)) * dx**2
 
         # Mass-weighted (log n, log T) histogram of the outflow region.
         log_n = np.log10(rho[:, :, in_hist] * np.float32(CONVERSIONS.total_number_density_per_code_density))
@@ -196,14 +244,16 @@ def measure_checkpoint(step_directory):
             out["axis_mass_logn"] += (
                 m * np.log10(rho[axis] * np.float32(CONVERSIONS.total_number_density_per_code_density))
             ).sum(axis=0, dtype=np.float64)
-        del rho, vx, vy, vz, pressure, temperature, phase, cell_mass
+        del rho, vx, vy, vz, pressure, temperature, phase, kbin, cell_mass
 
     # Physical units.
-    for key in ("mdot_net", "mdot_out", "mdot_net_radius"):
+    for key in ("mdot_net", "mdot_out", "mdot_net_radius", "mdot_net_K", "mdot_out_K"):
         out[key] *= MSUN_PER_YR
     out["pdot_out"] *= MOMENTUM_PER_YR
+    out["pdot_out_K"] *= MOMENTUM_PER_YR
     out["edot_net"] *= ERG_PER_S
-    for key in ("mass_disk", "mass_halo", "hist_nT"):
+    out["edot_net_K"] *= ERG_PER_S
+    for key in ("mass_disk", "mass_halo", "hist_nT", "mass_disk_K", "mass_halo_K", "zmass_K"):
         out[key] *= CODE_MASS_MSUN
     out["time_myr"] = time_myr
     out["z_kpc"] = z
@@ -234,7 +284,8 @@ def parse_steps(spec, available):
 
 
 def cache_path(tag):
-    return os.path.join(SCRIPT_DIR, "data", "studies", f"convergence3d{tag}.npz")
+    # v3: + entropy bins, per-height geometry and the fast-wind cone area.
+    return os.path.join(SCRIPT_DIR, "data", "studies", f"convergence3d_v3{tag}.npz")
 
 
 def load_cache(tag):
@@ -408,21 +459,61 @@ def plot(runs):
     axes[0, 0].legend(fontsize=8)
     fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)")
     fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_fluxes_T.png"), dpi=130)
+
+    # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
+    fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
+    for label, rec in data.items():
+        c = colors[label]
+        for col, (h, name) in enumerate(((h1, "1 kpc"), (h5, "5 kpc"))):
+            for b, bin_name in enumerate(ENTROPY_BINS):
+                t, v = _series(rec, "mdot_out_K", lambda a, h=h, b=b: a[h, b])
+                axes[b, col].plot(t, v, color=c, label=label)
+                axes[b, col].set_title(f"outflowing mass flux, {bin_name}, |z| = {name}")
+        for row, (key, h, scale, title) in enumerate((
+            ("edot_net_K", h1, 1e42, "net energy flux |z| = 1 kpc [1e42 erg/s]"),
+            ("edot_net_K", h5, 1e42, "net energy flux |z| = 5 kpc [1e42 erg/s]"),
+            ("pdot_out_K", h1, 1e3, "outward momentum flux |z| = 1 kpc [1e3 Msun km/s/yr]"),
+            ("pdot_out_K", h5, 1e3, "outward momentum flux |z| = 5 kpc [1e3 Msun km/s/yr]"),
+        )):
+            t, v = _series(rec, key, lambda a, h=h: a[h].sum())
+            axes[row, 2].plot(t, v / scale, color=c, label=label)
+            axes[row, 2].set_title(title)
+        for row, (key, reducer, scale, title) in enumerate((
+            ("mass_disk_K", lambda a: a.sum(), 1e9, "disk mass |z| < 0.5 kpc [1e9 Msun]"),
+            ("mass_halo_K", lambda a: a[0], 1e8, "entrained (log K < 5.5) mass |z| > 0.5 kpc [1e8 Msun]"),
+            ("mass_halo_K", lambda a: a[1], 1e8, "mixed (5.5-6.8) mass |z| > 0.5 kpc [1e8 Msun]"),
+            ("mass_halo_K", lambda a: a[2], 1e8, "wind-entropy (6.8-7.9) mass |z| > 0.5 kpc [1e8 Msun]"),
+        )):
+            t, v = _series(rec, key, reducer)
+            axes[row, 3].plot(t, v / scale, color=c, label=label)
+            axes[row, 3].set_title(title)
+    for ax in axes.flat:
+        ax.grid(alpha=0.3)
+        ax.axvspan(15, 40, color="0.93", zorder=0)
+    for ax in axes[:, 0]:
+        ax.set_ylabel(r"$M_\odot$/yr")
+    for ax in axes[-1]:
+        ax.set_xlabel("t [Myr]")
+    axes[0, 0].legend(fontsize=8)
+    fig.suptitle("A-series, full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
+                 "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo")
+    fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_fluxes.png"), dpi=130)
 
-    # 2) Time-averaged flux profiles against height, two windows, by phase.
-    fig, axes = plt.subplots(2, 4, figsize=(22, 9))
+    # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
+    fig, axes = plt.subplots(2, 5, figsize=(26, 9))
     for row, window in enumerate(((15, 30), (30, 45))):
         for label, rec in data.items():
             steps = [s for s in sorted(rec) if window[0] <= rec[s]["time_myr"] <= window[1]]
             if not steps:
                 continue
             mean = lambda key: np.mean([rec[s][key] for s in steps], axis=0)
-            for q in range(3):
-                axes[row, q].plot(HEIGHTS_KPC, mean("mdot_out")[:, q], "o-", color=colors[label], label=label)
-                axes[row, q].set_title(f"{PHASES[q]} outflow, {window[0]}-{window[1]} Myr")
-            axes[row, 3].plot(HEIGHTS_KPC, mean("mdot_net").sum(axis=1), "o-", color=colors[label], label=label)
-            axes[row, 3].set_title(f"net total, {window[0]}-{window[1]} Myr")
+            for b, bin_name in enumerate(ENTROPY_BINS):
+                axes[row, b].plot(HEIGHTS_KPC, mean("mdot_out_K")[:, b], "o-", color=colors[label], label=label)
+                axes[row, b].set_title(f"{bin_name} outflow, {window[0]}-{window[1]} Myr")
+            axes[row, 4].plot(HEIGHTS_KPC, mean("mdot_net").sum(axis=1), "o-", color=colors[label], label=label)
+            axes[row, 4].set_title(f"net total, {window[0]}-{window[1]} Myr")
     for ax in axes.flat:
         ax.set(xlabel="|z| [kpc]", ylabel=r"$\dot M$ [$M_\odot$/yr]")
         ax.grid(alpha=0.3)
@@ -437,6 +528,10 @@ def plot(runs):
         r = rec[step]
         axes[0, col].pcolormesh(LOG_N_EDGES, LOG_T_EDGES, r["hist_nT"].T, norm=LogNorm(1e3, None), cmap="viridis")
         axes[0, col].set(title=f"{label}: mass in |z| > 1 kpc, {r['time_myr']:.1f} Myr", xlabel="log n", ylabel="log T")
+        log_n_line = np.array([LOG_N_EDGES[0], LOG_N_EDGES[-1]])
+        for edge in ENTROPY_EDGES:  # constant entropy: log T = log K + 2/3 log n
+            axes[0, col].plot(log_n_line, edge + 2 / 3 * log_n_line, "w--", lw=0.8)
+        axes[0, col].set(xlim=(LOG_N_EDGES[0], LOG_N_EDGES[-1]), ylim=(LOG_T_EDGES[0], LOG_T_EDGES[-1]))
     zs = np.linspace(0.05, 9.5, 200)
     n_cc, t_cc, v_cc = cc85_profile(zs)
     for label, rec in data.items():
@@ -484,6 +579,105 @@ def plot(runs):
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, "a_series_convergence_rim.png"), dpi=130)
 
+    # 5) Morphology from the 3D states: wind radius / opening angle, hot area,
+    #    mixed gas and the mixing-layer thickness, per height (N/S averaged).
+    def per_side(rec, step, key, b=None):
+        z = rec[step]["z_kpc"]
+        values = rec[step][key] if b is None else rec[step][key][b]
+        north = z > 0
+        return z[north], 0.5 * (values[north] + values[~north][::-1])
+
+    def wind_radius(rec, step):
+        z, area = per_side(rec, step, "zarea_fast")
+        return z, np.sqrt(area / np.pi)
+
+    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+    for label, rec in data.items():
+        c = colors[label]
+        for T, ls in ((25, "-"), (37.5, "--")):
+            step = min(rec, key=lambda s: abs(rec[s]["time_myr"] - T))
+            z, radius = wind_radius(rec, step)
+            axes[0, 0].plot(z, radius, ls, color=c, label=f"{label} {rec[step]['time_myr']:.1f} Myr")
+        steps = sorted(rec)
+        t = np.array([rec[s]["time_myr"] for s in steps])
+        # The cone reaches the box edge (|x| = 5 kpc) by z ~ 3 kpc, and the
+        # mixed gas lives below ~1.5 kpc: measure at z = 1 and 2 kpc.
+        for height, ls in ((1.0, "-"), (2.0, "--")):
+            angle, thickness = [], []
+            for s in steps:
+                z, radius = wind_radius(rec, s)
+                k = int(np.argmin(np.abs(z - height)))
+                angle.append(np.degrees(np.arctan(radius[k] / z[k])))
+                _, mixed_area = per_side(rec, s, "zarea_K", 1)
+                # Undefined before the wind has opened a cone at this height.
+                thickness.append(mixed_area[k] / (2 * np.pi * radius[k]) * 1e3 if radius[k] > 0.2 else np.nan)
+            axes[0, 1].plot(t, angle, ls, color=c, label=f"{label} z = {height:g}")
+            if height == 1.0:
+                axes[1, 1].plot(t, thickness, ls, color=c, label=label)
+        for h, ls in ((h1, "-"), (int(np.argmin(np.abs(HEIGHTS_KPC - 2))), "--")):
+            t, v = _series(rec, "mdot_out_K", lambda a, h=h: (a[h, 0] + a[h, 1]) / max(a[h].sum(), 1e-30))
+            axes[0, 2].plot(t, v, ls, color=c, label=f"{label} z = {HEIGHTS_KPC[h]:g}")
+        t, v = _series(rec, "mass_halo_K", lambda a: a[1])
+        axes[1, 0].plot(t, v / 1e8, color=c, label=label)
+        window = [s for s in steps if 30 <= rec[s]["time_myr"] <= 45]
+        if window:
+            z = rec[window[0]]["z_kpc"]
+            profile = np.mean([per_side(rec, s, "zmass_K", 1)[1] for s in window], axis=0)
+            dz = z[1] - z[0]
+            axes[1, 2].plot(z[z > 0], profile / dz / 1e6, color=c, label=label)
+    axes[0, 0].axhline(np.sqrt(BOX_SIZE_KPC[0] * BOX_SIZE_KPC[1] / np.pi), color="0.5", ls=":", lw=0.8)
+    axes[0, 0].set(xlabel="z [kpc]", ylabel=r"$R_\mathrm{cone} = \sqrt{A(v_\mathrm{out} > 600\,\mathrm{km/s})/\pi}$ [kpc]",
+                   title="free-wind cone radius")
+    axes[0, 1].set(xlabel="t [Myr]", ylabel="half-opening angle [deg]", title="atan(R_cone / z) at z = 1 (solid), 2 kpc (dashed)")
+    axes[0, 2].set(xlabel="t [Myr]", ylabel="fraction", title="entrained+mixed share of the outflowing mass flux, z = 1 (solid), 2 kpc (dashed)")
+    axes[1, 0].set(xlabel="t [Myr]", ylabel=r"[$10^8 M_\odot$]", title="mixed gas (5.5 < log K < 6.8) in |z| > 0.5 kpc")
+    axes[1, 1].set(xlabel="t [Myr]", ylabel="[pc]", title="radial width of mixed gas at z = 1 kpc: A_mixed / (2 pi R_cone)")
+    axes[1, 2].set(xlabel="z [kpc]", ylabel=r"dM/dz [$10^6 M_\odot$/kpc]", title="mixed gas against height, 30-45 Myr")
+    for ax in axes.flat:
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_morphology.png"), dpi=130)
+
+    # 6) Emission convergence from the cgols_emission.py caches.
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+    for label, tag in runs:
+        path = os.path.join(SCRIPT_DIR, "data", "studies", f"emission{tag}.npz")
+        if not os.path.exists(path):
+            continue
+        cache = np.load(path, allow_pickle=True)
+        t = cache["per_snapshot__time_myr"]
+        c = colors.get(label, "k")
+        for ax, key in zip(axes[:3], ("L_xray_cgols_xz", "L_xray_atomdb_xz", "L_halpha_xz")):
+            ax.semilogy(t, cache[f"per_snapshot__{key}"], color=c, label=label)
+        i = int(np.argmin(np.abs(t - 60)))
+        z = cache["per_snapshot__profile_z_kpc"][i]
+        profile = 0.5 * (cache["per_snapshot__profile_xray_cgols_xz_north"][i] + cache["per_snapshot__profile_xray_cgols_xz_south"][i])
+        axes[3].semilogy(z, profile, color=c, label=f"{label} ({t[i]:.0f} Myr)")
+    for ax, title in zip(axes, ("L_X1 (CGOLS Eq. 17) [erg/s]", "L_X2 (AtomDB 0.3-2 keV) [erg/s]", "L_Halpha [erg/s]",
+                                "S_X1(|z|) at 60 Myr, N/S mean [erg/s/cm^2/arcmin^2]")):
+        ax.set_title(title)
+        ax.set_xlabel("t [Myr]" if "S_X" not in title else "|z| [kpc]")
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, "a_series_convergence_emission.png"), dpi=130)
+
+    # Tables: window means by entropy bin, then by temperature phase.
+    for window in ((15, 30), (30, 45), (45, 75)):
+        print(f"\n{window[0]}-{window[1]} Myr  outflowing Mdot [Msun/yr] entrained/mixed/wind/halo at 1 kpc | 5 kpc ; "
+              "Edot(1|5) [1e42]")
+        for label, rec in data.items():
+            steps = [s for s in sorted(rec) if window[0] <= rec[s]["time_myr"] <= window[1]]
+            if not steps:
+                continue
+            mo = np.mean([rec[s]["mdot_out_K"] for s in steps], axis=0)
+            ed = np.mean([rec[s]["edot_net_K"] for s in steps], axis=0)
+            print(
+                f"  {label:7s} " + " ".join(f"{v:6.2f}" for v in mo[h1]) + " | " + " ".join(f"{v:6.2f}" for v in mo[h5])
+                + f" ; {ed[h1].sum() / 1e42:5.2f} {ed[h5].sum() / 1e42:5.2f}  ({len(steps)} snaps)"
+            )
+
     # Table: window means at 1/5 kpc.
     for window in ((15, 30), (30, 45), (45, 75)):
         print(f"\n{window[0]}-{window[1]} Myr  outflowing Mdot [Msun/yr] cold/warm/hot at 1 kpc | 5 kpc ; Edot(5) [1e42]")
@@ -497,7 +691,8 @@ def plot(runs):
                 f"  {label:7s} {mo[h1, 0]:6.2f} {mo[h1, 1]:6.2f} {mo[h1, 2]:6.2f} | "
                 f"{mo[h5, 0]:6.2f} {mo[h5, 1]:6.2f} {mo[h5, 2]:6.2f} ; {ed[h5].sum() / 1e42:5.2f}  ({len(steps)} snaps)"
             )
-    print("wrote a_series_convergence3d_{fluxes,profiles,phases_axis}.png")
+    print("wrote a_series_convergence3d_{fluxes,fluxes_T,profiles,phases_axis,morphology}.png, "
+          "a_series_convergence_{rim,emission}.png")
 
 
 def main():
