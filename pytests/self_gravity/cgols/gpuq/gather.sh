@@ -29,6 +29,9 @@
 #              (default 900)
 #   DEADLINE   "YYYY-MM-DD HH:MM": give up (stop fillers, release) after it
 #
+# While $GDIR/NO_FINAL exists the FINAL launch is on hold: the cards only run
+# fillers (and are released when the queue runs dry). Remove it to arm FINAL.
+#
 # Filler jobs must not select a GPU themselves (autocvd would wait on our own
 # card): put gpuq/autocvd_shim first on PYTHONPATH.
 HERE=$(dirname "$(readlink -f "$0")")
@@ -102,7 +105,7 @@ while true; do
       start_holder "$g"; worker "$g" & WORKER[$g]=$!; log "GPU $g taken (holder ${HOLDER[$g]}, worker ${WORKER[$g]})"
     done
   fi
-  if [ ${#WORKER[@]} -ge "$NEED" ] && [ ! -e "$GDIR/STOP" ]; then
+  if [ ${#WORKER[@]} -ge "$NEED" ] && [ ! -e "$GDIR/STOP" ] && [ ! -e "$GDIR/NO_FINAL" ]; then
     touch "$GDIR/STOP"; STOP_T=$(date +%s); CARDS=$(echo "${!WORKER[@]}" | tr ' ' '\n' | sort -n | paste -sd,)
     log "NEED=$NEED cards held ($CARDS) - stopping long fillers, letting short (9*) ones finish"
     stop_fillers '^[0-8]'
