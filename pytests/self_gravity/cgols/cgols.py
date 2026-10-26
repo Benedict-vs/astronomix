@@ -325,6 +325,7 @@ from astronomix.option_classes.simulation_config import (
     OPEN_BOUNDARY,
     FINITE_DIFFERENCE,
     FINITE_VOLUME,
+    HLL,
     HLLC,
     OPEN_BOUNDARY_DIODE,
     PALLAS,
@@ -1152,6 +1153,12 @@ if MHD and SOLVER != "fd":
 # dt = C dx / max_d(|v_d| + c) is the Athena / Cholla convention, stable up to
 # C = 0.5 in 3D; 0.4 is the default there.
 CFL = float(os.environ.get("CGOLS_CFL", "0.9" if SOLVER == "fd" else "0.4"))
+# CGOLS_RIEMANN (fv only): hllc (default, AthenaPK's, keeps the contact sharp)
+# or hlle (VL2's HLL: diffuses contacts like the fd Lax-Friedrichs splitting).
+# The VL2 scheme accepts no other solver for hydro (LLF needs donor cell).
+RIEMANN = os.environ.get("CGOLS_RIEMANN", "hllc")
+if RIEMANN not in ("hllc", "hlle"):
+    raise ValueError(f"CGOLS_RIEMANN must be 'hllc' or 'hlle', got {RIEMANN!r}")
 
 
 def _ic_state_path():
@@ -1761,7 +1768,7 @@ def _solver_config_kwargs():
     return dict(
         solver_mode=FINITE_VOLUME,
         time_integrator=VL2,
-        riemann_solver=HLLC,
+        riemann_solver=HLLC if RIEMANN == "hllc" else HLL,
         first_order_flux_correction=True,
         positivity_config=PositivityConfig(
             per_step_mode=POSITIVITY_HARD_FLOOR,
