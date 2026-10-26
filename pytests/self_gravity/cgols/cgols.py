@@ -1159,6 +1159,12 @@ CFL = float(os.environ.get("CGOLS_CFL", "0.9" if SOLVER == "fd" else "0.4"))
 RIEMANN = os.environ.get("CGOLS_RIEMANN", "hllc")
 if RIEMANN not in ("hllc", "hlle"):
     raise ValueError(f"CGOLS_RIEMANN must be 'hllc' or 'hlle', got {RIEMANN!r}")
+# CGOLS_IC_SEED (seed-scatter runs): multiply the t = 0 density and pressure by
+# the same factor 1 + CGOLS_IC_NOISE * N(0, 1) per cell (temperature unchanged),
+# seeded, so repeated runs differ only in a tiny perturbation and their spread
+# measures the trajectory noise of the chaotic late phase. Unset = no noise.
+IC_SEED = os.environ.get("CGOLS_IC_SEED", "")
+IC_NOISE = float(os.environ.get("CGOLS_IC_NOISE", "1e-3"))
 
 
 def _ic_state_path():
@@ -3734,6 +3740,16 @@ if __name__ == "__main__":
             _remaining = max(1, round(NUM_SNAPSHOTS * (_t_end - _t0) / _t_end))
             config = config._replace(num_snapshots=_remaining)
             rprint(f"  {_remaining} of {NUM_SNAPSHOTS} frames left on the run's grid")
+
+        if IC_SEED and not RESTART_FROM:
+            _factor = 1.0 + IC_NOISE * jax.random.normal(
+                jax.random.PRNGKey(int(IC_SEED)),
+                initial_state.shape[1:],
+                dtype=initial_state.dtype,
+            )
+            initial_state = initial_state.at[registered_variables.density_index].multiply(_factor)
+            initial_state = initial_state.at[registered_variables.pressure_index].multiply(_factor)
+            rprint(f"IC perturbed: seed {IC_SEED}, rho and P x (1 + {IC_NOISE:g} N(0,1))")
 
         if NUM_GPUS > 1:
             # No-op data-movement-wise when the state was already restored onto
