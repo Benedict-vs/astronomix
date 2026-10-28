@@ -330,6 +330,7 @@ from astronomix.option_classes.simulation_config import (
     OPEN_BOUNDARY_DIODE,
     PALLAS,
     POSITIVITY_HARD_FLOOR,
+    PPM,
     RK4_LSRK,
     VL2,
     SIMPLE_SOURCE,
@@ -1159,6 +1160,15 @@ CFL = float(os.environ.get("CGOLS_CFL", "0.9" if SOLVER == "fd" else "0.4"))
 RIEMANN = os.environ.get("CGOLS_RIEMANN", "hllc")
 if RIEMANN not in ("hllc", "hlle"):
     raise ValueError(f"CGOLS_RIEMANN must be 'hllc' or 'hlle', got {RIEMANN!r}")
+# CGOLS_FV_RECON (fv only): the VL2 corrector's reconstruction, plm (default,
+# AthenaPK's van Leer PLM) or ppm (AthenaPK's PPM with the Colella-Sekora
+# extremum limiter, 3 ghost cells). The predictor stays donor cell and the
+# time stepping second order either way.
+FV_RECON = os.environ.get("CGOLS_FV_RECON", "plm")
+if FV_RECON not in ("plm", "ppm"):
+    raise ValueError(f"CGOLS_FV_RECON must be 'plm' or 'ppm', got {FV_RECON!r}")
+if FV_RECON != "plm" and SOLVER != "fv":
+    raise ValueError("CGOLS_FV_RECON=ppm requires CGOLS_SOLVER=fv")
 
 
 def _ic_state_path():
@@ -1765,7 +1775,7 @@ def _solver_config_kwargs():
     # density / pressure floors (params.minimum_*) in every stage. The external
     # potential couples through the cell-centred SIMPLE_SOURCE of the gravity
     # config below (also the fd coupling), which keeps the Pallas stages.
-    return dict(
+    fv_kwargs = dict(
         solver_mode=FINITE_VOLUME,
         time_integrator=VL2,
         riemann_solver=HLLC if RIEMANN == "hllc" else HLL,
@@ -1775,6 +1785,10 @@ def _solver_config_kwargs():
             step_retry=STEP_RETRY and not BENCH_STEPS,
         ),
     )
+    # Only set for ppm, so that the plm config stays byte-identical.
+    if FV_RECON == "ppm":
+        fv_kwargs["limiter"] = PPM
+    return fv_kwargs
 
 
 def build_config():
