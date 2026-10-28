@@ -30,6 +30,11 @@
 #
 #   cd ~/astronomix-ppm/pytests/self_gravity/cgols && sbatch run_horeka_fv_validate.sh
 #
+# Quick version on the dev queue (1 node, 4x H100 94 GB, 1 h max): correctness +
+# 512^3 only, since FD-1024 at (1,2,2,1) needs ~140 GB/device:
+#
+#   sbatch --partition=dev-gpu-h100 --time=01:00:00 --export=ALL,FVVAL_DIMS=512 run_horeka_fv_validate.sh
+#
 # Everything lands in cgols_logs/fvval_<jobid>/ (summary.txt = the short answer).
 
 export CGOLS_SITE="${CGOLS_SITE:-horeka2}"
@@ -76,7 +81,7 @@ python cgols_fv_validate_compare.py _fvval_v128plm_s11 _fvval_v128plm_s22 _fvval
 cat "$OUT/compare.txt"
 
 # 2. memory + s/step at (1,2,2,1)
-for dim in 512 1024; do
+for dim in ${FVVAL_DIMS:-512 1024}; do
   run b${dim}fvplm 20m CGOLS_SOLVER=fv CGOLS_FV_RECON=plm CGOLS_DIM=$dim CGOLS_BENCH_STEPS=10 \
       CGOLS_SHARD_SPLIT="(1, 2, 2, 1)" CGOLS_RUN_TAG=_bench
   run b${dim}fvppm 20m CGOLS_SOLVER=fv CGOLS_FV_RECON=ppm CGOLS_DIM=$dim CGOLS_BENCH_STEPS=10 \
