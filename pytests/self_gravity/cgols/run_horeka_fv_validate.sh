@@ -7,6 +7,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:4
+#SBATCH --cpus-per-task=32
 
 #SBATCH --output=cgols_fvval_%j.out
 #SBATCH --error=cgols_fvval_%j.err
@@ -17,8 +18,7 @@
 #
 #   1. correctness: model A 128^3 to 7.5 Myr (past the 5 Myr wind onset), PLM and
 #      PPM, unsharded vs split (1,2,2,1); cgols_vl2_probe.py reports which VL2
-#      stage path the sharded runs traced (a silent native fallback shows up
-#      there), and
+#      stage path was traced (a silent native fallback shows up there), and
 #      cgols_fv_validate_compare.py compares the frames.
 #   2. memory: CGOLS_BENCH_STEPS fixed steps at (1,2,2,1) for FV PLM / FV PPM / FD
 #      at 512^3 and 1024^3 - compiled per-device size (printer says "MB", means
@@ -57,11 +57,7 @@ run(){   # $1 = name, $2 = time limit, rest = env assignments
   echo "=== $name ($*)"
   nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits -lms 1000 > "$OUT/$name.smi" &
   local smi=$!
-  # The probe imports astronomix (hence jax) before cgols' autocvd picks the
-  # card(s), so it is only used where all 4 cards are wanted anyway.
-  local probe=cgols_vl2_probe.py
-  case "$*" in *"(1, 1, 1, 1)"*) probe= ;; esac
-  env "$@" timeout "$limit" python $probe cgols.py > "$OUT/$name.log" 2>&1
+  env "$@" timeout "$limit" python cgols_vl2_probe.py cgols.py > "$OUT/$name.log" 2>&1
   local rc=$?
   kill $smi 2>/dev/null
   echo "rc=$rc" >> "$OUT/$name.log"
