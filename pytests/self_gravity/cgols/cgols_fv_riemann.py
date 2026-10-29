@@ -14,6 +14,13 @@ Needs the emission caches data/studies/emission_<tag>.npz, e.g.
         --frames-dir cgols_snapshots_diagnostics/A256fvhlle
 
     python cgols_fv_riemann.py 256      # or 512
+
+``python cgols_fv_riemann.py spectrum`` measures the small-scale structure
+instead (the second dissipation channel, set by the reconstruction order):
+the fraction of the x-variance of log n in 1 < |z| < 6 kpc at wavelengths
+80-300 pc (slices block-averaged to the 256 grid, 39 pc) and 40-150 pc (512
+grid, 19.5 pc), per frame, for FD and FV at 256-1024. It prints the 50-75 Myr
+means and writes comparisons/fv_small_scale_structure.png.
 """
 
 # general
@@ -62,8 +69,82 @@ def pinch(frame):
     return np.log10(n[nx // 2 - w : nx // 2 + w].mean(0))[band].mean()
 
 
+#: Runs of the small-scale-structure measure: label, frame dir, colour, line style.
+SPECTRUM_RUNS = (
+    ("FD 256", "cgols_snapshots_A256", "C0", ":"),
+    ("FD 512", "cgols_snapshots_A512", "C0", "--"),
+    ("FD 1024", "cgols_snapshots_A1024", "C0", "-"),
+    ("FV HLLC 256", "cgols_snapshots_diagnostics/A256fv", "C3", ":"),
+    ("FV HLLC 512", "cgols_snapshots_A512fvf32", "C3", "--"),
+    ("FV HLLC 1024", "cgols_snapshots_A1024fv", "C3", "-"),
+    ("FV HLLE 512", "cgols_snapshots_diagnostics/A512fvhlle", "C2", "--"),
+)
+
+#: (common grid, wavelength band [kpc]) of the small-scale variance fraction.
+SPECTRUM_BANDS = ((256, (0.08, 0.3)), (512, (0.04, 0.15)))
+
+
+def small_scale_fraction(frame, grid, band):
+    """Fraction of the x-variance of log n in 1 < |z| < 6 kpc at band wavelengths.
+
+    The x-z slice is block-averaged (in n) to grid cells across the box, so runs
+    at different resolutions are measured on the same grid; None if the run is
+    coarser than grid.
+    """
+    n = frame["n_xz"].astype(np.float64)
+    nx, nz = n.shape
+    if nx < grid:
+        return None
+    f = nx // grid
+    log_n = np.log10(n.reshape(grid, f, nz // f, f).mean(axis=(1, 3)))
+    z = (np.arange(log_n.shape[1]) + 0.5) * BOX_Z / log_n.shape[1] - BOX_Z / 2
+    rows = log_n[:, (np.abs(z) > 1) & (np.abs(z) < 6)]
+    power = np.abs(np.fft.rfft(rows - rows.mean(0), axis=0)) ** 2
+    k = np.fft.rfftfreq(grid, d=10.0 / grid)  # 1/kpc
+    wavelength = 1.0 / np.maximum(k, 1e-12)
+    in_band = (k > 0) & (wavelength >= band[0]) & (wavelength <= band[1])
+    return power[in_band].sum() / power[1:].sum()
+
+
+def spectrum():
+    """Small-scale variance fractions of FD and FV against time (see the docstring)."""
+    fig, axes = plt.subplots(1, len(SPECTRUM_BANDS), figsize=(13, 4.5))
+    print("small-scale x-variance fraction of log n, 1<|z|<6 kpc, mean +- std (min-max) over frames at 50-75 Myr")
+    for ax, (grid, band) in zip(axes, SPECTRUM_BANDS):
+        print(f"  {grid} grid ({10e3 / grid:.0f} pc), {1e3 * band[0]:.0f}-{1e3 * band[1]:.0f} pc:")
+        for label, frame_dir, color, style in SPECTRUM_RUNS:
+            if not os.path.isdir(frame_dir):
+                continue
+            t, frames = load(frame_dir)
+            values = [small_scale_fraction(f, grid, band) for f in frames]
+            if values[0] is None:
+                continue
+            values = np.array(values)
+            ax.plot(t, values, color=color, ls=style, label=label)
+            late = values[(t >= 50) & (t <= 75.01)]
+            print(f"    {label:13s} {late.mean():.4f} +- {late.std():.4f} ({late.min():.3f}-{late.max():.3f})")
+        ax.set(
+            xlabel="t [Myr]",
+            ylabel="variance fraction",
+            yscale="log",
+            xlim=(5, 75),  # before 5 Myr there is no wind
+            title=f"log n x-spectrum, {1e3 * band[0]:.0f}-{1e3 * band[1]:.0f} pc ({grid} grid), 1<|z|<6 kpc",
+        )
+        ax.axvspan(50, 75, color="0.93", zorder=0)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=7, ncol=2)
+    fig.suptitle("A-series small-scale structure: FD WENO5 vs FV VL2 (PLM)")
+    fig.tight_layout()
+    path = "figures/cgols/comparisons/fv_small_scale_structure.png"
+    fig.savefig(path, dpi=110)
+    print(path)
+
+
 def main():
     dim = sys.argv[1] if len(sys.argv) > 1 else "256"
+    if dim == "spectrum":
+        spectrum()
+        return
     runs = [
         ("FD WENO5 (LF split)", f"cgols_snapshots_A{dim}", f"A{dim}", "C0"),
         ("FV VL2 HLLC", FV_HLLC[dim], os.path.basename(FV_HLLC[dim]).replace("cgols_snapshots_", ""), "C3"),

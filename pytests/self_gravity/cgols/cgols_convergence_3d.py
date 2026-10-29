@@ -34,6 +34,9 @@ a_series_convergence3d_*.png).
 
     python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8]
     python cgols_convergence_3d.py --plot A128=_A128 A256=_A256 A512=_A512 A1024=_A1024
+    python cgols_convergence_3d.py --suffix _fv --cmap Reds --plot \
+        FV128=_A128fv:cgols_snapshots_diagnostics/A128fv FV256=_A256fv:cgols_snapshots_diagnostics/A256fv \
+        FV512=_A512fvf32 FV1024=_A1024fv
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 """
@@ -415,16 +418,25 @@ def _series(records, key, reducer):
     return t, np.array([reducer(records[s][key]) for s in steps])
 
 
-def plot(runs):
+def plot(runs, suffix="", cmap="Blues"):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
 
+    # A run is LABEL=TAG, or LABEL=TAG:FRAMES_DIR when its frames are not in
+    # cgols_snapshots<TAG> (e.g. the FV runs under cgols_snapshots_diagnostics/).
+    frame_dirs = {}
+    for label, tag in list(runs):
+        tag, _, frames = tag.partition(":")
+        frame_dirs[label] = frames or f"cgols_snapshots{tag}"
+    runs = [(label, tag.partition(":")[0]) for label, tag in runs]
     data = {label: load_cache(tag) for label, tag in runs}
     data = {label: rec for label, rec in data.items() if rec}
-    colors = dict(zip(data, plt.get_cmap("Blues")(np.linspace(0.35, 1.0, len(data)))))
+    # One colour per run, also for runs without a 3D cache (frame/emission panels only).
+    labels = [label for label, _ in runs]
+    colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(0.35, 1.0, len(labels)))))
     fig_dir = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
     os.makedirs(fig_dir, exist_ok=True)
     h1, h5 = int(np.argmin(np.abs(HEIGHTS_KPC - 1))), int(np.argmin(np.abs(HEIGHTS_KPC - 5)))
@@ -459,7 +471,7 @@ def plot(runs):
     axes[0, 0].legend(fontsize=8)
     fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)")
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_fluxes_T.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes_T{suffix}.png"), dpi=130)
 
     # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
     fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
@@ -499,7 +511,7 @@ def plot(runs):
     fig.suptitle("A-series, full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
                  "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo")
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_fluxes.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes{suffix}.png"), dpi=130)
 
     # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
     fig, axes = plt.subplots(2, 5, figsize=(26, 9))
@@ -519,7 +531,7 @@ def plot(runs):
         ax.grid(alpha=0.3)
     axes[0, 0].legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_profiles.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_profiles{suffix}.png"), dpi=130)
 
     # 3) Phase diagrams at ~35 Myr, one per resolution, and the free-wind axis vs CC85.
     fig, axes = plt.subplots(2, max(len(data), 3), figsize=(5.5 * max(len(data), 3), 10), squeeze=False)
@@ -558,12 +570,12 @@ def plot(runs):
     for ax in axes[1, 3:]:
         ax.axis("off")
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_phases_axis.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_phases_axis{suffix}.png"), dpi=130)
 
     # 4) Instability onset at the cavity rim, from the frames' midplane slices.
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
     for label, tag in runs:
-        frame_dir = os.path.join(SCRIPT_DIR, f"cgols_snapshots{tag}")
+        frame_dir = os.path.join(SCRIPT_DIR, frame_dirs[label])
         if not os.path.isdir(frame_dir):
             continue
         t, mean_r, scatter, _ = rim_metrics(frame_dir)
@@ -577,7 +589,7 @@ def plot(runs):
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence_rim.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_rim{suffix}.png"), dpi=130)
 
     # 5) Morphology from the 3D states: wind radius / opening angle, hot area,
     #    mixed gas and the mixing-layer thickness, per height (N/S averaged).
@@ -637,7 +649,7 @@ def plot(runs):
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence3d_morphology.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_morphology{suffix}.png"), dpi=130)
 
     # 6) Emission convergence from the cgols_emission.py caches.
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
@@ -661,7 +673,7 @@ def plot(runs):
         ax.grid(alpha=0.3)
         ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "a_series_convergence_emission.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_emission{suffix}.png"), dpi=130)
 
     # Tables: window means by entropy bin, then by temperature phase.
     for window in ((15, 30), (30, 45), (45, 75)):
@@ -691,8 +703,8 @@ def plot(runs):
                 f"  {label:7s} {mo[h1, 0]:6.2f} {mo[h1, 1]:6.2f} {mo[h1, 2]:6.2f} | "
                 f"{mo[h5, 0]:6.2f} {mo[h5, 1]:6.2f} {mo[h5, 2]:6.2f} ; {ed[h5].sum() / 1e42:5.2f}  ({len(steps)} snaps)"
             )
-    print("wrote a_series_convergence3d_{fluxes,fluxes_T,profiles,phases_axis,morphology}.png, "
-          "a_series_convergence_{rim,emission}.png")
+    print(f"wrote a_series_convergence3d_{{fluxes,fluxes_T,profiles,phases_axis,morphology}}{suffix}.png, "
+          f"a_series_convergence_{{rim,emission}}{suffix}.png")
 
 
 def main():
@@ -701,10 +713,12 @@ def main():
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--steps", default="all", help="'all', 'a-b', 'a-b/k' or a comma list")
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--plot", nargs="*", help="LABEL=TAG pairs of cached runs to compare")
+    parser.add_argument("--plot", nargs="*", help="LABEL=TAG[:FRAMES_DIR] pairs of cached runs to compare")
+    parser.add_argument("--suffix", default="", help="figure-name suffix, e.g. _fv (default: the FD A-series names)")
+    parser.add_argument("--cmap", default="Blues", help="colormap of the resolution ladder")
     args = parser.parse_args()
     if args.plot:
-        plot([tuple(spec.split("=", 1)) for spec in args.plot])
+        plot([tuple(spec.split("=", 1)) for spec in args.plot], args.suffix, args.cmap)
     else:
         run(args.tag, args.checkpoint_dir, args.steps, args.workers)
 
