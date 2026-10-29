@@ -66,6 +66,11 @@ if [ ! -f "$HERE/_site_env.sh" ]; then
     exit 1
 fi
 source "$HERE/_site_env.sh" || exit 1
+# Import astronomix from THIS tree: a code copy (e.g. ~/astronomix-ppm) then
+# shadows the editable install, and for the main checkout it is the same code.
+# Set after the site env, whose ~/.bashrc / micromamba activation could reset it.
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+[ -f "$REPO/COMMIT" ] && echo "code copy of: $(cat "$REPO/COMMIT")"
 cd "$CGOLS_DIR" || exit 1
 
 # --- run configuration ------------------------------------------------------

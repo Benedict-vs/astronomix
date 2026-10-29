@@ -946,7 +946,8 @@ class SimulationConfig(NamedTuple):
     # update                      | 3c'|
     # --> all others are ghost cells
 
-    #: The number of ghost cells.
+    #: The number of ghost cells. ``finalize_config`` sets it from the scheme;
+    #: the VL2 scheme keeps a larger value given here (see ``finalize_config``).
     num_ghost_cells: int = reconstruction_order + 1
 
     #: Grid spacing.
@@ -1555,9 +1556,15 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         if fully_periodic:
             config = config._replace(boundary_handling=PERIODIC_ROLL, num_ghost_cells=0)
         else:
+            # A larger ghost layer set by the caller is kept: the extra cells
+            # are inert (filled by the boundary handler, read by no interior
+            # stencil), and on a device mesh they let the ghost-padded extent
+            # N + 2 * num_ghost_cells divide into the shards, which the
+            # sharded VL2 Pallas stage requires (e.g. 2048 + 2 * 4 = 8 * 257,
+            # where the minimal 2048 + 2 * 2 splits at most 4 ways).
             config = config._replace(
                 boundary_handling=GHOST_CELLS,
-                num_ghost_cells=3 if uses_ppm else 2,
+                num_ghost_cells=max(config.num_ghost_cells, 3 if uses_ppm else 2),
             )
 
         # The Poisson solve takes the density array as it is, so with ghost

@@ -150,6 +150,11 @@ if X64:
 #: of it on every axis (see _validate_shard_split and build_config).
 PALLAS_BLOCK_SHAPE = (4, 4, 8)
 
+#: CGOLS_PALLAS_INTERPRET=1 runs the Pallas kernels in interpret mode, so the
+#: sharded Pallas paths can be tested on CPU host devices (JAX_PLATFORMS=cpu,
+#: XLA_FLAGS=--xla_force_host_platform_device_count=N). Off for every real run.
+PALLAS_INTERPRET = os.environ.get("CGOLS_PALLAS_INTERPRET", "0") == "1"
+
 # One process per GPU? Auto-detected, so a bare `python cgols.py` is unchanged
 # and any srun-launched run does the right thing without an extra knob.
 DISTRIBUTED = (
@@ -1171,6 +1176,66 @@ if FV_RECON != "plm" and SOLVER != "fv":
     raise ValueError("CGOLS_FV_RECON=ppm requires CGOLS_SOLVER=fv")
 
 
+def _fv_num_ghost_cells(split, num_cells, recon, requested="auto"):
+    """The VL2 ghost layer for this grid and shard split.
+
+    On a device mesh the padded helper data (``r``) and the VL2 Pallas stage
+    (``shard_map``) are split along the GHOST-PADDED extent, so along every
+    split axis ``cells + 2 g`` must divide by the shard count. Otherwise the
+    run stops at startup (IndivisibleError placing ``r``), and even past that
+    ``_vl2_pallas_supported`` would run the stages on the native backend
+    (~2x the memory). The scheme needs ``g >= 2`` (PLM) or ``3`` (PPM); "auto" picks the
+    smallest such ``g`` that also splits, so every run that already split
+    cleanly (unsharded, FV-1024 at (1, 2, 2, 1): 1028 = 2 x 514) keeps the
+    minimal layer and its byte-identical config. The extra cells are inert
+    (boundary-filled, read by no interior stencil). At 2048 over (1, 8, 4, 1),
+    2048 + 2 x 2 = 4 x 513 does not split 8 ways but 2048 + 2 x 4 = 8 x 257
+    does - the padded layout the FD scheme (4 ghost cells) already uses.
+    """
+    minimum = 3 if recon == "ppm" else 2
+    splits = [(split[axis + 1], num_cells[axis]) for axis in range(3) if split[axis + 1] > 1]
+    if requested == "auto":
+        g = minimum
+        while any((cells + 2 * g) % shards for shards, cells in splits):
+            g += 1
+        return g
+    g = int(requested)
+    if g < minimum:
+        raise SystemExit(
+            f"CGOLS_FV_GHOST_CELLS={g}: CGOLS_FV_RECON={recon} needs at least {minimum}."
+        )
+    for shards, cells in splits:
+        if (cells + 2 * g) % shards:
+            raise SystemExit(
+                f"CGOLS_FV_GHOST_CELLS={g}: the ghost-padded extent {cells + 2 * g} "
+                f"does not split into {shards} shards (the padded helper data and "
+                "the sharded VL2 Pallas stage need it). Use CGOLS_FV_GHOST_CELLS=auto."
+            )
+    return g
+
+
+# CGOLS_FV_GHOST_CELLS (fv only): "auto" (default, see _fv_num_ghost_cells) or
+# an explicit count. Only a count above the scheme's minimum enters the config,
+# so every run that needs no extra layer keeps its byte-identical config.
+FV_MIN_GHOST_CELLS = 3 if FV_RECON == "ppm" else 2
+FV_NUM_GHOST_CELLS = (
+    _fv_num_ghost_cells(
+        SHARD_SPLIT,
+        (RESOLUTION, RESOLUTION, 2 * RESOLUTION),
+        FV_RECON,
+        os.environ.get("CGOLS_FV_GHOST_CELLS", "auto"),
+    )
+    if SOLVER == "fv"
+    else None
+)
+if SOLVER == "fv" and FV_NUM_GHOST_CELLS != FV_MIN_GHOST_CELLS:
+    rprint(
+        f"[fv] {FV_NUM_GHOST_CELLS} ghost cells (scheme minimum {FV_MIN_GHOST_CELLS}; "
+        f"CGOLS_FV_GHOST_CELLS={os.environ.get('CGOLS_FV_GHOST_CELLS', 'auto')}, "
+        f"split {SHARD_SPLIT})"
+    )
+
+
 def _ic_state_path():
     """Path to the saved initial primitive state (IC_TAG-suffixed)."""
     return _data_initial(f"cgols_initial_state{IC_TAG}.npy")
@@ -1788,6 +1853,10 @@ def _solver_config_kwargs():
     # Only set for ppm, so that the plm config stays byte-identical.
     if FV_RECON == "ppm":
         fv_kwargs["limiter"] = PPM
+    # Likewise only a ghost layer above the scheme's minimum (a split whose
+    # ghost-padded extent the minimum does not divide, see _fv_num_ghost_cells).
+    if FV_NUM_GHOST_CELLS != FV_MIN_GHOST_CELLS:
+        fv_kwargs["num_ghost_cells"] = FV_NUM_GHOST_CELLS
     return fv_kwargs
 
 
@@ -1857,7 +1926,9 @@ def build_config():
             backend=PALLAS,
             pallas_block_shape=PALLAS_BLOCK_SHAPE,
             pallas_use_triton=True,
-            pallas_interpret=False,
+            # CGOLS_PALLAS_INTERPRET=1: CPU testing of the Pallas paths
+            # (JAX_PLATFORMS=cpu + host devices), never on a GPU run.
+            pallas_interpret=PALLAS_INTERPRET,
         ),
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
