@@ -189,6 +189,13 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
         needs_cell_centers_y = True
         needs_cell_centers_z = True
 
+    # Distance-diluted FUV heating of the cooling module: distances to the
+    # point sources from the 1D cell-centre axes, as for the clusters above.
+    if config.cooling_config.cooling and config.cooling_config.fuv_point_source_heating:
+        needs_cell_centers_x = True
+        needs_cell_centers_y = True
+        needs_cell_centers_z = True
+
     # Snapshot diagnostics.
     if config.return_snapshots:
         snapshot_settings = config.snapshot_settings

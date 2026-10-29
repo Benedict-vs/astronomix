@@ -1061,6 +1061,7 @@ def _integrate_core(
             ):
                 new_state = _post_step_updates(
                     new_state, step_size, config, params, registered_variables,
+                    helper_data=helper_data_pad, time=time + 0.5 * step_size,
                 )
             return new_key, new_forcing, new_state
 

@@ -62,6 +62,7 @@ from astronomix.option_classes.simulation_config import (
 from astronomix._modules._cooling.cooling_options import (
     CoolingConfig,
     CoolingCurveConfig,
+    FUVSourceParams,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
@@ -755,7 +756,7 @@ def dtemperature_dt(
     heating = heating_rate
     if heating_factor_table is not None and heating_factor_table.shape[0] > 0:
         heating = heating_rate * jnp.interp(
-            jnp.log10(temperature),
+            jnp.log10(jnp.maximum(temperature, jnp.finfo(temperature.dtype).tiny)),
             heating_log10_T_table,
             heating_factor_table,
         )
@@ -821,7 +822,7 @@ def update_temperature_explicit(
 
 @partial(
     jax.jit,
-    static_argnames=("cooling_curve_config", "max_subcycles"),
+    static_argnames=("cooling_curve_config", "max_subcycles", "with_heating"),
 )
 def update_temperature_subcycled(
     density: FIELD_TYPE,
@@ -836,6 +837,10 @@ def update_temperature_subcycled(
     max_subcycles: int = 16,
     max_fractional_temperature_change: float = 0.01,
     mean_molecular_weight: float = 0.0,
+    with_heating: bool = False,
+    heating_rate=0.0,
+    heating_log10_T_table: jnp.ndarray = None,
+    heating_factor_table: jnp.ndarray = None,
 ) -> FIELD_TYPE:
     r"""Sub-cycled forward-Euler cooling over one hydro time step.
 
@@ -844,6 +849,16 @@ def update_temperature_subcycled(
     stiff cells take many small steps while cold or slowly-cooling cells finish
     immediately. A cell that has run out of time, has reached the floor, or is
     not cooling at all is inactive and is left untouched.
+
+    With ``with_heating`` (static) the net rate includes the heating
+    (``heating_rate`` may be a per-cell field, times the optional
+    T-dependent factor table), and heated cells are advanced too. The rate
+    depends only on T at fixed density, so the exact solution approaches the
+    thermal equilibrium monotonically and never crosses it: a sub-cycle that
+    steps across it (the rate changes sign) is pulled back to the linearly
+    interpolated root, and the cell is done. Without ``with_heating`` the
+    update is the original cooling-only one (any constant ``heating_rate`` is
+    ignored, as before).
 
     The loop is a **fixed-trip-count** :func:`jax.lax.fori_loop` rather than a
     ``lax.while_loop``: ``while_loop`` is not reverse-mode differentiable, and
@@ -870,11 +885,132 @@ def update_temperature_subcycled(
         max_fractional_temperature_change: Largest fractional change per
             sub-cycle.
         mean_molecular_weight: Optional mean-molecular-weight override.
+        with_heating: Include the heating in the net rate (static).
+        heating_rate: The heating rate, scalar or per-cell field.
+        heating_log10_T_table: log10 T~ grid of the heating factor.
+        heating_factor_table: The heating factor on that grid.
 
     Returns:
         The temperature after one full ``time_step`` of cooling, never below the
         floor.
     """
+
+    if with_heating:
+
+        def _rate(T):
+            return dtemperature_dt(
+                density,
+                T,
+                hydrogen_mass_fraction,
+                metal_mass_fraction,
+                gamma,
+                cooling_curve_config,
+                cooling_curve_params,
+                heating_rate=heating_rate,
+                mean_molecular_weight=mean_molecular_weight,
+                heating_log10_T_table=heating_log10_T_table,
+                heating_factor_table=heating_factor_table,
+            )
+
+        def _equilibrium_root(T_old, rate_old, T_new, rate_new):
+            # Secant root between two states of opposite net rate.
+            safe_denominator = jnp.where(rate_new != rate_old, rate_new - rate_old, 1.0)
+            return T_old - rate_old * (T_new - T_old) / safe_denominator
+
+        def body(_, carry):
+            T, dt_left, T_prev, rate_prev = carry
+
+            rate = _rate(T)
+
+            # The previous sub-cycle stepped across the equilibrium: settle on
+            # the interpolated root and stop.
+            crossed = (dt_left > 0.0) & (rate * rate_prev < 0.0)
+            T = jnp.where(crossed, _equilibrium_root(T_prev, rate_prev, T, rate), T)
+            dt_left = jnp.where(crossed, 0.0, dt_left)
+
+            active = (
+                (dt_left > 0.0)
+                & (rate != 0.0)
+                & ((T > floor_temperature) | (rate > 0.0))
+            )
+
+            safe_rate = jnp.where(active, rate, -1.0)
+            dt_limit = max_fractional_temperature_change * T / jnp.abs(safe_rate)
+
+            dt_sub = jnp.where(active, jnp.minimum(dt_left, dt_limit), 0.0)
+
+            T_new = jnp.where(
+                active, jnp.maximum(T + rate * dt_sub, floor_temperature), T
+            )
+
+            return (
+                T_new,
+                jnp.where(active, dt_left - dt_sub, 0.0),
+                T,
+                jnp.where(active, rate, 0.0),
+            )
+
+        temperature, dt_left, temperature_prev, rate_prev = jax.lax.fori_loop(
+            0,
+            max_subcycles,
+            body,
+            (
+                temperature,
+                jnp.full_like(temperature, time_step),
+                temperature,
+                jnp.zeros_like(temperature),
+            ),
+        )
+
+        # A crossing in the last sub-cycle, then the residual time in one
+        # Euler step, again pulled back to the equilibrium if it crosses it.
+        rate = _rate(temperature)
+        crossed = (dt_left > 0.0) & (rate * rate_prev < 0.0)
+        temperature = jnp.where(
+            crossed,
+            _equilibrium_root(temperature_prev, rate_prev, temperature, rate),
+            temperature,
+        )
+        residual_active = (
+            (dt_left > 0.0)
+            & ~crossed
+            & ((temperature > floor_temperature) | (rate > 0.0))
+        )
+        residual_temperature = jnp.maximum(
+            temperature + rate * jnp.where(residual_active, dt_left, 0.0),
+            floor_temperature,
+        )
+        residual_rate = _rate(residual_temperature)
+
+        # The residual step can be long compared with the cooling time, so the
+        # bracket [residual, start] may span decades over which the rate is
+        # far from linear: locate the root by a fixed number of bisections in
+        # log T~ (fixed trip count, so it stays reverse-mode differentiable)
+        # and finish with a secant step inside the last bracket.
+        def bisect(_, bracket):
+            T_a, rate_a, T_b, rate_b = bracket
+            T_m = jnp.sqrt(T_a * T_b)
+            rate_m = _rate(T_m)
+            same_as_a = rate_m * rate_a > 0.0
+            return (
+                jnp.where(same_as_a, T_m, T_a),
+                jnp.where(same_as_a, rate_m, rate_a),
+                jnp.where(same_as_a, T_b, T_m),
+                jnp.where(same_as_a, rate_b, rate_m),
+            )
+
+        T_a, rate_a, T_b, rate_b = jax.lax.fori_loop(
+            0,
+            12,
+            bisect,
+            (temperature, rate, residual_temperature, residual_rate),
+        )
+        residual_temperature = jnp.where(
+            rate * residual_rate < 0.0,
+            _equilibrium_root(T_a, rate_a, T_b, rate_b),
+            residual_temperature,
+        )
+        return jnp.where(residual_active, residual_temperature, temperature)
 
     def _rate(T):
         return dtemperature_dt(
@@ -1074,6 +1210,54 @@ def update_temperature_implicit(
 # -------------------------------------------------------------
 
 
+def fuv_heating_factor(
+    fuv_source_params: FUVSourceParams,
+    cell_centers_x: jnp.ndarray,
+    cell_centers_y: jnp.ndarray,
+    cell_centers_z: jnp.ndarray,
+    time: float,
+) -> FIELD_TYPE:
+    r"""FUV intensity J / J_0 of point sources, diluted with distance.
+
+    ``sum_k w_k A(t) / (4 pi (d_k^2 + r_s^2)) + background`` (see
+    :class:`FUVSourceParams`). The squared distance is assembled from the three
+    1D cell-centre axes by broadcasting, so the field shards like an
+    elementwise op and no 3D coordinate field is stored.
+
+    Args:
+        fuv_source_params: The FUV sources.
+        cell_centers_x: The cell centres along x (1D).
+        cell_centers_y: The cell centres along y (1D).
+        cell_centers_z: The cell centres along z (1D).
+        time: The time at which the source luminosity is evaluated.
+
+    Returns:
+        The dimensionless J / J_0 at every cell, shape (N_x, N_y, N_z).
+    """
+    luminosity_area = jnp.interp(
+        time,
+        fuv_source_params.luminosity_times,
+        fuv_source_params.luminosity_values,
+    )
+    softening2 = fuv_source_params.softening_length**2
+    positions = fuv_source_params.source_positions
+
+    # The source count is an array shape, hence static: the loop unrolls into
+    # one fused elementwise pass.
+    intensity = 0.0
+    for k in range(positions.shape[0]):
+        distance2 = (
+            ((cell_centers_x - positions[k, 0]) ** 2)[:, None, None]
+            + ((cell_centers_y - positions[k, 1]) ** 2)[None, :, None]
+            + ((cell_centers_z - positions[k, 2]) ** 2)[None, None, :]
+        )
+        intensity = intensity + fuv_source_params.source_weights[k] / (
+            4.0 * jnp.pi * (distance2 + softening2)
+        )
+
+    return luminosity_area * intensity + fuv_source_params.background
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -1089,6 +1273,8 @@ def update_pressure_by_cooling(
     simulation_params: SimulationParams,
     time_step: float,
     grid_spacing: float = 0.0,
+    helper_data=None,
+    time: float = 0.0,
 ) -> STATE_TYPE:
     """
     Apply cooling to the pressure of the primitive state for one time step.
@@ -1107,6 +1293,10 @@ def update_pressure_by_cooling(
         grid_spacing: The grid spacing (static). It enables the
             cooling-resolution limiter (``CoolingParams.resolution_limiter_alpha``)
             when > 0; the default 0 disables the limiter.
+        helper_data: The helper data; its ``cell_centers_x/y/z`` are needed
+            with ``CoolingConfig.fuv_point_source_heating``.
+        time: The time at which the FUV sources are evaluated (the middle of
+            the step), used only with ``fuv_point_source_heating``.
 
     Returns:
         The primitive state with the pressure updated by cooling.
@@ -1127,6 +1317,26 @@ def update_pressure_by_cooling(
 
     density = primitive_state[registered_variables.density_index]
     pressure = primitive_state[registered_variables.pressure_index]
+
+    # The heating rate: uniform, or scaled per cell by the distance-diluted
+    # FUV field of the point sources.
+    heating_rate = cooling_params.heating_rate
+    if cooling_config.fuv_point_source_heating:
+        if density.ndim != 3 or helper_data is None:
+            raise ValueError(
+                "fuv_point_source_heating needs a 3D state and the helper data"
+            )
+        heating_rate = heating_rate * fuv_heating_factor(
+            cooling_params.fuv_source_params,
+            helper_data.cell_centers_x,
+            helper_data.cell_centers_y,
+            helper_data.cell_centers_z,
+            time,
+        )
+    with_heating = (
+        cooling_config.fuv_point_source_heating
+        or cooling_params.heating_factor_table.shape[0] > 0
+    )
 
     temperature = get_temperature_from_pressure(
         density,
@@ -1170,7 +1380,7 @@ def update_pressure_by_cooling(
             gamma,
             cooling_curve_config,
             cooling_params.cooling_curve_params,
-            heating_rate=cooling_params.heating_rate,
+            heating_rate=heating_rate,
             mean_molecular_weight=mean_molecular_weight,
             heating_log10_T_table=cooling_params.heating_log10_T_table,
             heating_factor_table=cooling_params.heating_factor_table,
@@ -1204,7 +1414,7 @@ def update_pressure_by_cooling(
             gamma,
             cooling_curve_config,
             cooling_params.cooling_curve_params,
-            heating_rate=cooling_params.heating_rate,
+            heating_rate=heating_rate,
             mean_molecular_weight=mean_molecular_weight,
             heating_log10_T_table=cooling_params.heating_log10_T_table,
             heating_factor_table=cooling_params.heating_factor_table,
@@ -1219,7 +1429,7 @@ def update_pressure_by_cooling(
             gamma,
             cooling_curve_config,
             cooling_params.cooling_curve_params,
-            heating_rate=cooling_params.heating_rate,
+            heating_rate=heating_rate,
             mean_molecular_weight=mean_molecular_weight,
             heating_log10_T_table=cooling_params.heating_log10_T_table,
             heating_factor_table=cooling_params.heating_factor_table,
@@ -1238,6 +1448,10 @@ def update_pressure_by_cooling(
             cooling_config.max_subcycles,
             cooling_config.max_fractional_temperature_change,
             mean_molecular_weight,
+            with_heating=with_heating,
+            heating_rate=heating_rate,
+            heating_log10_T_table=cooling_params.heating_log10_T_table,
+            heating_factor_table=cooling_params.heating_factor_table,
         )
     else:
         raise ValueError(f"Unknown cooling method: {cooling_config.cooling_method}")

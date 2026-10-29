@@ -369,16 +369,22 @@ from astronomix._modules._cgols_wind.cluster_placement import (
     cluster_table,
     draw_cluster_schedule,
 )
-from astronomix._modules._cooling._cooling_tables import cie_parabolic_cooling
+from astronomix._modules._cooling._cooling_tables import (
+    cie_parabolic_cooling,
+    ki02_gf12_cooling,
+)
 from astronomix._modules._cooling.cooling_options import (
     CIE_PARABOLIC,
     COOLING_FLOOR_CLIP,
     COOLING_OPERATOR_SPLIT,
+    ELECTRON_HYDROGEN_DENSITY,
+    PIECEWISE_POWER_LAW,
     SUBCYCLED_EXPLICIT_COOLING,
     TOTAL_NUMBER_DENSITY,
     CoolingConfig,
     CoolingCurveConfig,
     CoolingParams,
+    FUVSourceParams,
 )
 from astronomix.parallel import barrier
 from astronomix._spatial_operators._differencing import _interface_field_divergence
@@ -996,6 +1002,48 @@ COOLING_DT_FRACTION = float(os.environ.get("CGOLS_COOLING_DT_FRACTION", "0.1"))
 # Raise CGOLS_COOLING_SUBCYCLES when running without the limit.
 COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 
+# Cooling curve (with CGOLS_COOLING=1). "cie" (default) is the published
+# B-series: the CGOLS I Eq. A4 fit, n^2 Lambda at mu = 0.6, nothing below the
+# 10^4 K floor. "ki02gf12" is leo1200/astronomix#8 (TobiBu): corrected
+# Koyama & Inutsuka (2002) below ~10^4.2 K blended into Gnat & Ferland (2012)
+# CIE, n_H^2 Lambda - n_H Gamma with n_H = rho / (1.4271 m_H) and
+# photoelectric heating that switches off as hydrogen ionises; the floor
+# drops to T / mu(T) = 10 K. Its table assumes the module's n_e n_H
+# convention with the X/Z-derived mu, so this curve must NOT get the
+# n^2 / mu = 0.6 settings of "cie" (a silent 4.3x in the cooling) - both are
+# set from this one knob. The cooling module's T~ then carries T / mu(T):
+# convert with ki02_gf12_temperature before any temperature cut or emissivity.
+COOLING_CURVE = os.environ.get("CGOLS_COOLING_CURVE", "cie")
+if COOLING_CURVE not in ("cie", "ki02gf12"):
+    raise ValueError(f"CGOLS_COOLING_CURVE must be 'cie' or 'ki02gf12', got {COOLING_CURVE!r}")
+KI02 = COOLING and COOLING_CURVE == "ki02gf12"
+
+# Photoelectric heating of the ki02gf12 curve, Gamma = Gamma_0 (1 - x_HII)
+# J / J_0 with Gamma_0 = 2e-26 erg/s per H (Kim & Ostriker 2017, eq. heat).
+# KO17 normalise J to the star formation of the local disk (4 pi J = Sigma_FUV,
+# Sigma_FUV,0 = 6.9 Lsun/pc^2 <-> Sigma_SFR,0); here the starburst is a point
+# source, diluted with distance (CGOLS_FUV=1, default):
+#   J / J_0 = SFR(t) / (Sigma_SFR,0 * 4 pi (d^2 + r_s^2)) + 0.0024,
+# i.e. the field KO17 would assign if the SFR were spread over 4 pi (d^2 +
+# r_s^2); the FUV light-to-SFR ratio cancels. Sigma_SFR,0 = 2.5e-3
+# Msun/yr/kpc^2 (Kim, Kim & Ostriker 2011), r_s = the 300 pc injection
+# radius, no attenuation, 0.0024 = the metagalactic floor. SFR(t) follows the
+# feedback schedule (5 -> 20 -> 5 Msun/yr) but never drops below the low state
+# CGOLS_FUV_SFR_FLOOR (the pre-onset stars shine before the first SNe);
+# CGOLS_FUV_SFR pins it to a constant (static-disk tests). CGOLS_FUV=0 gives a
+# uniform field J / J_0 = CGOLS_HEAT_RATIO instead.
+FUV = os.environ.get("CGOLS_FUV", "1") == "1"
+FUV_SIGMA_SFR0 = float(os.environ.get("CGOLS_FUV_SIGMA_SFR0", "2.5e-3"))
+FUV_SFR_FLOOR = float(os.environ.get("CGOLS_FUV_SFR_FLOOR", "5"))
+FUV_SFR = os.environ.get("CGOLS_FUV_SFR")
+FUV_SOFTENING_PC = float(os.environ.get("CGOLS_FUV_SOFTENING_PC", str(INJ_RAD)))
+HEAT_RATIO = float(os.environ.get("CGOLS_HEAT_RATIO", "1"))
+if KI02 and FUV and FEEDBACK != "central":
+    raise NotImplementedError(
+        "CGOLS_FUV point sources follow the central starburst only; the moving "
+        "model-C clusters are not wired in yet (use CGOLS_FUV=0 or central feedback)"
+    )
+
 # Positivity and the energy recovery (upstream astronomix, Oct 2026). Positivity
 # of the finite-difference scheme comes from the positivity-preserving WENO
 # reconstruction (Zhang & Shu 2012; SimulationConfig.weno_positivity_preserving):
@@ -1243,6 +1291,59 @@ def _kelvin_to_code_temperature(T_K):
 # the two log10 unit shifts). Cheap to build, so do it unconditionally.
 _CIE_COOLING_PARAMS = cie_parabolic_cooling(code_units)
 
+# Composition of the ki02gf12 tables. The builder bakes X, Z into the code-unit
+# Lambda, so CoolingParams must get the very same values (and no mu override).
+_KI02_X, _KI02_Z = 0.76, 0.02
+
+
+def _ki02_setup():
+    """The ki02gf12 tables in code units (PR #8 builder), or None."""
+    if not KI02:
+        return None
+    # The table top is raised from T1 = 1e9 K (T ~ 6e8 K, above which the
+    # piecewise power law returns zero cooling) to 1e10 K, past the hottest
+    # wind gas; above GF12's 1e8 K the curve is the builder's log-log
+    # extrapolation.
+    return ki02_gf12_cooling(
+        code_units,
+        hydrogen_mass_fraction=_KI02_X,
+        metal_mass_fraction=_KI02_Z,
+        log10_T1_max=10.0,
+    )
+
+
+_KI02_SETUP = _ki02_setup()
+
+
+def build_fuv_source_params():
+    """The distance-diluted FUV field of the central starburst (CGOLS_FUV)."""
+    myr_to_code = (1 * u.Myr).to(code_units.code_time).value
+    # A(t) = L_FUV / (4 pi J_0) = SFR / Sigma_SFR,0, an area.
+    sfr_to_area = (
+        (1 * u.M_sun / u.yr) / (FUV_SIGMA_SFR0 * u.M_sun / u.yr / u.kpc**2)
+    ).to(code_units.code_length**2).value
+    if FUV_SFR is not None:
+        times_myr, sfr = [0.0], [float(FUV_SFR)]
+    else:
+        # The feedback schedule's SFR (build_cgols_wind_params), floored.
+        onset_myr = 5.0 if STEP_ONSET else 6.0
+        times_myr = [0.0, 5.0, onset_myr, 10.0, 40.0, 45.0]
+        sfr = [max(x, FUV_SFR_FLOOR) for x in (0.0, 0.0, 5.0, 20.0, 20.0, 5.0)]
+    # The box centre (build_config: a 10 x 10 x 20 kpc box), i.e. the centre
+    # of the 300 pc injection sphere.
+    centre = [
+        (size / 2).to(code_units.code_length).value
+        for size in (10 * u.kpc, 10 * u.kpc, 20 * u.kpc)
+    ]
+    return FUVSourceParams(
+        source_positions=jnp.array([centre]),
+        source_weights=jnp.ones((1,)),
+        softening_length=(FUV_SOFTENING_PC * u.pc).to(code_units.code_length).value,
+        luminosity_times=jnp.array(times_myr) * myr_to_code,
+        luminosity_values=jnp.array(sfr) * sfr_to_area,
+        background=0.0024,
+    )
+
 
 def _cooling_params_kwargs():
     """The ``cooling_params=`` kwarg for SimulationParams, or {} when adiabatic.
@@ -1252,6 +1353,22 @@ def _cooling_params_kwargs():
     """
     if not COOLING:
         return {}
+    if KI02:
+        return dict(
+            cooling_params=CoolingParams(
+                hydrogen_mass_fraction=_KI02_X,
+                metal_mass_fraction=_KI02_Z,
+                floor_temperature=_KI02_SETUP.floor_temperature,
+                max_thermal_energy_fraction=COOLING_DT_FRACTION,
+                # Gamma_0 per H; the FUV field (or the uniform heat ratio)
+                # multiplies it.
+                heating_rate=_KI02_SETUP.heating_rate * (1.0 if FUV else HEAT_RATIO),
+                heating_log10_T_table=_KI02_SETUP.heating_log10_T_table,
+                heating_factor_table=_KI02_SETUP.heating_factor_table,
+                fuv_source_params=build_fuv_source_params() if FUV else FUVSourceParams(),
+                cooling_curve_params=_KI02_SETUP.cooling_curve_params,
+            )
+        )
     return dict(
         cooling_params=CoolingParams(
             hydrogen_mass_fraction=0.76,
@@ -1804,7 +1921,19 @@ def build_config():
 
     rprint(f"Rendering in {dim_x} x {dim_y} x {dim_z} dimensions")
 
-    if COOLING:
+    if KI02:
+        rprint(
+            f"Radiative cooling ON: ki02gf12 curve (PR #8, n_H^2 Lambda - n_H Gamma), "
+            f"floor T/mu = 10 K, {COOLING_SUBCYCLES} sub-cycles, heating "
+            + (
+                f"FUV point source (Sigma_SFR,0 {FUV_SIGMA_SFR0:g}, r_s {FUV_SOFTENING_PC:g} pc, "
+                + (f"SFR fixed {FUV_SFR})" if FUV_SFR is not None else f"SFR floor {FUV_SFR_FLOOR:g})")
+                if FUV
+                else f"uniform J/J0 = {HEAT_RATIO:g}"
+            )
+            + f"; outputs tagged {RUN_TAG!r}"
+        )
+    elif COOLING:
         rprint(
             f"Radiative cooling ON (B-series): CIE parabolic curve, n^2 Lambda at "
             f"mu = {mu}, floor {COOLING_FLOOR_K:.3g} K "
@@ -1849,7 +1978,9 @@ def build_config():
             backend=PALLAS,
             pallas_block_shape=PALLAS_BLOCK_SHAPE,
             pallas_use_triton=True,
-            pallas_interpret=False,
+            # CGOLS_PALLAS_INTERPRET=1 runs the same kernels in Pallas'
+            # interpreter, the only Pallas mode on CPU (small CPU tests).
+            pallas_interpret=os.environ.get("CGOLS_PALLAS_INTERPRET", "0") == "1",
         ),
         dimensionality=3,
         box_size=StaticFloatVector(L_x, L_y, L_z),
@@ -1953,10 +2084,18 @@ def build_config():
                     max_subcycles=COOLING_SUBCYCLES,
                     max_fractional_temperature_change=0.01,
                     cooling_timestep_limit=COOLING_DT_LIMIT,
-                    cooling_curve_config=CoolingCurveConfig(
-                        cooling_curve_type=CIE_PARABOLIC,
-                        density_convention=TOTAL_NUMBER_DENSITY,
+                    cooling_curve_config=(
+                        CoolingCurveConfig(
+                            cooling_curve_type=PIECEWISE_POWER_LAW,
+                            density_convention=ELECTRON_HYDROGEN_DENSITY,
+                        )
+                        if KI02
+                        else CoolingCurveConfig(
+                            cooling_curve_type=CIE_PARABOLIC,
+                            density_convention=TOTAL_NUMBER_DENSITY,
+                        )
                     ),
+                    fuv_point_source_heating=KI02 and FUV,
                 )
             )
             if COOLING

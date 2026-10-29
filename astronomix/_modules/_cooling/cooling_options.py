@@ -221,6 +221,47 @@ class CoolingConfig(NamedTuple):
     #: (see ``CoolingParams.max_thermal_energy_fraction``).
     cooling_timestep_limit: bool = False
 
+    #: Scale the heating by a per-cell, time-dependent FUV field from point
+    #: sources, diluted with distance (see ``FUVSourceParams``). Off by
+    #: default: the heating is then the spatially uniform ``heating_rate``.
+    #: Not seen by the cooling-time step limiters, which keep the uniform rate.
+    fuv_point_source_heating: bool = False
+
+
+class FUVSourceParams(NamedTuple):
+    """FUV point sources for distance-diluted photoelectric heating.
+
+    With ``CoolingConfig.fuv_point_source_heating`` the heating rate of every
+    cell is multiplied by the FUV intensity in units of the solar-neighbourhood
+    value J_0 (Kim & Ostriker 2017, eq. heat, with Sigma_FUV / Sigma_FUV,0
+    replaced by the optically thin field of the sources),
+
+        J / J_0 = sum_k w_k A(t) / (4 pi (d_k^2 + r_s^2)) + background,
+
+    where A(t) = L_FUV(t) / (4 pi J_0) is the total source luminosity over the
+    reference flux (an area, in code length^2), d_k the distance of the cell
+    to source k and r_s a softening length (the source radius). There is no
+    attenuation.
+    """
+
+    #: Source positions in box coordinates, shape (num_sources, 3).
+    source_positions: jnp.ndarray = jnp.zeros((1, 3))
+
+    #: Fraction of the total luminosity emitted by each source (sums to 1).
+    source_weights: jnp.ndarray = jnp.ones((1,))
+
+    #: Softening length r_s (code length).
+    softening_length: float = 1.0
+
+    #: Times (ascending, code time) and values of A(t) = L_FUV(t) / (4 pi J_0)
+    #: in code length^2; linearly interpolated, held constant beyond the ends.
+    luminosity_times: jnp.ndarray = jnp.zeros((1,))
+    luminosity_values: jnp.ndarray = jnp.zeros((1,))
+
+    #: Uniform background J / J_0 (the metagalactic 0.0024 of Kim & Ostriker
+    #: 2017).
+    background: float = 0.0024
+
 
 class CoolingParams(NamedTuple):
     """
@@ -320,6 +361,10 @@ class CoolingParams(NamedTuple):
 
     #: The heating factor f at ``heating_log10_T_table`` (linear in log10 T~).
     heating_factor_table: jnp.ndarray = jnp.array([])
+
+    #: FUV sources of the distance-diluted heating (used only with
+    #: ``CoolingConfig.fuv_point_source_heating``).
+    fuv_source_params: FUVSourceParams = FUVSourceParams()
 
     #: The parameters of the cooling curve selected by
     #: ``CoolingCurveConfig.cooling_curve_type``.

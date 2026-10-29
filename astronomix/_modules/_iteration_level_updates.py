@@ -63,6 +63,8 @@ def _apply_cooling(
     config: SimulationConfig,
     params: SimulationParams,
     registered_variables: RegisteredVariables,
+    helper_data=None,
+    time=0.0,
 ) -> STATE_TYPE:
     """Apply the cooling operator to the primitive state for one step ``dt``.
 
@@ -88,6 +90,8 @@ def _apply_cooling(
         params,
         dt,
         grid_spacing=config.grid_spacing,
+        helper_data=helper_data,
+        time=time,
     )
 
 
@@ -98,6 +102,8 @@ def _post_step_updates(
     config: SimulationConfig,
     params: SimulationParams,
     registered_variables: RegisteredVariables,
+    helper_data=None,
+    time=0.0,
 ) -> STATE_TYPE:
     """Apply the operator-split physics that runs *after* the hydro update.
 
@@ -115,6 +121,8 @@ def _post_step_updates(
         config: The simulation configuration.
         params: The simulation parameters.
         registered_variables: The registered variables.
+        helper_data: The helper data (cell centres for the FUV heating).
+        time: The time at the middle of the step just taken (FUV heating).
 
     Returns:
         The primitive state with the operator-split updates applied.
@@ -125,7 +133,8 @@ def _post_step_updates(
         and config.cooling_config.cooling_placement == COOLING_OPERATOR_SPLIT
     ):
         primitive_state = _apply_cooling(
-            primitive_state, dt, config, params, registered_variables
+            primitive_state, dt, config, params, registered_variables,
+            helper_data=helper_data, time=time,
         )
         # Cooling only lowers the pressure row; with dual energy the carried
         # internal-energy density g must follow, or the next step's switched
@@ -311,7 +320,8 @@ def _iteration_level_updates(
         and config.cooling_config.cooling_placement == COOLING_IN_RK_STAGES
     ):
         primitive_state = _apply_cooling(
-            primitive_state, dt, config, params, registered_variables
+            primitive_state, dt, config, params, registered_variables,
+            helper_data=helper_data, time=current_time - 0.5 * dt,
         )
 
     # Neural-network body force.

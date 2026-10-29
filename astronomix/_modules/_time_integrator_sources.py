@@ -165,6 +165,8 @@ def _time_integrator_sources(
                 params,
                 dt,
                 grid_spacing=config.grid_spacing,
+                helper_data=helper_data,
+                time=current_time,
             )
         else:
             primitive_state = update_pressure_by_cooling_mixing(
