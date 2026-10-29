@@ -22,6 +22,14 @@ Usage:
         C256=cgols_snapshots_C256 A256=/path/to/cgols_snapshots_A256
 
 A run is clustered if its snapshot dir holds the clusters.npz cgols.py writes.
+
+FD vs FV ladders in one figure set (FD runs first, then the FV runs in the same
+resolution order; renamed to a_series_*_256_1024_fdfv.png):
+
+    CGOLS_COMPARE_FDFV=1 CGOLS_COMPARE_COLOR_OFFSET=1 CGOLS_COMPARE_SUFFIX=_fdfv \
+        python cgols_model_c_compare.py 256=cgols_snapshots_A256 512=cgols_snapshots_A512 \
+        1024=cgols_snapshots_A1024 FV256=cgols_snapshots_diagnostics/A256fv \
+        FV512=cgols_snapshots_A512fvf32 FV1024=cgols_snapshots_A1024fv
 """
 
 import glob
@@ -38,6 +46,15 @@ from matplotlib.colors import LogNorm
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "figures", "cgols", "comparisons")
 SUFFIX = os.environ.get("CGOLS_COMPARE_SUFFIX", "")
+# CGOLS_COMPARE_FDFV=1: the runs are an FD ladder followed by the FV ladder at
+# the same resolutions (paired by position). The outflow panels then overlay
+# them (one colour per resolution, FD solid, FV dashed) and the slices put the
+# FD row above the FV row, one resolution per column.
+FDFV = os.environ.get("CGOLS_COMPARE_FDFV", "0") == "1"
+FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
+# Colour-cycle index of the first resolution in FDFV mode (1: a 256-1024 ladder
+# keeps the colours of the 128-1024 figures).
+COLOR_OFFSET = int(os.environ.get("CGOLS_COMPARE_COLOR_OFFSET", "0"))
 SLICE_TIMES_MYR = (10.0, 25.0, 50.0)
 
 # The box of every CGOLS run: 10 x 10 x 20 kpc, centred on the disk.
@@ -109,10 +126,16 @@ def main(runs):
     for ax in axes[:3]:
         ax.plot(t_ref, injected_mass_rate(t_ref), color="0.6", lw=1, ls=":", label="injected")
     print(f"{'run':10s} {'H':>4s} {'peak':>7s} {'<15-40>':>8s} {'<45-75>':>8s} {'M_out(end)':>10s}")
+    half = len(data) // 2
+    if FDFV and 2 * half != len(data):
+        raise SystemExit("CGOLS_COMPARE_FDFV=1 needs an FD and an FV run per resolution")
     for k, (label, frames) in enumerate(data.items()):
         t = frames["time_myr"]
-        style = dict(color=colors[k % len(colors)], lw=1.5,
-                     ls="-" if clusters[label] is not None else "--")
+        if FDFV:
+            style = dict(color=colors[COLOR_OFFSET + k % half], lw=1.5, ls="-" if k < half else "--")
+        else:
+            style = dict(color=colors[k % len(colors)], lw=1.5,
+                         ls="-" if clusters[label] is not None else "--")
         for ax, height in zip(axes[:3], (1.0, 5.0, 8.0)):
             rate = outflow_through(frames, height)
             ax.plot(t, rate, label=label, **style)
@@ -137,7 +160,17 @@ def main(runs):
     axes[3].set_xlabel("t [Myr]")
     axes[3].set_ylabel(r"$M_{\rm out}(<t)$ through |z| = 5 kpc [M$_\odot$]")
     axes[3].set_title("cumulative outflow")
-    axes[0].legend(fontsize=8)
+    if FDFV:
+        from matplotlib.lines import Line2D
+
+        handles = [Line2D([], [], color="0.6", lw=1, ls=":", label="injected")]
+        handles += [Line2D([], [], color=colors[COLOR_OFFSET + k], lw=2.5, label=label)
+                    for k, label in enumerate(list(data)[:half])]
+        handles += [Line2D([], [], color="0.25", ls="-", label=f"{FD_NAME} (solid)"),
+                    Line2D([], [], color="0.25", ls="--", label=f"{FV_NAME} (dashed)")]
+        axes[0].legend(handles=handles, fontsize=8)
+    else:
+        axes[0].legend(fontsize=8)
     fig.tight_layout()
     out = os.path.join(OUT_DIR, f"model_c_outflow{SUFFIX}.png")
     fig.savefig(out, dpi=150)
@@ -145,6 +178,9 @@ def main(runs):
     print("wrote", out)
 
     # ---- slices ----
+    if FDFV:
+        plot_slices_fdfv(data)
+        return
     n_rows = len(data)
     fig, axes = plt.subplots(
         n_rows, 3 * len(SLICE_TIMES_MYR), figsize=(4.0 * 3 * len(SLICE_TIMES_MYR), 4.4 * n_rows),
@@ -216,6 +252,46 @@ def main(runs):
         fig.savefig(out, dpi=130)
         plt.close(fig)
         print("wrote", out)
+
+
+def plot_slices_fdfv(data):
+    """Slices of paired FD / FV ladders: per time an FD row above an FV row, one resolution per column."""
+    labels = list(data)
+    half = len(labels) // 2
+    n_norm = LogNorm(1e-4, 1e2)
+    T_norm = LogNorm(1e3, 10**7.5)
+    n_rows, n_cols = 2 * len(SLICE_TIMES_MYR), 3 * half
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(3.0 * n_cols, 4.6 * n_rows), squeeze=False,
+                             gridspec_kw=dict(width_ratios=[2, 1, 1] * half))
+    for block, target in enumerate(SLICE_TIMES_MYR):
+        for scheme, name in enumerate((FD_NAME, FV_NAME)):
+            row = 2 * block + scheme
+            for res in range(half):
+                label = labels[scheme * half + res]
+                frames = data[label]
+                i = int(np.argmin(np.abs(frames["time_myr"] - target)))
+                t_i = frames["time_myr"][i]
+                ax_xy, ax_n, ax_T = axes[row, 3 * res : 3 * res + 3]
+                image = ax_xy.imshow(frames["n_xy"][i].T, origin="lower", cmap="magma", norm=n_norm,
+                                     extent=[-L_X / 2, L_X / 2, -L_X / 2, L_X / 2])
+                ax_xy.set_xlim(-2.5, 2.5)
+                ax_xy.set_ylim(-2.5, 2.5)
+                ax_n.imshow(frames["n_xz"][i].T, origin="lower", cmap="magma", norm=n_norm,
+                            extent=[-L_X / 2, L_X / 2, -L_Z / 2, L_Z / 2])
+                image_T = ax_T.imshow(frames["T_xz"][i].T, origin="lower", cmap="inferno", norm=T_norm,
+                                      extent=[-L_X / 2, L_X / 2, -L_Z / 2, L_Z / 2])
+                ax_xy.set_title(f"{name} {labels[res]}: n face-on, {t_i:.1f} Myr", fontsize=9)
+                ax_n.set_title("n edge-on", fontsize=9)
+                ax_T.set_title("T edge-on", fontsize=9)
+                for ax in (ax_xy, ax_n, ax_T):
+                    ax.tick_params(labelsize=7)
+    fig.tight_layout(rect=(0, 0, 0.97, 1))
+    fig.colorbar(image, cax=fig.add_axes((0.975, 0.55, 0.006, 0.4)), label=r"n [cm$^{-3}$]")
+    fig.colorbar(image_T, cax=fig.add_axes((0.975, 0.05, 0.006, 0.4)), label="T [K]")
+    out = os.path.join(OUT_DIR, f"model_c_slices{SUFFIX}.png")
+    fig.savefig(out, dpi=100, bbox_inches="tight")  # keep the colour-bar labels
+    plt.close(fig)
+    print("wrote", out)
 
 
 if __name__ == "__main__":

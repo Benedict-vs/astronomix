@@ -37,6 +37,9 @@ a_series_convergence3d_*.png).
     python cgols_convergence_3d.py --suffix _fv --cmap Reds --plot \
         FV128=_A128fv:cgols_snapshots_diagnostics/A128fv FV256=_A256fv:cgols_snapshots_diagnostics/A256fv \
         FV512=_A512fvf32 FV1024=_A1024fv
+    python cgols_convergence_3d.py --cmap-start 0.5667 --plot A256=_A256 A512=_A512 A1024=_A1024 --fv \
+        FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv
+        # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 """
@@ -418,28 +421,84 @@ def _series(records, key, reducer):
     return t, np.array([reducer(records[s][key]) for s in steps])
 
 
-def plot(runs, suffix="", cmap="Blues"):
+#: A run with fewer cached snapshots than this is drawn as markers, not a line
+#: (e.g. FV-1024: only the checkpoints at 30, 60, 73.75 and 75 Myr exist).
+SPARSE_SNAPSHOTS = 8
+#: Scheme names of the merged FD + FV figures (--fv).
+FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
+
+
+def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
+    """Compare cached runs; with fv_runs, FD (solid) and FV (dashed) in one figure set.
+
+    fv_runs pairs with runs by position (same resolution, same colour).
+    """
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
+    from matplotlib.lines import Line2D
 
+    merged = bool(fv_runs)
+    fv_runs = list(fv_runs or [])
     # A run is LABEL=TAG, or LABEL=TAG:FRAMES_DIR when its frames are not in
     # cgols_snapshots<TAG> (e.g. the FV runs under cgols_snapshots_diagnostics/).
     frame_dirs = {}
-    for label, tag in list(runs):
+    for label, tag in runs + fv_runs:
         tag, _, frames = tag.partition(":")
         frame_dirs[label] = frames or f"cgols_snapshots{tag}"
     runs = [(label, tag.partition(":")[0]) for label, tag in runs]
-    data = {label: load_cache(tag) for label, tag in runs}
+    fv_runs = [(label, tag.partition(":")[0]) for label, tag in fv_runs]
+    all_runs = runs + fv_runs
+    data = {label: load_cache(tag) for label, tag in all_runs}
     data = {label: rec for label, rec in data.items() if rec}
-    # One colour per run, also for runs without a 3D cache (frame/emission panels only).
+    # One colour per run (per resolution when merged: the FV run takes its FD
+    # partner's), also for runs without a 3D cache (frame/emission panels only).
     labels = [label for label, _ in runs]
-    colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(0.35, 1.0, len(labels)))))
+    colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(cmap_start, 1.0, len(labels)))))
+    for (fd_label, _), (fv_label, _) in zip(runs, fv_runs):
+        colors[fv_label] = colors[fd_label]
+    fv_labels = {label for label, _ in fv_runs}
+    sparse = {label: len(rec) for label, rec in data.items() if len(rec) < SPARSE_SNAPSHOTS}
     fig_dir = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
     os.makedirs(fig_dir, exist_ok=True)
     h1, h5 = int(np.argmin(np.abs(HEIGHTS_KPC - 1))), int(np.argmin(np.abs(HEIGHTS_KPC - 5)))
+
+    def draw(ax, x, y, label, series=True, method="plot", legend_label=None, **kwargs):
+        """One run's curve: colour by run, dashed for FV when merged, markers if sparse."""
+        style = {"color": colors[label], "label": label if legend_label is None else legend_label}
+        if merged:
+            style["ls"] = "--" if label in fv_labels else "-"
+        if series and label in sparse:
+            style.update(ls="none", marker="o", ms=5)
+            if legend_label is None:
+                style["label"] = f"{label} ({sparse[label]} snapshots)"
+        style.update(kwargs)
+        getattr(ax, method)(x, y, **style)
+
+    def legend(ax, notes=(), **kwargs):
+        """Per-run legend, or (merged) resolution colours + scheme line styles."""
+        kwargs.setdefault("fontsize", 8)
+        if not merged:
+            ax.legend(**kwargs)
+            return
+        handles = [Line2D([], [], color=colors[label], lw=2.5, label=label) for label, _ in runs]
+        handles += [
+            Line2D([], [], color="0.25", ls="-", label=f"{FD_NAME} (solid)"),
+            Line2D([], [], color="0.25", ls="--", label=f"{FV_NAME} (dashed)"),
+        ]
+        handles += [
+            Line2D([], [], color=colors[label], ls="none", marker="o", ms=5, label=f"{label}: {count} snapshots only")
+            for label, count in sparse.items()
+        ]
+        handles += [Line2D([], [], ls="none", label=note) for note in notes]
+        ax.legend(handles=handles, **kwargs)
+
+    def window_label(label, steps):
+        return f"{label} (1 snapshot)" if len(steps) == 1 else label
+
+    title_tail = f" -- {FD_NAME} solid, {FV_NAME} dashed" if merged else ""
 
     # 1) Phase-resolved fluxes against time at 1 and 5 kpc.
     fig, axes = plt.subplots(3, 4, figsize=(22, 12), sharex=True)
@@ -447,18 +506,18 @@ def plot(runs, suffix="", cmap="Blues"):
         for col, (h, name) in enumerate(((h1, "1 kpc"), (h5, "5 kpc"))):
             for row, q in enumerate(range(3)):
                 t, v = _series(rec, "mdot_out", lambda a, h=h, q=q: a[h, q])
-                axes[row, col].plot(t, v, color=colors[label], label=label)
+                draw(axes[row, col], t, v, label)
                 axes[row, col].set_title(f"outflowing mass flux, {PHASES[q]}, |z| = {name}")
             t, v = _series(rec, "edot_net", lambda a, h=h: a[h].sum())
-            axes[0, 2 + col].plot(t, v / 1e42, color=colors[label], label=label)
+            draw(axes[0, 2 + col], t, v / 1e42, label)
             axes[0, 2 + col].set_title(f"net energy flux |z| = {name} [1e42 erg/s]")
             t, v = _series(rec, "pdot_out", lambda a, h=h: a[h].sum())
-            axes[1, 2 + col].plot(t, v / 1e3, color=colors[label], label=label)
+            draw(axes[1, 2 + col], t, v / 1e3, label)
             axes[1, 2 + col].set_title(f"outward momentum flux |z| = {name} [1e3 Msun km/s/yr]")
             t, v = _series(rec, "mass_disk", lambda a: a.sum())
-            axes[2, 2].plot(t, v / 1e9, color=colors[label], label=label)
+            draw(axes[2, 2], t, v / 1e9, label)
             t, v = _series(rec, "mass_halo", lambda a: a[0] + a[1])
-            axes[2, 3].plot(t, v / 1e8, color=colors[label], label=label)
+            draw(axes[2, 3], t, v / 1e8, label)
     axes[2, 2].set_title("disk mass |z| < 0.5 kpc [1e9 Msun]")
     axes[2, 3].set_title("cold+warm halo mass |z| > 0.5 kpc [1e8 Msun]")
     for ax in axes.flat:
@@ -468,19 +527,18 @@ def plot(runs, suffix="", cmap="Blues"):
         ax.set_ylabel(r"$M_\odot$/yr")
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
-    axes[0, 0].legend(fontsize=8)
-    fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)")
-    fig.tight_layout()
+    legend(axes[0, 0])
+    fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
+    fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes_T{suffix}.png"), dpi=130)
 
     # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
     fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
     for label, rec in data.items():
-        c = colors[label]
         for col, (h, name) in enumerate(((h1, "1 kpc"), (h5, "5 kpc"))):
             for b, bin_name in enumerate(ENTROPY_BINS):
                 t, v = _series(rec, "mdot_out_K", lambda a, h=h, b=b: a[h, b])
-                axes[b, col].plot(t, v, color=c, label=label)
+                draw(axes[b, col], t, v, label)
                 axes[b, col].set_title(f"outflowing mass flux, {bin_name}, |z| = {name}")
         for row, (key, h, scale, title) in enumerate((
             ("edot_net_K", h1, 1e42, "net energy flux |z| = 1 kpc [1e42 erg/s]"),
@@ -489,7 +547,7 @@ def plot(runs, suffix="", cmap="Blues"):
             ("pdot_out_K", h5, 1e3, "outward momentum flux |z| = 5 kpc [1e3 Msun km/s/yr]"),
         )):
             t, v = _series(rec, key, lambda a, h=h: a[h].sum())
-            axes[row, 2].plot(t, v / scale, color=c, label=label)
+            draw(axes[row, 2], t, v / scale, label)
             axes[row, 2].set_title(title)
         for row, (key, reducer, scale, title) in enumerate((
             ("mass_disk_K", lambda a: a.sum(), 1e9, "disk mass |z| < 0.5 kpc [1e9 Msun]"),
@@ -498,7 +556,7 @@ def plot(runs, suffix="", cmap="Blues"):
             ("mass_halo_K", lambda a: a[2], 1e8, "wind-entropy (6.8-7.9) mass |z| > 0.5 kpc [1e8 Msun]"),
         )):
             t, v = _series(rec, key, reducer)
-            axes[row, 3].plot(t, v / scale, color=c, label=label)
+            draw(axes[row, 3], t, v / scale, label)
             axes[row, 3].set_title(title)
     for ax in axes.flat:
         ax.grid(alpha=0.3)
@@ -507,43 +565,77 @@ def plot(runs, suffix="", cmap="Blues"):
         ax.set_ylabel(r"$M_\odot$/yr")
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
-    axes[0, 0].legend(fontsize=8)
+    legend(axes[0, 0])
     fig.suptitle("A-series, full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
-                 "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo")
-    fig.tight_layout()
+                 "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo" + title_tail)
+    fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes{suffix}.png"), dpi=130)
 
     # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
     fig, axes = plt.subplots(2, 5, figsize=(26, 9))
     for row, window in enumerate(((15, 30), (30, 45))):
+        notes, single = [], False
         for label, rec in data.items():
             steps = [s for s in sorted(rec) if window[0] <= rec[s]["time_myr"] <= window[1]]
             if not steps:
+                notes.append(f"{label}: no snapshot in {window[0]}-{window[1]} Myr")
                 continue
+            if len(steps) == 1:
+                single = True
+                notes.append(f"{label}: 1 snapshot ({rec[steps[0]]['time_myr']:.1f} Myr)")
             mean = lambda key: np.mean([rec[s][key] for s in steps], axis=0)
             for b, bin_name in enumerate(ENTROPY_BINS):
-                axes[row, b].plot(HEIGHTS_KPC, mean("mdot_out_K")[:, b], "o-", color=colors[label], label=label)
+                draw(axes[row, b], HEIGHTS_KPC, mean("mdot_out_K")[:, b], label, series=False, marker="o",
+                     legend_label=window_label(label, steps))
                 axes[row, b].set_title(f"{bin_name} outflow, {window[0]}-{window[1]} Myr")
-            axes[row, 4].plot(HEIGHTS_KPC, mean("mdot_net").sum(axis=1), "o-", color=colors[label], label=label)
+            draw(axes[row, 4], HEIGHTS_KPC, mean("mdot_net").sum(axis=1), label, series=False, marker="o",
+                 legend_label=window_label(label, steps))
             axes[row, 4].set_title(f"net total, {window[0]}-{window[1]} Myr")
+        if merged:
+            legend(axes[row, 0], notes=notes)
+        elif row == 0 or single:
+            axes[row, 0].legend(fontsize=8)
     for ax in axes.flat:
         ax.set(xlabel="|z| [kpc]", ylabel=r"$\dot M$ [$M_\odot$/yr]")
         ax.grid(alpha=0.3)
-    axes[0, 0].legend(fontsize=8)
+    if merged:
+        fig.suptitle("A-series, window-mean outflow by entropy bin against height" + title_tail)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_profiles{suffix}.png"), dpi=130)
 
     # 3) Phase diagrams at ~35 Myr, one per resolution, and the free-wind axis vs CC85.
-    fig, axes = plt.subplots(2, max(len(data), 3), figsize=(5.5 * max(len(data), 3), 10), squeeze=False)
-    for col, (label, rec) in enumerate(data.items()):
+    def phase_panel(ax, label, norm):
+        rec = data[label]
         step = min(rec, key=lambda s: abs(rec[s]["time_myr"] - 35))
         r = rec[step]
-        axes[0, col].pcolormesh(LOG_N_EDGES, LOG_T_EDGES, r["hist_nT"].T, norm=LogNorm(1e3, None), cmap="viridis")
-        axes[0, col].set(title=f"{label}: mass in |z| > 1 kpc, {r['time_myr']:.1f} Myr", xlabel="log n", ylabel="log T")
+        mesh = ax.pcolormesh(LOG_N_EDGES, LOG_T_EDGES, r["hist_nT"].T, norm=norm, cmap="viridis")
+        ax.set(title=f"{label}: mass in |z| > 1 kpc, {r['time_myr']:.1f} Myr", xlabel="log n", ylabel="log T")
         log_n_line = np.array([LOG_N_EDGES[0], LOG_N_EDGES[-1]])
         for edge in ENTROPY_EDGES:  # constant entropy: log T = log K + 2/3 log n
-            axes[0, col].plot(log_n_line, edge + 2 / 3 * log_n_line, "w--", lw=0.8)
-        axes[0, col].set(xlim=(LOG_N_EDGES[0], LOG_N_EDGES[-1]), ylim=(LOG_T_EDGES[0], LOG_T_EDGES[-1]))
+            ax.plot(log_n_line, edge + 2 / 3 * log_n_line, "w--", lw=0.8)
+        ax.set(xlim=(LOG_N_EDGES[0], LOG_N_EDGES[-1]), ylim=(LOG_T_EDGES[0], LOG_T_EDGES[-1]))
+        return mesh
+
+    if merged:
+        num_cols = max(len(runs), 3)
+        fig, axes = plt.subplots(3, num_cols, figsize=(5.0 * num_cols + 1.5, 14), squeeze=False, layout="constrained")
+        vmax = max(data[label][s]["hist_nT"].max() for label in data for s in data[label])
+        norm = LogNorm(1e3, vmax)
+        for row, scheme_runs in enumerate((runs, fv_runs)):
+            for col, (label, _) in enumerate(scheme_runs):
+                if label in data:
+                    mesh = phase_panel(axes[row, col], label, norm)
+                else:
+                    axes[row, col].axis("off")
+            for ax in axes[row, len(scheme_runs):]:
+                ax.axis("off")
+        fig.colorbar(mesh, ax=axes[:2, :], label=r"mass per bin [$M_\odot$]", shrink=0.8)
+        axis_row = axes[2]
+    else:
+        fig, axes = plt.subplots(2, max(len(data), 3), figsize=(5.5 * max(len(data), 3), 10), squeeze=False)
+        for col, label in enumerate(data):
+            phase_panel(axes[0, col], label, LogNorm(1e3, None))
+        axis_row = axes[1]
     zs = np.linspace(0.05, 9.5, 200)
     n_cc, t_cc, v_cc = cc85_profile(zs)
     for label, rec in data.items():
@@ -554,40 +646,57 @@ def plot(runs, suffix="", cmap="Blues"):
         m = np.mean([rec[s]["axis_mass"] for s in steps], axis=0)
         north = z > 0
         for ax, key, conv in (
-            (axes[1, 0], "axis_mass_logn", lambda a: 10**a),
-            (axes[1, 1], "axis_mass_logT", lambda a: 10**a),
-            (axes[1, 2], "axis_mass_v", lambda a: a * 100),
+            (axis_row[0], "axis_mass_logn", lambda a: 10**a),
+            (axis_row[1], "axis_mass_logT", lambda a: 10**a),
+            (axis_row[2], "axis_mass_v", lambda a: a * 100),
         ):
             value = np.mean([rec[s][key] for s in steps], axis=0) / np.maximum(m, 1e-300)
-            ax.plot(z[north], conv(value[north]), color=colors[label], label=label)
-    for ax, ref, name in ((axes[1, 0], n_cc, "n [cm^-3]"), (axes[1, 1], t_cc, "T [K]"), (axes[1, 2], v_cc, "v_z [km/s]")):
-        ax.plot(zs, ref, "k--", lw=1, label="CC85 (high state)")
+            draw(ax, z[north], conv(value[north]), label, series=False, legend_label=window_label(label, steps))
+    for ax, ref, name in ((axis_row[0], n_cc, "n [cm^-3]"), (axis_row[1], t_cc, "T [K]"), (axis_row[2], v_cc, "v_z [km/s]")):
+        ax.plot(zs, ref, "k--" if not merged else "k:", lw=1, label="CC85 (high state)")
         ax.set(xlabel="z [kpc]", ylabel=name, title=f"free-wind axis R < {AXIS_RADIUS_KPC} kpc, 20-40 Myr")
         if name != "v_z [km/s]":
             ax.set_yscale("log")
         ax.grid(alpha=0.3)
-    axes[1, 0].legend(fontsize=8)
-    for ax in axes[1, 3:]:
+    if merged:
+        notes = []
+        for label, rec in data.items():
+            steps = [s for s in sorted(rec) if 20 <= rec[s]["time_myr"] <= 40]
+            if len(steps) == 1:
+                notes.append(f"{label}: 1 snapshot ({rec[steps[0]]['time_myr']:.1f} Myr)")
+        legend(axis_row[0], notes=notes + ["CC85 (high state): black dotted"])
+    else:
+        axis_row[0].legend(fontsize=8)
+    for ax in axis_row[3:]:
         ax.axis("off")
-    fig.tight_layout()
+    if merged:
+        fig.suptitle(f"Phase diagrams at ~35 Myr ({FD_NAME} top row, {FV_NAME} middle row, same colour scale) "
+                     "and the free-wind axis" + title_tail)
+    else:
+        fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_phases_axis{suffix}.png"), dpi=130)
 
     # 4) Instability onset at the cavity rim, from the frames' midplane slices.
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
-    for label, tag in runs:
+    for label, tag in all_runs:
         frame_dir = os.path.join(SCRIPT_DIR, frame_dirs[label])
         if not os.path.isdir(frame_dir):
             continue
         t, mean_r, scatter, _ = rim_metrics(frame_dir)
-        color = colors.get(label, "k")
-        axes[0].plot(t, scatter, color=color, label=label)
-        axes[1].plot(t, mean_r, color=color, label=label)
+        draw(axes[0], t, scatter, label, series=False)
+        draw(axes[1], t, mean_r, label, series=False)
     axes[0].set(xlabel="t [Myr]", ylabel=r"$\sigma_R / \langle R \rangle$",
                 title=f"midplane cavity rim roughness (n = {RIM_DENSITY_CM3:g} cm$^{{-3}}$)", yscale="log")
     axes[1].set(xlabel="t [Myr]", ylabel=r"$\langle R_\mathrm{rim} \rangle$ [kpc]", title="mean cavity rim radius")
     for ax in axes:
         ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
+        if not merged:
+            ax.legend(fontsize=8)
+    if merged:
+        sparse_backup = dict(sparse)
+        sparse.clear()  # the rim comes from every frame
+        legend(axes[0], loc="lower right")
+        sparse.update(sparse_backup)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence_rim{suffix}.png"), dpi=130)
 
@@ -603,75 +712,108 @@ def plot(runs, suffix="", cmap="Blues"):
         z, area = per_side(rec, step, "zarea_fast")
         return z, np.sqrt(area / np.pi)
 
-    fig, axes = plt.subplots(2, 3, figsize=(20, 10))
-    for label, rec in data.items():
-        c = colors[label]
-        for T, ls in ((25, "-"), (37.5, "--")):
-            step = min(rec, key=lambda s: abs(rec[s]["time_myr"] - T))
-            z, radius = wind_radius(rec, step)
-            axes[0, 0].plot(z, radius, ls, color=c, label=f"{label} {rec[step]['time_myr']:.1f} Myr")
-        steps = sorted(rec)
-        t = np.array([rec[s]["time_myr"] for s in steps])
-        # The cone reaches the box edge (|x| = 5 kpc) by z ~ 3 kpc, and the
-        # mixed gas lives below ~1.5 kpc: measure at z = 1 and 2 kpc.
-        for height, ls in ((1.0, "-"), (2.0, "--")):
-            angle, thickness = [], []
-            for s in steps:
-                z, radius = wind_radius(rec, s)
-                k = int(np.argmin(np.abs(z - height)))
-                angle.append(np.degrees(np.arctan(radius[k] / z[k])))
-                _, mixed_area = per_side(rec, s, "zarea_K", 1)
-                # Undefined before the wind has opened a cone at this height.
-                thickness.append(mixed_area[k] / (2 * np.pi * radius[k]) * 1e3 if radius[k] > 0.2 else np.nan)
-            axes[0, 1].plot(t, angle, ls, color=c, label=f"{label} z = {height:g}")
-            if height == 1.0:
-                axes[1, 1].plot(t, thickness, ls, color=c, label=label)
-        for h, ls in ((h1, "-"), (int(np.argmin(np.abs(HEIGHTS_KPC - 2))), "--")):
-            t, v = _series(rec, "mdot_out_K", lambda a, h=h: (a[h, 0] + a[h, 1]) / max(a[h].sum(), 1e-30))
-            axes[0, 2].plot(t, v, ls, color=c, label=f"{label} z = {HEIGHTS_KPC[h]:g}")
-        t, v = _series(rec, "mass_halo_K", lambda a: a[1])
-        axes[1, 0].plot(t, v / 1e8, color=c, label=label)
-        window = [s for s in steps if 30 <= rec[s]["time_myr"] <= 45]
-        if window:
-            z = rec[window[0]]["z_kpc"]
-            profile = np.mean([per_side(rec, s, "zmass_K", 1)[1] for s in window], axis=0)
-            dz = z[1] - z[0]
-            axes[1, 2].plot(z[z > 0], profile / dz / 1e6, color=c, label=label)
-    axes[0, 0].axhline(np.sqrt(BOX_SIZE_KPC[0] * BOX_SIZE_KPC[1] / np.pi), color="0.5", ls=":", lw=0.8)
-    axes[0, 0].set(xlabel="z [kpc]", ylabel=r"$R_\mathrm{cone} = \sqrt{A(v_\mathrm{out} > 600\,\mathrm{km/s})/\pi}$ [kpc]",
-                   title="free-wind cone radius")
-    axes[0, 1].set(xlabel="t [Myr]", ylabel="half-opening angle [deg]", title="atan(R_cone / z) at z = 1 (solid), 2 kpc (dashed)")
-    axes[0, 2].set(xlabel="t [Myr]", ylabel="fraction", title="entrained+mixed share of the outflowing mass flux, z = 1 (solid), 2 kpc (dashed)")
-    axes[1, 0].set(xlabel="t [Myr]", ylabel=r"[$10^8 M_\odot$]", title="mixed gas (5.5 < log K < 6.8) in |z| > 0.5 kpc")
-    axes[1, 1].set(xlabel="t [Myr]", ylabel="[pc]", title="radial width of mixed gas at z = 1 kpc: A_mixed / (2 pi R_cone)")
-    axes[1, 2].set(xlabel="z [kpc]", ylabel=r"dM/dz [$10^6 M_\odot$/kpc]", title="mixed gas against height, 30-45 Myr")
-    for ax in axes.flat:
-        ax.grid(alpha=0.3)
-        ax.legend(fontsize=7)
+    def morphology(axes, block_labels, prefix=""):
+        for label in block_labels:
+            rec = data[label]
+            c = colors[label]
+            plotted = set()
+            for T, ls in ((25, "-"), (37.5, "--")):
+                step = min(rec, key=lambda s: abs(rec[s]["time_myr"] - T))
+                if step in plotted:  # a sparse run: both targets map to one snapshot
+                    continue
+                plotted.add(step)
+                z, radius = wind_radius(rec, step)
+                axes[0, 0].plot(z, radius, ls, color=c, label=f"{label} {rec[step]['time_myr']:.1f} Myr")
+            steps = sorted(rec)
+            t = np.array([rec[s]["time_myr"] for s in steps])
+            # The cone reaches the box edge (|x| = 5 kpc) by z ~ 3 kpc, and the
+            # mixed gas lives below ~1.5 kpc: measure at z = 1 and 2 kpc.
+            note = f" ({sparse[label]} snapshots)" if label in sparse else ""
+
+            def line(ls, marker="o", label=label):
+                """A line style, or markers only (o: z = 1, s: z = 2) for a sparse run."""
+                return {"ls": "none", "marker": marker, "ms": 5} if label in sparse else {"ls": ls}
+            for height, ls in ((1.0, "-"), (2.0, "--")):
+                angle, thickness = [], []
+                for s in steps:
+                    z, radius = wind_radius(rec, s)
+                    k = int(np.argmin(np.abs(z - height)))
+                    angle.append(np.degrees(np.arctan(radius[k] / z[k])))
+                    _, mixed_area = per_side(rec, s, "zarea_K", 1)
+                    # Undefined before the wind has opened a cone at this height.
+                    thickness.append(mixed_area[k] / (2 * np.pi * radius[k]) * 1e3 if radius[k] > 0.2 else np.nan)
+                marker = "o" if height == 1.0 else "s"
+                axes[0, 1].plot(t, angle, color=c, label=f"{label} z = {height:g}{note}", **line(ls, marker))
+                if height == 1.0:
+                    axes[1, 1].plot(t, thickness, color=c, label=label + note, **line(ls))
+            for h, ls in ((h1, "-"), (int(np.argmin(np.abs(HEIGHTS_KPC - 2))), "--")):
+                t, v = _series(rec, "mdot_out_K", lambda a, h=h: (a[h, 0] + a[h, 1]) / max(a[h].sum(), 1e-30))
+                marker = "o" if ls == "-" else "s"
+                axes[0, 2].plot(t, v, color=c, label=f"{label} z = {HEIGHTS_KPC[h]:g}{note}", **line(ls, marker))
+            t, v = _series(rec, "mass_halo_K", lambda a: a[1])
+            axes[1, 0].plot(t, v / 1e8, color=c, label=label + note, **line("-"))
+            window = [s for s in steps if 30 <= rec[s]["time_myr"] <= 45]
+            if window:
+                z = rec[window[0]]["z_kpc"]
+                profile = np.mean([per_side(rec, s, "zmass_K", 1)[1] for s in window], axis=0)
+                dz = z[1] - z[0]
+                axes[1, 2].plot(z[z > 0], profile / dz / 1e6, color=c, label=window_label(label, window))
+        axes[0, 0].axhline(np.sqrt(BOX_SIZE_KPC[0] * BOX_SIZE_KPC[1] / np.pi), color="0.5", ls=":", lw=0.8)
+        axes[0, 0].set(xlabel="z [kpc]", ylabel=r"$R_\mathrm{cone} = \sqrt{A(v_\mathrm{out} > 600\,\mathrm{km/s})/\pi}$ [kpc]",
+                       title=prefix + "free-wind cone radius")
+        axes[0, 1].set(xlabel="t [Myr]", ylabel="half-opening angle [deg]",
+                       title=prefix + "atan(R_cone / z) at z = 1 (solid), 2 kpc (dashed)")
+        axes[0, 2].set(xlabel="t [Myr]", ylabel="fraction",
+                       title=prefix + ("entrained+mixed share of the outflowing mass flux" if not prefix else
+                                       "entrained+mixed share")
+                       + ", z = 1 (solid), 2 kpc (dashed)")
+        axes[1, 0].set(xlabel="t [Myr]", ylabel=r"[$10^8 M_\odot$]", title=prefix + "mixed gas (5.5 < log K < 6.8) in |z| > 0.5 kpc")
+        axes[1, 1].set(xlabel="t [Myr]", ylabel="[pc]", title=prefix + "radial width of mixed gas at z = 1 kpc: A_mixed / (2 pi R_cone)")
+        axes[1, 2].set(xlabel="z [kpc]", ylabel=r"dM/dz [$10^6 M_\odot$/kpc]", title=prefix + "mixed gas against height, 30-45 Myr")
+        for ax in axes.flat:
+            ax.grid(alpha=0.3)
+            ax.legend(fontsize=7)
+
+    if merged:
+        fig, axes = plt.subplots(4, 3, figsize=(20, 20))
+        for row in (2, 3):
+            for col in range(3):
+                axes[row, col].sharex(axes[row - 2, col])
+                axes[row, col].sharey(axes[row - 2, col])
+        morphology(axes[:2], [label for label, _ in runs if label in data], f"{FD_NAME}: ")
+        morphology(axes[2:], [label for label, _ in fv_runs if label in data], f"{FV_NAME}: ")
+    else:
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+        morphology(axes, list(data))
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_morphology{suffix}.png"), dpi=130)
 
     # 6) Emission convergence from the cgols_emission.py caches.
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
-    for label, tag in runs:
+    for label, tag in all_runs:
         path = os.path.join(SCRIPT_DIR, "data", "studies", f"emission{tag}.npz")
         if not os.path.exists(path):
             continue
         cache = np.load(path, allow_pickle=True)
         t = cache["per_snapshot__time_myr"]
-        c = colors.get(label, "k")
         for ax, key in zip(axes[:3], ("L_xray_cgols_xz", "L_xray_atomdb_xz", "L_halpha_xz")):
-            ax.semilogy(t, cache[f"per_snapshot__{key}"], color=c, label=label)
+            draw(ax, t, cache[f"per_snapshot__{key}"], label, series=False, method="semilogy")
         i = int(np.argmin(np.abs(t - 60)))
         z = cache["per_snapshot__profile_z_kpc"][i]
         profile = 0.5 * (cache["per_snapshot__profile_xray_cgols_xz_north"][i] + cache["per_snapshot__profile_xray_cgols_xz_south"][i])
-        axes[3].semilogy(z, profile, color=c, label=f"{label} ({t[i]:.0f} Myr)")
+        draw(axes[3], z, profile, label, series=False, method="semilogy", legend_label=f"{label} ({t[i]:.0f} Myr)")
     for ax, title in zip(axes, ("L_X1 (CGOLS Eq. 17) [erg/s]", "L_X2 (AtomDB 0.3-2 keV) [erg/s]", "L_Halpha [erg/s]",
                                 "S_X1(|z|) at 60 Myr, N/S mean [erg/s/cm^2/arcmin^2]")):
         ax.set_title(title)
         ax.set_xlabel("t [Myr]" if "S_X" not in title else "|z| [kpc]")
         ax.grid(alpha=0.3)
-        ax.legend(fontsize=8)
+        if not merged:
+            ax.legend(fontsize=8)
+    if merged:
+        sparse_backup = dict(sparse)
+        sparse.clear()  # emission comes from every frame
+        legend(axes[0], loc="lower right")
+        sparse.update(sparse_backup)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"a_series_convergence_emission{suffix}.png"), dpi=130)
 
@@ -716,9 +858,13 @@ def main():
     parser.add_argument("--plot", nargs="*", help="LABEL=TAG[:FRAMES_DIR] pairs of cached runs to compare")
     parser.add_argument("--suffix", default="", help="figure-name suffix, e.g. _fv (default: the FD A-series names)")
     parser.add_argument("--cmap", default="Blues", help="colormap of the resolution ladder")
+    parser.add_argument("--cmap-start", type=float, default=0.35,
+                        help="colormap value of the first run (0.5667 keeps the 128-1024 colours for a 256-1024 ladder)")
+    parser.add_argument("--fv", nargs="*", help="merged FD+FV figures: FV LABEL=TAG[:FRAMES_DIR] runs, paired with --plot by position")
     args = parser.parse_args()
     if args.plot:
-        plot([tuple(spec.split("=", 1)) for spec in args.plot], args.suffix, args.cmap)
+        split = lambda specs: [tuple(spec.split("=", 1)) for spec in specs or ()]
+        plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start)
     else:
         run(args.tag, args.checkpoint_dir, args.steps, args.workers)
 
