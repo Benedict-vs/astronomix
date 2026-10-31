@@ -422,7 +422,7 @@ def _series(records, key, reducer):
 
 
 #: A run with fewer cached snapshots than this is drawn as markers, not a line
-#: (e.g. FV-1024: only the checkpoints at 30, 60, 73.75 and 75 Myr exist).
+#: (e.g. a run whose checkpoints were pruned to a few kept states).
 SPARSE_SNAPSHOTS = 8
 #: Scheme names of the merged FD + FV figures (--fv).
 FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
