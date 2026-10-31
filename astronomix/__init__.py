@@ -20,6 +20,7 @@ from astronomix.option_classes.simulation_config import (
     MINMOD,
     OSHER,
     VAN_LEER,
+    PPM,
     HLL,
     HLLC,
     HLLC_LM,

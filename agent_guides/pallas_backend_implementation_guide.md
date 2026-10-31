@@ -785,7 +785,7 @@ a dedicated dual strong-scaling sweep has not been run.
 `_finite_volume/_state_evolution/_van_leer_pallas.py`. One fused kernel per
 VL2 stage (`vl2_predictor_dc`, `vl2_corrector_plm`): for a block of cells it
 loads the stage's primitive stencil along each axis (±1 cell for donor cell,
-±2 for PLM), reconstructs, solves the Riemann problems on all `2*dim` faces of
+±2 for PLM, ±3 for PPM), reconstructs, solves the Riemann problems on all `2*dim` faces of
 the cell, forms the divergence, applies the Dedner GLM source and converts to
 primitives. `U^n` is recomputed in-kernel from `W^n` (pointwise read), and the
 corrector aliases `W^n`'s buffer to its output, so a step is one reduction plus
@@ -813,6 +813,30 @@ Design notes worth keeping:
 - **Ghost-cell layout** without block-aligned interiors: the grid covers only
   the interior, outputs are whole-array specs written with explicit indices,
   and the ghost cells are refilled by the boundary handler afterwards.
+- **Sharded ghost-cell layout**: the mesh splits the ghost-padded array
+  (N + 2g per axis; ``shard_map`` needs it to divide evenly, otherwise the
+  predicate warns and falls back to native, e.g. PLM beyond 4 shards or PPM
+  beyond 2 shards per axis when N is a multiple of the shard count). Along
+  split axes the kernel updates every cell of the halo-padded local array
+  with periodic local indexing, like the periodic-roll path, and locates its
+  cells in the global array from ``shard_layout`` (``_pallas_call_sharded``
+  ``pass_shard_layout=True`` passes the shard origin from
+  ``lax.axis_index``): global ghost cells pass their stage values through and
+  report POSITIVE failure codes, so the FOFC mask and the boundary handler see
+  the same as on one device. The ring exchange wraps around at the global
+  ends, but those cells only reach global ghost cells' stencils (g >= reach).
+  The kernel takes the block shape resolved on the global grid from the
+  wrapper, so every shard tiles with the block the wrapper aligned to.
+- **PPM** (`limiter = PPM`, corrector only, as in AthenaPK): the kernel calls
+  the native `_ppm_face_values` on the ±3 stencil; the stencil reach (and so
+  the multi-device halo, 3 → one block) comes from `STENCIL_REACH` in
+  `_van_leer_integrator.py`, and `finalize_config` gives non-periodic runs
+  three ghost cells. The Colella–Sekora limiter is discontinuous in its data
+  (exact-sign extremum tests, decided by round-off on plateaus of equal
+  cells), so native and Pallas PPM (and sharded vs unsharded) runs drift
+  apart to the truncation-error level wherever such plateaus occur (top-hat
+  ICs, uniform ambient media); compare them per step from a developed state
+  (~1e-15) or on smooth problems (~1e-15 over whole runs).
 - **First-order flux correction**: the kernel optionally reports a positivity
   failure code per cell and accepts a correction mask (faces bordering a
   masked cell use donor-cell LLF fluxes); up to four `lax.cond`-guarded

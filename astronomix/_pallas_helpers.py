@@ -882,6 +882,7 @@ def _pallas_call_sharded(
     num_state_outputs: int = 1,
     input_halos=None,
     output_halo=None,
+    pass_shard_layout: bool = False,
 ):
     """
     Optionally wrap a Pallas kernel build-and-call in ``shard_map``.
@@ -926,15 +927,26 @@ def _pallas_call_sharded(
             strips all padding. A kept halo lets a following local stencil
             reuse cells this kernel already computed instead of exchanging
             them again.
+        pass_shard_layout:
+            Also call ``kernel_build_fn`` with the keyword ``shard_layout``,
+            which tells a kernel on a non-periodic (ghost-cell) array where
+            its local block lies in the global array: one entry per spatial
+            axis, ``None`` for an axis that is not split, otherwise
+            ``(origin, global_extent)`` with ``origin`` the traced global
+            index of the first cell of the padded local array (negative on
+            the first shard, whose left halo is the wrapped-around end of the
+            array) and ``global_extent`` the static global extent. The
+            single-device path passes ``shard_layout=None``.
 
     Returns:
         Either ``kernel_build_fn(*state_inputs, *other_args)`` directly
         (single-device path) or the equivalent ``shard_map``-wrapped
         result with the halo stripped from each state-shape output.
     """
+    layout_keywords = {"shard_layout": None} if pass_shard_layout else {}
     mesh = _current_pallas_mesh()
     if mesh is None or mesh.size <= 1:
-        return kernel_build_fn(*state_inputs, *other_args)
+        return kernel_build_fn(*state_inputs, *other_args, **layout_keywords)
 
     first_state_input = state_inputs[0]
     ndim = first_state_input.ndim - 1
@@ -942,7 +954,11 @@ def _pallas_call_sharded(
 
     sharded_axes = _spatial_sharded_axes(mesh, pspec, ndim)
     if not sharded_axes:
-        return kernel_build_fn(*state_inputs, *other_args)
+        return kernel_build_fn(*state_inputs, *other_args, **layout_keywords)
+    if pass_shard_layout and len({axis for axis, _, _ in sharded_axes}) != len(sharded_axes):
+        raise NotImplementedError(
+            "pass_shard_layout supports one mesh axis per array axis only."
+        )
 
     # The pairwise exchange needs an even device count along every split axis
     # and string axis names; the shard_map then runs on the same devices under
@@ -981,6 +997,23 @@ def _pallas_call_sharded(
         """Pad the local shards, run the kernel build, strip the halo."""
         state_arrays = list(all_args[: len(state_inputs)])
         replicated_args = all_args[len(state_inputs):]
+
+        body_keywords = {}
+        if pass_shard_layout:
+            # Where the padded local array starts in the global array, from
+            # the shard's position along each split axis.
+            shard_layout = [None] * ndim
+            for array_axis, mesh_axis_name, num_devices in sharded_axes:
+                spatial_axis = array_axis - 1
+                local_extent = int(state_arrays[0].shape[array_axis])
+                origin = (
+                    jax.lax.axis_index(mesh_axis_name) * local_extent - shape_halo[spatial_axis]
+                )
+                shard_layout[spatial_axis] = (
+                    origin.astype(jnp.int32),
+                    local_extent * int(num_devices),
+                )
+            body_keywords["shard_layout"] = tuple(shard_layout)
 
         for array_axis, mesh_axis_name, num_devices in sharded_axes:
             spatial_axis = array_axis - 1
@@ -1027,7 +1060,7 @@ def _pallas_call_sharded(
         # this, a kernel that calls ``_pallas_call_sharded`` from its body
         # would wrap itself forever.
         with pallas_mesh_context(None):
-            out = kernel_build_fn(*state_arrays, *replicated_args)
+            out = kernel_build_fn(*state_arrays, *replicated_args, **body_keywords)
 
         def strip_halo(output, kept_halo):
             """Remove all but ``kept_halo`` of the padding from one output."""
