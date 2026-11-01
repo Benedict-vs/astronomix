@@ -1044,6 +1044,17 @@ if KI02 and FUV and FEEDBACK != "central":
         "model-C clusters are not wired in yet (use CGOLS_FUV=0 or central feedback)"
     )
 
+# Thermal support of the disk IC under the ki02gf12 curve, as T / mu in Kelvin.
+# The paper's disk (T_disk = 1e4 K at mu = 0.6, T / mu = 16667 K) is not an
+# equilibrium of this curve: within 5 Myr the gas cools to T / mu ~ 6000 K
+# (neutral, T ~ 7300 K at the SFR 5 FUV floor, almost independent of R), loses
+# ~2.9x of its support and collapses vertically on the orbital time, bouncing
+# for tens of Myr. Keeps Sigma(R) and M_gas; the disk is ~2x thinner than the
+# paper's. CGOLS_KI02_DISK_T_OVER_MU=16667 restores the paper's disk.
+KI02_DISK_T_OVER_MU = float(os.environ.get("CGOLS_KI02_DISK_T_OVER_MU", "6000"))
+if KI02 and "CGOLS_IC_TAG" not in os.environ:
+    IC_TAG += f"_ki{KI02_DISK_T_OVER_MU:g}"  # never reuse a paper-disk IC file
+
 # Positivity and the energy recovery (upstream astronomix, Oct 2026). Positivity
 # of the finite-difference scheme comes from the positivity-preserving WENO
 # reconstruction (Zhang & Shu 2012; SimulationConfig.weno_positivity_preserving):
@@ -1924,7 +1935,8 @@ def build_config():
     if KI02:
         rprint(
             f"Radiative cooling ON: ki02gf12 curve (PR #8, n_H^2 Lambda - n_H Gamma), "
-            f"floor T/mu = 10 K, {COOLING_SUBCYCLES} sub-cycles, heating "
+            f"floor T/mu = 10 K, disk IC T/mu = {KI02_DISK_T_OVER_MU:g} K, "
+            f"{COOLING_SUBCYCLES} sub-cycles, heating "
             + (
                 f"FUV point source (Sigma_SFR,0 {FUV_SIGMA_SFR0:g}, r_s {FUV_SOFTENING_PC:g} pc, "
                 + (f"SFR fixed {FUV_SFR})" if FUV_SFR is not None else f"SFR floor {FUV_SFR_FLOOR:g})")
@@ -2259,7 +2271,7 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
 
     # ---- Constants needed for both gas components ----
     k_B_code = k_B.to(code_units.code_energy / u.K).value
-    T_disk_code = T_disk.to(u.K).value
+    T_disk_code = KI02_DISK_T_OVER_MU * mu if KI02 else T_disk.to(u.K).value
     m_p_code = m_p.to(code_units.code_mass).value
     c_s_d = jnp.sqrt(k_B_code * T_disk_code / (mu * m_p_code))  # isothermal disk
 
