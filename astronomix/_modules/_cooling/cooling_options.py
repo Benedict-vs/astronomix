@@ -185,6 +185,12 @@ class CoolingCurveConfig(NamedTuple):
     #: is not a cosmetic choice.
     density_convention: int = ELECTRON_HYDROGEN_DENSITY
 
+    #: Look up ``PIECEWISE_POWER_LAW`` bins (and the heating-factor table) by
+    #: direct indexing instead of a binary search. Only valid when both tables
+    #: are evenly spaced in log10 T, as ``ki02_gf12_cooling`` builds them; the
+    #: bins, and so the rates, are the same as with the search.
+    uniform_log_tables: bool = False
+
 
 class CoolingConfig(NamedTuple):
     """Top-level cooling configuration (activation, method and curve)."""

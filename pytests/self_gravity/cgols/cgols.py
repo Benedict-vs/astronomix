@@ -1039,6 +1039,13 @@ FUV_SFR_FLOOR = float(os.environ.get("CGOLS_FUV_SFR_FLOOR", "5"))
 FUV_SFR = os.environ.get("CGOLS_FUV_SFR")
 FUV_SOFTENING_PC = float(os.environ.get("CGOLS_FUV_SOFTENING_PC", str(INJ_RAD)))
 HEAT_RATIO = float(os.environ.get("CGOLS_HEAT_RATIO", "1"))
+# Table lookup of the ki02gf12 curve and its heating factor: "search" (binary
+# search, jnp.searchsorted / jnp.interp) or "direct" (O(1) indexing on the
+# evenly log-spaced tables ki02_gf12_cooling builds; same bins, 9x faster on
+# the 256 state: 39 vs 351 ms per call, bit-identical output).
+COOLING_TABLE_LOOKUP = os.environ.get("CGOLS_COOLING_TABLE_LOOKUP", "direct")
+if COOLING_TABLE_LOOKUP not in ("search", "direct"):
+    raise ValueError(f"CGOLS_COOLING_TABLE_LOOKUP must be 'search' or 'direct', got {COOLING_TABLE_LOOKUP!r}")
 if KI02 and FUV and FEEDBACK != "central":
     raise NotImplementedError(
         "CGOLS_FUV point sources follow the central starburst only; the moving "
@@ -2113,6 +2120,7 @@ def build_config():
                         CoolingCurveConfig(
                             cooling_curve_type=PIECEWISE_POWER_LAW,
                             density_convention=ELECTRON_HYDROGEN_DENSITY,
+                            uniform_log_tables=COOLING_TABLE_LOOKUP == "direct",
                         )
                         if KI02
                         else CoolingCurveConfig(

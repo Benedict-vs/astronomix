@@ -380,11 +380,30 @@ def power_law_temporal_evolution_function_inverse(
     )
 
 
+def _uniform_log_bin(log_x, log_table, x=None, table=None):
+    """``searchsorted(table, x) - 1`` for a table evenly spaced in ``log_table``.
+
+    O(1) instead of a binary search: the bin follows from the spacing of
+    ``log_table``, then one comparison each way against ``table`` (default:
+    ``log_table`` itself) absorbs the rounding at bin edges, so the result is
+    the search's bin, table[k] < x <= table[k + 1].
+    """
+    if table is None:
+        x, table = log_x, log_table
+    last = log_table.shape[0] - 2
+    k = jnp.floor((log_x - log_table[0]) / (log_table[1] - log_table[0]))
+    k = jnp.clip(k.astype(jnp.int32), 0, last)
+    k = k - (x <= jnp.take(table, k)).astype(jnp.int32)
+    k = k + (x > jnp.take(table, jnp.clip(k + 1, 0, last + 1))).astype(jnp.int32)
+    return k
+
+
 def _evaluate_piecewise_power_law(
     T_in,
     T_table,
     Lambda_table,
     alpha_table,
+    log10_T_table=None,
 ):
     """
     Lambda(T) on a piecewise power-law table, ``Lambda_k (T / T_k)^alpha_k``.
@@ -400,13 +419,23 @@ def _evaluate_piecewise_power_law(
         T_table: The tabulated bin-edge temperatures T_k (ascending).
         Lambda_table: The tabulated cooling rates Lambda_k at the bin edges.
         alpha_table: The power-law slope alpha_k of each bin.
+        log10_T_table: The log10 bin edges, if evenly spaced; then the bin is
+            found by direct indexing (see ``CoolingCurveConfig.uniform_log_tables``).
 
     Returns:
         The cooling rate, zero outside the tabulated temperature range.
     """
     table_minimum_temperature = T_table[0]
     table_maximum_temperature = T_table[-1]
-    bin_index = jnp.searchsorted(T_table, T_in) - 1
+    if log10_T_table is None:
+        bin_index = jnp.searchsorted(T_table, T_in) - 1
+    else:
+        bin_index = _uniform_log_bin(
+            jnp.log10(jnp.maximum(T_in, jnp.finfo(T_table.dtype).tiny)),
+            log10_T_table,
+            T_in,
+            T_table,
+        )
     bin_index = jnp.clip(bin_index, 0, T_table.shape[0] - 2)
     alpha_k = jnp.take(alpha_table, bin_index)
     T_k = jnp.take(T_table, bin_index)
@@ -583,6 +612,11 @@ def _cooling_rate(
             10**cooling_curve_params.log10_T_table,
             10**cooling_curve_params.log10_Lambda_table,
             cooling_curve_params.alpha_table,
+            log10_T_table=(
+                cooling_curve_params.log10_T_table
+                if cooling_curve_config.uniform_log_tables
+                else None
+            ),
         )
     elif cooling_curve_config.cooling_curve_type == CIE_PARABOLIC:
         return cooling_rate_cie_parabolic(temperature, cooling_curve_params)
@@ -755,11 +789,20 @@ def dtemperature_dt(
     # a trace-time branch.
     heating = heating_rate
     if heating_factor_table is not None and heating_factor_table.shape[0] > 0:
-        heating = heating_rate * jnp.interp(
-            jnp.log10(jnp.maximum(temperature, jnp.finfo(temperature.dtype).tiny)),
-            heating_log10_T_table,
-            heating_factor_table,
-        )
+        log_T = jnp.log10(jnp.maximum(temperature, jnp.finfo(temperature.dtype).tiny))
+        if cooling_curve_config.uniform_log_tables:
+            # jnp.interp by direct indexing (clamped to the end values).
+            k = jnp.clip(_uniform_log_bin(log_T, heating_log10_T_table), 0,
+                         heating_log10_T_table.shape[0] - 2)
+            x0 = jnp.take(heating_log10_T_table, k)
+            x1 = jnp.take(heating_log10_T_table, k + 1)
+            f0 = jnp.take(heating_factor_table, k)
+            f1 = jnp.take(heating_factor_table, k + 1)
+            x = jnp.clip(log_T, heating_log10_T_table[0], heating_log10_T_table[-1])
+            factor = f0 + (x - x0) / (x1 - x0) * (f1 - f0)
+        else:
+            factor = jnp.interp(log_T, heating_log10_T_table, heating_factor_table)
+        heating = heating_rate * factor
 
     return (
         -cooling_rate * (gamma - 1) * density * prefactor
