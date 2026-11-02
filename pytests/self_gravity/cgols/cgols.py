@@ -372,6 +372,7 @@ from astronomix._modules._cgols_wind.cluster_placement import (
 from astronomix._modules._cooling._cooling_tables import (
     cie_parabolic_cooling,
     ki02_gf12_cooling,
+    ki02_gf12_temperature,
 )
 from astronomix._modules._cooling.cooling_options import (
     CIE_PARABOLIC,
@@ -1281,6 +1282,18 @@ gamma = 5 / 3
 # (~7e-70) and m_p_code (~8e-64) both underflow to 0.0 in float32, which turns
 # T = P * mu * m_p_code / (rho * k_B_code) into 0/0 = NaN. Their ratio does not.
 T_factor = (mu * m_p / k_B * code_units.code_velocity**2).to(u.K).value
+
+
+def physical_temperature(T_mu):
+    """Physical T [K] from a ``P / rho * T_factor`` temperature (taken at mu = 0.6).
+
+    Under ki02gf12 the state carries T / mu(T), so the mu = 0.6 temperature of the
+    frames and states is ~2x too low in neutral gas; convert it for every figure
+    and cut. Other curves keep mu = 0.6 and pass through unchanged. Host-side.
+    """
+    if not KI02:
+        return T_mu
+    return ki02_gf12_temperature(np.asarray(T_mu, dtype=np.float64) / mu).astype(np.float32)
 
 
 def _kelvin_to_code_temperature(T_K):
@@ -2477,8 +2490,8 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         "pressure_max": P_total.max(),
         "n_midplane": rho_mid * n_factor,
         "n_zaxis": rho_zax * n_factor,
-        "T_midplane": P_mid / rho_mid * T_factor,
-        "T_zaxis": P_zax / rho_zax * T_factor,
+        "T_midplane": physical_temperature(P_mid / rho_mid * T_factor),
+        "T_zaxis": physical_temperature(P_zax / rho_zax * T_factor),
     }
     magnetic_kwargs = {}
     if MHD:
@@ -3090,7 +3103,7 @@ def load_snapshots(out_dir=SNAPSHOTS_DIR):
     out = {
         "time_myr": np.array([float(fr["time_myr"]) for fr in frames], dtype=np.float32),
         "n_xz": np.stack([fr["n_xz"] for fr in frames]),
-        "T_xz": np.stack([fr["T_xz"] for fr in frames]),
+        "T_xz": physical_temperature(np.stack([fr["T_xz"] for fr in frames])),
         "n_xy": np.stack([fr["n_xy"] for fr in frames]),
         "mdot_z": np.stack([fr["mdot_z"] for fr in frames]),
     }
@@ -3165,8 +3178,8 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
         return (
             rho_mid * n_factor,
             rho_z * n_factor,
-            P_mid / rho_mid * T_factor,
-            P_z / rho_z * T_factor,
+            physical_temperature(P_mid / rho_mid * T_factor),
+            physical_temperature(P_z / rho_z * T_factor),
         )
 
     n_mid_f, n_z_f, T_mid_f, T_z_f = density_temperature_profiles(final_state)
@@ -3291,7 +3304,7 @@ def analyse_results(final_state, config, registered_variables, initial_state=Non
 
     rho_f = final_state[registered_variables.density_index]
     P_f = final_state[registered_variables.pressure_index]
-    T_f = P_f / rho_f * T_factor
+    T_f = physical_temperature(P_f / rho_f * T_factor)
     n_f = rho_f * code_density_cgs / (mu * m_p_cgs)
 
     dx = L_x / dim_x
