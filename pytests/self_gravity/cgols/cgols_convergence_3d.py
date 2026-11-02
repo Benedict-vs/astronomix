@@ -30,7 +30,7 @@ tile by tile, like cgols_emission.py, and measures per snapshot
 
 and caches them in data/studies/convergence3d<tag>.npz (resumable). With
 --plot it compares cached runs (figures/cgols/comparisons/
-a_series_convergence3d_*.png).
+<prefix>_convergence3d_*.png, prefix a_series by default).
 
     python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8]
     python cgols_convergence_3d.py --plot A128=_A128 A256=_A256 A512=_A512 A1024=_A1024
@@ -428,7 +428,7 @@ SPARSE_SNAPSHOTS = 8
 FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
 
 
-def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
+def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_prefix="a_series"):
     """Compare cached runs; with fv_runs, FD (solid) and FV (dashed) in one figure set.
 
     fv_runs pairs with runs by position (same resolution, same colour).
@@ -463,6 +463,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     sparse = {label: len(rec) for label, rec in data.items() if len(rec) < SPARSE_SNAPSHOTS}
     fig_dir = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
     os.makedirs(fig_dir, exist_ok=True)
+    series = f"{name_prefix.split('_')[0].upper()}-series"  # a_series -> "A-series"
     h1, h5 = int(np.argmin(np.abs(HEIGHTS_KPC - 1))), int(np.argmin(np.abs(HEIGHTS_KPC - 5)))
 
     def draw(ax, x, y, label, series=True, method="plot", legend_label=None, **kwargs):
@@ -528,9 +529,9 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
     legend(axes[0, 0])
-    fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
+    fig.suptitle(f"{series}, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes_T{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes_T{suffix}.png"), dpi=130)
 
     # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
     fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
@@ -566,10 +567,10 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
     legend(axes[0, 0])
-    fig.suptitle("A-series, full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
+    fig.suptitle(f"{series}, " "full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
                  "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo" + title_tail)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes{suffix}.png"), dpi=130)
 
     # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
     fig, axes = plt.subplots(2, 5, figsize=(26, 9))
@@ -599,9 +600,9 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         ax.set(xlabel="|z| [kpc]", ylabel=r"$\dot M$ [$M_\odot$/yr]")
         ax.grid(alpha=0.3)
     if merged:
-        fig.suptitle("A-series, window-mean outflow by entropy bin against height" + title_tail)
+        fig.suptitle(f"{series}, window-mean outflow by entropy bin against height" + title_tail)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_profiles{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_profiles{suffix}.png"), dpi=130)
 
     # 3) Phase diagrams at ~35 Myr, one per resolution, and the free-wind axis vs CC85.
     def phase_panel(ax, label, norm):
@@ -674,7 +675,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
                      "and the free-wind axis" + title_tail)
     else:
         fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_phases_axis{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_phases_axis{suffix}.png"), dpi=130)
 
     # 4) Instability onset at the cavity rim, from the frames' midplane slices.
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
@@ -698,7 +699,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_rim{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_rim{suffix}.png"), dpi=130)
 
     # 5) Morphology from the 3D states: wind radius / opening angle, hot area,
     #    mixed gas and the mixing-layer thickness, per height (N/S averaged).
@@ -786,7 +787,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         morphology(axes, list(data))
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_morphology{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_morphology{suffix}.png"), dpi=130)
 
     # 6) Emission convergence from the cgols_emission.py caches.
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
@@ -815,7 +816,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_emission{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_emission{suffix}.png"), dpi=130)
 
     # Tables: window means by entropy bin, then by temperature phase.
     for window in ((15, 30), (30, 45), (45, 75)):
@@ -845,8 +846,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
                 f"  {label:7s} {mo[h1, 0]:6.2f} {mo[h1, 1]:6.2f} {mo[h1, 2]:6.2f} | "
                 f"{mo[h5, 0]:6.2f} {mo[h5, 1]:6.2f} {mo[h5, 2]:6.2f} ; {ed[h5].sum() / 1e42:5.2f}  ({len(steps)} snaps)"
             )
-    print(f"wrote a_series_convergence3d_{{fluxes,fluxes_T,profiles,phases_axis,morphology}}{suffix}.png, "
-          f"a_series_convergence_{{rim,emission}}{suffix}.png")
+    print(f"wrote {name_prefix}_convergence3d_{{fluxes,fluxes_T,profiles,phases_axis,morphology}}{suffix}.png, "
+          f"{name_prefix}_convergence_{{rim,emission}}{suffix}.png")
 
 
 def main():
@@ -861,10 +862,12 @@ def main():
     parser.add_argument("--cmap-start", type=float, default=0.35,
                         help="colormap value of the first run (0.5667 keeps the 128-1024 colours for a 256-1024 ladder)")
     parser.add_argument("--fv", nargs="*", help="merged FD+FV figures: FV LABEL=TAG[:FRAMES_DIR] runs, paired with --plot by position")
+    parser.add_argument("--prefix", default="a_series", help="figure-name prefix, e.g. c_series for the model-C ladder")
     args = parser.parse_args()
     if args.plot:
         split = lambda specs: [tuple(spec.split("=", 1)) for spec in specs or ()]
-        plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start)
+        plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start,
+             args.prefix)
     else:
         run(args.tag, args.checkpoint_dir, args.steps, args.workers)
 
