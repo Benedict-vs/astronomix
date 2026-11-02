@@ -144,9 +144,63 @@ _wait_or_exit() {
     done
 }
 
-for attempt in 1 2 3; do
+# PROGRESS WATCHDOG. Job 96656 (A-2048 leg 2) hung for 24 h on 32 GPUs after
+# an InfiniBand error one minute in ("NET/IB ... posted incorrect receive info"
+# -> "Aborting communicator"): no "may be stuck" warning, GPUs pinned at 100%,
+# no output. A healthy run prints a [diag] line every step (seconds apart at
+# 2048) and a checkpoint takes minutes, so a .out untouched for STALL seconds
+# is a hang. The run is killed and relaunched from its newest checkpoint.
+# An "Aborting communicator" line shortens the wait to STALL_ABORT.
+OUT_FILE=$(scontrol show job "${SLURM_JOB_ID:-0}" 2>/dev/null | sed -n 's/^ *StdOut=//p')
+OUT_FILE="${OUT_FILE:-cgols_${SLURM_JOB_ID:-local}.out}"
+STALL="${CGOLS_WATCHDOG_STALL:-2700}"              # 45 min without output
+STALL_ABORT="${CGOLS_WATCHDOG_STALL_ABORT:-600}"   # 10 min after a NCCL abort
+POLL="${CGOLS_WATCHDOG_POLL:-60}"
+KILL_WAIT="${CGOLS_WATCHDOG_KILL_WAIT:-60}"
+MAX_ATTEMPTS="${CGOLS_WATCHDOG_ATTEMPTS:-4}"
+CKPT_DIR="$CGOLS_DIR/data/cgols_checkpoints${CGOLS_RUN_TAG}"
+
+_kill_srun() {
+    kill "$SRUN_PID" 2>/dev/null; sleep "$KILL_WAIT"
+    kill -9 "$SRUN_PID" 2>/dev/null || true
+    wait "$SRUN_PID" 2>/dev/null || true
+    sleep "$KILL_WAIT"   # let the drivers reclaim ~130 GB on every GPU
+}
+
+# Returns 0 (after killing srun) if the run stalls, 1 once srun has exited.
+_watch_progress() {
+    local now age aborts
+    while kill -0 "$SRUN_PID" 2>/dev/null; do
+        sleep "$POLL"
+        kill -0 "$SRUN_PID" 2>/dev/null || return 1
+        now=$(date +%s)
+        age=$(( now - $(stat -c %Y "$OUT_FILE" 2>/dev/null || echo "$now") ))
+        aborts=$(( $(grep -c 'Aborting communicator' "$ERR_FILE" 2>/dev/null || true) - aborts0 ))
+        if [ "$age" -gt "$STALL" ] || { [ "$aborts" -gt 0 ] && [ "$age" -gt "$STALL_ABORT" ]; }; then
+            echo "WATCHDOG: attempt $attempt stalled (no output for ${age} s," \
+                 "$aborts NCCL abort(s)) at $(date -Is), relaunching" >&2
+            _kill_srun
+            return 0
+        fi
+    done
+    return 1
+}
+
+# A relaunch after a stall must resume, never cold-start: a fresh start wipes
+# the checkpoints the stalled attempt wrote. Without any checkpoint yet there is
+# nothing to lose, so the original setting stands.
+_resume_if_possible() {
+    if ls "$CKPT_DIR" 2>/dev/null | grep -qx '[0-9][0-9]*'; then
+        [ "$CGOLS_RESTART_FROM" = latest ] || \
+            echo "WATCHDOG: relaunching from the newest checkpoint in $CKPT_DIR" >&2
+        export CGOLS_RESTART_FROM=latest
+    fi
+}
+
+for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     stuck0=$(grep -c 'may be stuck' "$ERR_FILE" 2>/dev/null || true)
     unstuck0=$(grep -c 'unstuck' "$ERR_FILE" 2>/dev/null || true)
+    aborts0=$(grep -c 'Aborting communicator' "$ERR_FILE" 2>/dev/null || true)
 
     srun "${SRUN_ARGS[@]}" python cgols.py &
     SRUN_PID=$!
@@ -160,12 +214,15 @@ for attempt in 1 2 3; do
         # the grace window is reported below with its real exit code.
         if [ "$stuck" -gt "$unstuck" ] && kill -0 "$SRUN_PID" 2>/dev/null; then
             echo "WATCHDOG: attempt $attempt hung at NCCL init, relaunching" >&2
-            kill "$SRUN_PID" 2>/dev/null; sleep 60
-            kill -9 "$SRUN_PID" 2>/dev/null || true
-            wait "$SRUN_PID" 2>/dev/null || true
-            sleep 60   # let the drivers reclaim ~130 GB on every GPU
+            _kill_srun
+            _resume_if_possible
             continue
         fi
+    fi
+
+    if _watch_progress; then
+        _resume_if_possible
+        continue
     fi
 
     wait "$SRUN_PID"
@@ -176,5 +233,5 @@ for attempt in 1 2 3; do
     exit $rc
 done
 
-echo "WATCHDOG: giving up after 3 hung attempts" >&2
+echo "WATCHDOG: giving up after $MAX_ATTEMPTS hung attempts" >&2
 exit 1
