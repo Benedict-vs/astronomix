@@ -37,11 +37,23 @@
 #
 # Resume after a TIMEOUT into the same tag: add CGOLS_RESTART_FROM=latest.
 #
+# Seed-scatter runs (second realisation, CGOLS_IC_SEED; tags as in
+# run_fv1024_local.sh: _A<dim>fvs<k> = FV, _A<dim>s<k> = FD). CGOLS_SOLVER=fd
+# runs the production FD scheme through the same runner; FD-512 peaks at
+# ~137 GiB on one H200, so it runs on two:
+#
+#   sbatch --partition=gpu-h200 --gres=gpu:4 --time=06:00:00 \
+#          --export=ALL,CGOLS_DIM=1024,CGOLS_IC_SEED=1,CGOLS_RUN_TAG=_A1024fvs1,SPLIT=1-2-2-1 \
+#          run_horeka_fv_ablation.sh
+#   sbatch --partition=gpu-h200 --gres=gpu:2 --time=04:30:00 \
+#          --export=ALL,CGOLS_SOLVER=fd,CGOLS_DIM=512,CGOLS_IC_SEED=1,CGOLS_RUN_TAG=_A512s1,SPLIT=1-2-1-1 \
+#          run_horeka_fv_ablation.sh
+#
 # Local reference timings (1x H200, fp32, HLLC): 256^3 23 min, 512^3 60 min.
 # CGOLS_CHECKPOINT_EVERY is only an on/off gate: checkpoints are written every
 # frame, and CGOLS_CHECKPOINT_KEEP=0 keeps ALL of them (512^3: 60 x 4.5 GB).
 
-export CGOLS_SOLVER=fv
+export CGOLS_SOLVER="${CGOLS_SOLVER:-fv}"
 export CGOLS_DIM="${CGOLS_DIM:?set CGOLS_DIM}"
 export CGOLS_RUN_TAG="${CGOLS_RUN_TAG:?set CGOLS_RUN_TAG}"
 export CGOLS_RIEMANN="${CGOLS_RIEMANN:-hllc}"
