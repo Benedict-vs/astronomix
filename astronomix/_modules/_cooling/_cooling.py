@@ -62,6 +62,9 @@ from astronomix.option_classes.simulation_config import (
 from astronomix._modules._cooling.cooling_options import (
     CoolingConfig,
     CoolingCurveConfig,
+    FUV_ATTENUATION_LOCAL_JEANS,
+    FUV_ATTENUATION_NONE,
+    FUV_ATTENUATION_SLAB,
     FUVSourceParams,
 )
 from astronomix.option_classes.simulation_params import SimulationParams
@@ -1301,6 +1304,56 @@ def fuv_heating_factor(
     return luminosity_area * intensity + fuv_source_params.background
 
 
+def fuv_attenuation_factor(
+    density: FIELD_TYPE,
+    pressure: FIELD_TYPE,
+    fuv_source_params: FUVSourceParams,
+    attenuation: int,
+    column_spacing: float,
+) -> FIELD_TYPE:
+    r"""Dust attenuation factor of the point-source FUV field, in [0, 1].
+
+    ``FUV_ATTENUATION_SLAB``: the mean intensity in a uniform slab of optical
+    depth tau = kappa Sigma relative to the optically thin value,
+    (1 - E_2(tau / 2)) / tau (Ostriker, McKee & Leroy 2010; Kim & Ostriker
+    2017, footnote), with Sigma the column density of the cell's (x, y) column
+    along the last axis. Capped at 1: the factor exceeds 1 for tau < ~0.5,
+    which only holds for sources spread through the slab, not a point source.
+
+    ``FUV_ATTENUATION_LOCAL_JEANS``: exp(-kappa rho L_J) with the Jeans length
+    L_J = sqrt(pi c^2 / (G rho)) at c^2 = min(P / rho, cap) (Safranek-Shrader
+    et al. 2017), purely local.
+
+    Args:
+        density: The density field (3D).
+        pressure: The pressure field (3D).
+        fuv_source_params: Carries kappa, the sound-speed cap and G.
+        attenuation: The ``CoolingConfig.fuv_attenuation`` mode (static).
+        column_spacing: The cell size along the column axis (slab only).
+
+    Returns:
+        The factor at every cell, shape of ``density``.
+    """
+    kappa = fuv_source_params.dust_opacity
+    if attenuation == FUV_ATTENUATION_SLAB:
+        tau = kappa * jnp.sum(density, axis=-1, keepdims=True) * column_spacing
+        tau = jnp.maximum(tau, 1e-6)
+        half = 0.5 * tau
+        e2 = jnp.exp(-half) - half * jax.scipy.special.exp1(half)
+        factor = jnp.minimum((1.0 - e2) / tau, 1.0)
+        return jnp.broadcast_to(factor, density.shape)
+    if attenuation == FUV_ATTENUATION_LOCAL_JEANS:
+        sound_speed2 = jnp.minimum(
+            pressure / density, fuv_source_params.jeans_sound_speed_squared_cap
+        )
+        # kappa rho L_J = kappa sqrt(pi c^2 rho / G)
+        tau = kappa * jnp.sqrt(
+            jnp.pi * sound_speed2 * density / fuv_source_params.gravitational_constant
+        )
+        return jnp.exp(-tau)
+    raise ValueError(f"Unknown FUV attenuation mode: {attenuation}")
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -1369,13 +1422,24 @@ def update_pressure_by_cooling(
             raise ValueError(
                 "fuv_point_source_heating needs a 3D state and the helper data"
             )
-        heating_rate = heating_rate * fuv_heating_factor(
-            cooling_params.fuv_source_params,
+        fuv_params = cooling_params.fuv_source_params
+        field = fuv_heating_factor(
+            fuv_params,
             helper_data.cell_centers_x,
             helper_data.cell_centers_y,
             helper_data.cell_centers_z,
             time,
         )
+        if cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
+            # Attenuate the sources, not the metagalactic background.
+            field = (field - fuv_params.background) * fuv_attenuation_factor(
+                density,
+                pressure,
+                fuv_params,
+                cooling_config.fuv_attenuation,
+                helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0],
+            ) + fuv_params.background
+        heating_rate = heating_rate * field
     with_heating = (
         cooling_config.fuv_point_source_heating
         or cooling_params.heating_factor_table.shape[0] > 0

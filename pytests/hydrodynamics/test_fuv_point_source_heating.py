@@ -298,3 +298,48 @@ def test_code_temperature_from_physical_pressure():
     )
     T_back = ki02_gf12_temperature(T_code / SETUP.T1_to_code)
     np.testing.assert_allclose(T_back, T_phys, rtol=2e-3)
+
+
+def test_slab_attenuation_factor():
+    """(1 - E_2(tau/2)) / tau of each column's kappa Sigma, capped at 1."""
+    from scipy.special import expn
+
+    from astronomix._modules._cooling._cooling import fuv_attenuation_factor
+    from astronomix._modules._cooling.cooling_options import FUV_ATTENUATION_SLAB
+
+    rho = jnp.ones((3, 1, 8)) * jnp.array([1e-4, 1.0, 10.0])[:, None, None]
+    params = FUVSourceParams(dust_opacity=0.5)
+    factor = np.asarray(fuv_attenuation_factor(rho, rho, params, FUV_ATTENUATION_SLAB, 0.25))
+    tau = 0.5 * np.array([1e-4, 1.0, 10.0]) * 8 * 0.25
+    expected = np.minimum((1 - expn(2, tau / 2)) / tau, 1.0)
+    np.testing.assert_allclose(factor[:, 0, :], np.repeat(expected[:, None], 8, 1), rtol=1e-5)
+    assert factor[0].max() == 1.0 and factor[2].max() < 0.2  # thin capped, thick dark
+
+
+def test_local_jeans_attenuation_factor():
+    """exp(-kappa rho L_J) with c^2 = min(P / rho, cap)."""
+    from astronomix._modules._cooling._cooling import fuv_attenuation_factor
+    from astronomix._modules._cooling.cooling_options import FUV_ATTENUATION_LOCAL_JEANS
+
+    rho = jnp.array([0.5, 2.0, 2.0])
+    pressure = jnp.array([0.5, 2.0 * 0.01, 2.0 * 10.0])  # c^2 = 1, 0.01 (below cap), 10
+    params = FUVSourceParams(dust_opacity=0.3, jeans_sound_speed_squared_cap=1.0,
+                             gravitational_constant=2.0)
+    factor = np.asarray(fuv_attenuation_factor(rho, pressure, params, FUV_ATTENUATION_LOCAL_JEANS, 1.0))
+    c2 = np.array([1.0, 0.01, 1.0])
+    rho_np = np.asarray(rho)
+    expected = np.exp(-0.3 * rho_np * np.sqrt(np.pi * c2 / (2.0 * rho_np)))
+    np.testing.assert_allclose(factor, expected, rtol=1e-6)
+
+
+def test_attenuation_leaves_the_background_unattenuated():
+    """Opaque gas sees only the metagalactic floor, not zero."""
+    from astronomix._modules._cooling._cooling import fuv_attenuation_factor
+    from astronomix._modules._cooling.cooling_options import FUV_ATTENUATION_LOCAL_JEANS
+
+    params = FUVSourceParams(dust_opacity=1e6, jeans_sound_speed_squared_cap=1.0,
+                             gravitational_constant=1.0, background=0.0024)
+    rho = jnp.ones((2, 2, 2))
+    f = fuv_attenuation_factor(rho, rho, params, FUV_ATTENUATION_LOCAL_JEANS, 1.0)
+    field = (100.0 - params.background) * f + params.background
+    np.testing.assert_allclose(np.asarray(field), 0.0024, rtol=1e-6)

@@ -370,6 +370,8 @@ from astronomix._modules._cgols_wind.cluster_placement import (
     draw_cluster_schedule,
 )
 from astronomix._modules._cooling._cooling_tables import (
+    TIGRESS_MU_H,
+    TIGRESS_X_PART,
     cie_parabolic_cooling,
     ki02_gf12_cooling,
     ki02_gf12_temperature,
@@ -379,6 +381,9 @@ from astronomix._modules._cooling.cooling_options import (
     COOLING_FLOOR_CLIP,
     COOLING_OPERATOR_SPLIT,
     ELECTRON_HYDROGEN_DENSITY,
+    FUV_ATTENUATION_LOCAL_JEANS,
+    FUV_ATTENUATION_NONE,
+    FUV_ATTENUATION_SLAB,
     PIECEWISE_POWER_LAW,
     SUBCYCLED_EXPLICIT_COOLING,
     TOTAL_NUMBER_DENSITY,
@@ -1039,6 +1044,17 @@ FUV_SFR_FLOOR = float(os.environ.get("CGOLS_FUV_SFR_FLOOR", "5"))
 FUV_SFR = os.environ.get("CGOLS_FUV_SFR")
 FUV_SOFTENING_PC = float(os.environ.get("CGOLS_FUV_SOFTENING_PC", str(INJ_RAD)))
 HEAT_RATIO = float(os.environ.get("CGOLS_HEAT_RATIO", "1"))
+# Dust attenuation of the starburst FUV (the metagalactic floor stays
+# unattenuated): "none" (default), "slab" (Ostriker, McKee & Leroy 2010 slab
+# factor of the cell's column; KO17 note it but do not use it) or "jeans"
+# (local shielding exp(-kappa rho L_J), the Jeans length at T <= the cap,
+# Safranek-Shrader+2017). CGOLS_FUV_SIGMA_DUST: FUV dust cross-section per H
+# [cm^2] (1e-21, solar dust; uncertain by ~2x); CGOLS_FUV_JEANS_TCAP [K].
+FUV_ATTENUATION = os.environ.get("CGOLS_FUV_ATTENUATION", "none")
+if FUV_ATTENUATION not in ("none", "slab", "jeans"):
+    raise ValueError(f"CGOLS_FUV_ATTENUATION must be 'none', 'slab' or 'jeans', got {FUV_ATTENUATION!r}")
+FUV_SIGMA_DUST = float(os.environ.get("CGOLS_FUV_SIGMA_DUST", "1e-21"))
+FUV_JEANS_TCAP = float(os.environ.get("CGOLS_FUV_JEANS_TCAP", "40"))
 # Table lookup of the ki02gf12 curve and its heating factor: "search" (binary
 # search, jnp.searchsorted / jnp.interp) or "direct" (O(1) indexing on the
 # evenly log-spaced tables ki02_gf12_cooling builds; same bins, 9x faster on
@@ -1373,6 +1389,17 @@ def build_fuv_source_params():
         luminosity_times=jnp.array(times_myr) * myr_to_code,
         luminosity_values=jnp.array(sfr) * sfr_to_area,
         background=0.0024,
+        # kappa = sigma_d per H / (rho / n_H) of the TIGRESS composition.
+        dust_opacity=(
+            FUV_SIGMA_DUST * u.cm**2 / (TIGRESS_MU_H * const.m_p)
+        ).to(code_units.code_length**2 / code_units.code_mass).value,
+        # Neutral gas: mu = TIGRESS_MU_H / TIGRESS_X_PART.
+        jeans_sound_speed_squared_cap=(
+            const.k_B * FUV_JEANS_TCAP * u.K * TIGRESS_X_PART / (TIGRESS_MU_H * const.m_p)
+        ).to(code_units.code_velocity**2).value,
+        gravitational_constant=const.G.to(
+            code_units.code_length**3 / (code_units.code_mass * code_units.code_time**2)
+        ).value,
     )
 
 
@@ -1959,7 +1986,8 @@ def build_config():
             f"{COOLING_SUBCYCLES} sub-cycles, heating "
             + (
                 f"FUV point source (Sigma_SFR,0 {FUV_SIGMA_SFR0:g}, r_s {FUV_SOFTENING_PC:g} pc, "
-                + (f"SFR fixed {FUV_SFR})" if FUV_SFR is not None else f"SFR floor {FUV_SFR_FLOOR:g})")
+                + (f"SFR fixed {FUV_SFR}" if FUV_SFR is not None else f"SFR floor {FUV_SFR_FLOOR:g}")
+                + f", attenuation {FUV_ATTENUATION})"
                 if FUV
                 else f"uniform J/J0 = {HEAT_RATIO:g}"
             )
@@ -2129,6 +2157,11 @@ def build_config():
                         )
                     ),
                     fuv_point_source_heating=KI02 and FUV,
+                    fuv_attenuation={
+                        "none": FUV_ATTENUATION_NONE,
+                        "slab": FUV_ATTENUATION_SLAB,
+                        "jeans": FUV_ATTENUATION_LOCAL_JEANS,
+                    }[FUV_ATTENUATION],
                 )
             )
             if COOLING

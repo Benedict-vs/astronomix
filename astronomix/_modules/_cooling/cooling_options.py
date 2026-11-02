@@ -233,6 +233,22 @@ class CoolingConfig(NamedTuple):
     #: Not seen by the cooling-time step limiters, which keep the uniform rate.
     fuv_point_source_heating: bool = False
 
+    #: Dust attenuation of the point-source FUV field (the background is not
+    #: attenuated): ``FUV_ATTENUATION_NONE`` (default), ``FUV_ATTENUATION_SLAB``
+    #: or ``FUV_ATTENUATION_LOCAL_JEANS`` (see ``fuv_attenuation_factor``).
+    fuv_attenuation: int = 0
+
+
+#: No attenuation of the point-source FUV field.
+FUV_ATTENUATION_NONE = 0
+#: Slab attenuation (Ostriker, McKee & Leroy 2010):
+#: min(1, (1 - E_2(tau/2)) / tau) with tau = kappa Sigma of the cell's column.
+FUV_ATTENUATION_SLAB = 1
+#: Local shielding exp(-kappa rho L_J), L_J the Jeans length at the cell's
+#: sound speed capped at ``jeans_sound_speed_squared_cap`` (Safranek-Shrader
+#: et al. 2017).
+FUV_ATTENUATION_LOCAL_JEANS = 2
+
 
 class FUVSourceParams(NamedTuple):
     """FUV point sources for distance-diluted photoelectric heating.
@@ -267,6 +283,17 @@ class FUVSourceParams(NamedTuple):
     #: Uniform background J / J_0 (the metagalactic 0.0024 of Kim & Ostriker
     #: 2017).
     background: float = 0.0024
+
+    #: FUV dust opacity kappa per unit gas mass (code length^2 / code mass),
+    #: used by ``CoolingConfig.fuv_attenuation``.
+    dust_opacity: float = 0.0
+
+    #: Cap on the squared sound speed in the Jeans length of the local
+    #: shielding (code velocity^2).
+    jeans_sound_speed_squared_cap: float = 0.0
+
+    #: G in code units, for the Jeans length of the local shielding.
+    gravitational_constant: float = 0.0
 
 
 class CoolingParams(NamedTuple):
