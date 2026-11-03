@@ -21,13 +21,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FIG_DIR = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
 Z_CUT = float(os.environ.get("CGOLS_OUTFLOW_ZCUT", "5"))  # kpc
 BOX_Z = 20.0  # kpc
-RESOLUTIONS = (128, 256, 512, 1024)
-COLORS = {128: "#c6dbef", 256: "#6baed6", 512: "#2171b5", 1024: "#08306b"}
+RESOLUTIONS = (128, 256, 512, 1024, 2048)
+COLORS = {128: "#c6dbef", 256: "#6baed6", 512: "#2171b5", 1024: "#08306b", 2048: "#000000"}
 SERIES = (("A", "no cooling"), ("B", "with cooling"), ("F", "no cooling, FV"))
 SERIES_SEL = os.environ.get("CGOLS_OUTFLOW_SERIES", "AB")  # e.g. "A" for one panel
 # Frame directory (below cgols_snapshots_) of each run; "F" = the A-series FV
 # (VL2 + HLLC) ladder of the *_fv comparison figures.
-FV_RUNS = {128: "diagnostics/A128fv", 256: "diagnostics/A256fv", 512: "A512fvf32", 1024: "A1024fv"}
+FV_RUNS = {128: "diagnostics/A128fv", 256: "diagnostics/A256fv", 512: "A512fvf32", 1024: "A1024fv", 2048: "A2048fv"}
+# Resolutions per series: 2048 exists for the FV ladder only so far.
+SERIES_RESOLUTIONS = {"F": RESOLUTIONS}
 
 
 def run_name(series, res):
@@ -64,7 +66,7 @@ def main():
     for ax, (series, label) in zip(axes, series_list):
         ax.plot(SCHEDULE_T, SCHEDULE_MDOT, color="0.55", lw=1.2, ls="--",
                 label=r"injected $\dot M = \beta\,$SFR")
-        for res in RESOLUTIONS:
+        for res in SERIES_RESOLUTIONS.get(series, (128, 256, 512, 1024)):
             data = outflow_rate(run_name(series, res))
             if data is not None:
                 ax.plot(*data, color=COLORS[res], lw=1.6, label=f"{res}")
@@ -81,11 +83,16 @@ def main():
             ax.axvline(t, color="0.8", lw=0.6, ls=":", zorder=0)
     # The first panel carries every resolution; one column fits the empty
     # low-state corner of a single panel, a row fits the two-panel layout.
-    handles = axes[0].get_legend_handles_labels()
+    # (merged over the panels: the FV panel can carry a resolution the others lack)
+    merged = {}
+    for ax in axes:
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            merged.setdefault(label, handle)
+    handles = (list(merged.values()), list(merged.keys()))
     if "F" in SERIES_SEL and len(series_list) > 1:
         # the FV panel has no empty corner (its 40-50 Myr bump): legend on top
         axes[0].legend(*handles, loc="lower center", bbox_to_anchor=(0.5, 1.0), fontsize=8.5,
-                       ncol=5, frameon=False)
+                       ncol=6, frameon=False)
     elif len(series_list) > 1:
         axes[-1].legend(*handles, loc="upper right", fontsize=8.5, ncol=5, framealpha=1,
                         edgecolor="none", title="resolution", title_fontsize=8.5)

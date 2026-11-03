@@ -54,6 +54,12 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     # figures/cgols/comparisons/fv_ppm_A256_A512.png (the other figures are unchanged)
     python cgols_fvfd_synthesis.py --ppm-gpu [--ppm ... as above]
 
+    # 2026-11-03: + FV-2048 (RUNS["FV2048"], frames + emission cache from cgols_emission.py --tag _A2048fv --source
+    # frames; no 3D cache yet, so its 3D metrics are absent). RES runs to 2048 (FD-FV rows stop at 1024); the
+    # self-convergence table adds the FV 512 -> 1024 -> 2048 ladder (the convergence figure's M_inf band uses the
+    # finest ladder per scheme). A run is re-measured when its frame count changes or its emission / 3D cache
+    # appears; the other cached runs are reused.
+
 Writes figures/cgols/comparisons/fvfd_summary_significance.png, fvfd_convergence.png and fvfd_cost.png and prints
 the markdown tables. CPU only, numpy + scipy + matplotlib (no jax).
 """
@@ -85,7 +91,7 @@ CACHE = "data/studies/fvfd_synthesis_metrics.json"
 FIG_DIR = "figures/cgols/comparisons"
 BOX_Z = 20.0
 MYR_PER_CODE_TIME = 9.777922216807893
-RES = (128, 256, 512, 1024)
+RES = (128, 256, 512, 1024, 2048)  # FD to 1024; FV to 2048 (FD-FV differences exist where both do)
 HEIGHTS_KPC = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0])  # = cgols_convergence_3d.HEIGHTS_KPC
 RNG = np.random.default_rng(1)
 
@@ -132,6 +138,9 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A512fvhlle.log"),
     "FD1024": ("FD", 1024, "base", "cgols_snapshots_A1024", "_A1024", "_A1024", f"{LOGS}/cgols_diag_A1024.log"),
     "FV1024": ("FV", 1024, "base", "cgols_snapshots_A1024fv", "_A1024fv", "_A1024fv", f"{LOGS}/cgols_diag_A1024fv.log"),
+    # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission only; no 3D cache yet (the
+    # 3D metrics are absent, not zero, until data/studies/convergence3d_v3_A2048fv.npz exists)
+    "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
 }
 
 #: Solver GPU-hours (H200) to 75 Myr from the console logs (time_integration wall x GPUs); 128/256 from the
@@ -142,6 +151,7 @@ GPU_HOURS = {
     ("FD", 256): 1154.8 / 3600, ("FV", 256): 198.6 / 3600,
     ("FD", 512): 20898.4 / 3600, ("FV", 512): 3571.9 / 3600,
     ("FD", 1024): 3.13 * 42341 * 4 / 3600, ("FV", 1024): 17449.4 * 4 / 3600,
+    ("FV", 2048): 39422.9 * 32 / 3600,  # 68952 steps, 32 H200, one leg (job 112293)
 }
 GPU_HOURS_FD1024_TOTAL = 246.0
 
@@ -435,7 +445,14 @@ def measure(label, spec):
         m.update(a)
         se.update(b)
     clean = lambda d: {k: (None if v is None or not np.isfinite(v) else float(v)) for k, v in d.items()}
-    return {"m": clean(m), "se": clean(se), "series": series, "nframes": len(series["t"])}
+    return {"m": clean(m), "se": clean(se), "series": series, "nframes": len(series["t"]), "sources": sources(spec)}
+
+
+def sources(spec):
+    """Which optional inputs (emission cache, 3D cache) of a run exist: a change triggers a re-measure."""
+    _scheme, _n, _role, _frames, emis, tag3d, _diag = spec
+    return [bool(emis and os.path.exists(f"data/studies/emission{emis}.npz")),
+            bool(tag3d and os.path.exists(f"data/studies/convergence3d_v3{tag3d}.npz"))]
 
 
 def load_all(recompute, extra):
@@ -451,7 +468,9 @@ def load_all(recompute, extra):
             continue
         nframes = len([f for f in os.listdir(spec[3]) if f.startswith("frame_")])
         if label in cache and cache[label]["nframes"] == nframes:
-            continue
+            # entries written before the "sources" field: taken as measured with the inputs present now
+            if cache[label].setdefault("sources", sources(spec)) == sources(spec):
+                continue
         print(f"  measuring {label} ({spec[3]}, {nframes} frames)", flush=True)
         cache[label] = measure(label, spec)
     with open(CACHE, "w") as fh:
@@ -505,7 +524,7 @@ def stats(runs, data):
                 c["sig_traj"], c["extrap"] = (max(below) * norm(c) if below else None), True
             c["sig_traj_pess"] = c["sig_traj"]
             fv = {m: cc["sig_meas"] / norm(cc) for (s, m), cc in cell.items() if s == "FV" and cc["sig_meas"]}
-            if n == 1024 and c["extrap"] and 256 in fv and 512 in fv and c["sig_traj"] is not None:
+            if n >= 1024 and c["extrap"] and 256 in fv and 512 in fv and c["sig_traj"] is not None:
                 c["sig_traj_pess"] = max(c["sig_traj"], fv[512] * max(1.0, fv[512] / fv[256]) * norm(c))
         for c in cell.values():
             if key in EARLY:
@@ -695,20 +714,21 @@ def tables(st, runs, data):
         print(line)
         summary[key] = {"rows": {str(n): r for n, r in rows.items()}, "trend": [b, berr, note]}
 
-    print("\n## Self-convergence per scheme (256 -> 512 -> 1024): d1, d2, order p, Richardson M_inf; "
-          "MC: fraction monotone, p and M_inf 16/50/84%\n")
-    print("| metric | scheme | 256 / 512 / 1024 | d1 | d2 | p | M_inf | MC mono | MC p | MC M_inf |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("\n## Self-convergence per scheme (N/4 -> N/2 -> N; FD and FV 256 -> 1024, FV also 512 -> 2048): d1, d2, "
+          "order p, Richardson M_inf; MC: fraction monotone, p and M_inf 16/50/84%\n")
+    print("| metric | scheme | ladder | values | d1 | d2 | p | M_inf | MC mono | MC p | MC M_inf |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for key, (label, _, _) in METRICS.items():
-        for scheme in ("FD", "FV"):
-            r = richardson(st[key], scheme)
+        for scheme, ladder in RICH_LADDERS:
+            r = richardson(st[key], scheme, ns=ladder)
             if r is None:
                 continue
             q = lambda name, r=r: "/".join(fmt(x) for x in r[name]) if name in r else "-"
-            print(f"| {label} | {scheme} | {' / '.join(fmt(x) for x in r['values'])} | {fmt(r['d1'])} | "
-                  f"{fmt(r['d2'])} | {fmt(r.get('p'), 2)} | {fmt(r.get('minf'))} | {r['frac_mono']:.2f} | "
-                  f"{q('p_q')} | {q('minf_q')} |")
-            summary[key][f"rich_{scheme}"] = r
+            print(f"| {label} | {scheme} | {'-'.join(map(str, ladder))} | {' / '.join(fmt(x) for x in r['values'])} | "
+                  f"{fmt(r['d1'])} | {fmt(r['d2'])} | {fmt(r.get('p'), 2)} | {fmt(r.get('minf'))} | "
+                  f"{r['frac_mono']:.2f} | {q('p_q')} | {q('minf_q')} |")
+            # the 256-1024 ladders keep their historical keys; the FV 512-2048 one is rich_FV_2048
+            summary[key][f"rich_{scheme}" + ("" if ladder[-1] == 1024 else f"_{ladder[-1]}")] = r
 
     print("\n## Equivalent resolution k: FV(N) = FD(k N)  (16-84%)\n")
     print("| metric | " + " | ".join(f"k @ FV-{n}" for n in RES) + " |")
@@ -786,6 +806,18 @@ def tables(st, runs, data):
     return summary
 
 
+#: (scheme, N ladder) of the self-convergence table; the finest available one feeds the figure's M_inf band
+RICH_LADDERS = (("FD", (256, 512, 1024)), ("FV", (256, 512, 1024)), ("FV", (512, 1024, 2048)))
+
+
+def finest_richardson(cell, scheme):
+    """richardson() over the finest of RICH_LADDERS this scheme has, or None."""
+    for sch, ladder in reversed(RICH_LADDERS):
+        if sch == scheme and all((scheme, n) in cell for n in ladder):
+            return richardson(cell, scheme, ns=ladder)
+    return None
+
+
 ATTR_KEYS = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "lx1_15_40", "lx1_60_75", "ha_60_75",
              "pinch_60_75", "asym_50_75", "ssv128", "ssv256", "cc85_dv", "side_loss", "mass_75")
 
@@ -837,17 +869,19 @@ def fig_significance(st):
     from matplotlib.colors import SymLogNorm, TwoSlopeNorm
 
     keys = [k for k in HEAT_KEYS if differences(st[k])]
-    z = np.full((len(keys), len(RES)), np.nan)
+    pair_res = [n for n in RES if any(n in differences(st[k]) for k in keys)]  # (a): N with both schemes
+    z = np.full((len(keys), len(pair_res)), np.nan)
     kk = np.full((len(keys), len(RES)), np.nan)
     fig, (ax, ax_k) = plt.subplots(1, 2, figsize=(17, 0.42 * len(keys) + 2.6), gridspec_kw={"width_ratios": (1.5, 1)})
     for i, key in enumerate(keys):
         rows = differences(st[key])
         for j, n in enumerate(RES):
             if n in rows:
+                j_a = pair_res.index(n)
                 r = rows[n]
-                z[i, j] = np.clip(r["z"], -1e3, 1e3)
+                z[i, j_a] = np.clip(r["z"], -1e3, 1e3)
                 rel = f"{100 * r['rel']:+.0f}%" if METRICS[key][1] == "rel" else f"{r['delta']:+.2g}"
-                ax.text(j, i, f"{rel}  R {fmt(r['R'], 2)} {verdict(r)}", ha="center", va="center", fontsize=7.5,
+                ax.text(j_a, i, f"{rel}  R {fmt(r['R'], 2)} {verdict(r)}", ha="center", va="center", fontsize=7.5,
                         color="k" if abs(r["z"]) < 30 else "w")
             k, q, note = k_factor(st[key], n, key=key)
             txt = ""
@@ -870,8 +904,8 @@ def fig_significance(st):
     cbk = fig.colorbar(imk, ax=ax_k, fraction=0.05, pad=0.01)
     cbk.set_label("log2 k   (FV(N) = FD(k N); k > 1: FV acts like a finer FD grid)")
     labels = [METRICS[k][0] + ("" if k in EARLY else "  [late]") for k in keys]
-    for a_ in (ax, ax_k):
-        a_.set_xticks(range(len(RES)), [str(n) for n in RES])
+    for a_, ns in ((ax, pair_res), (ax_k, RES)):
+        a_.set_xticks(range(len(ns)), [str(n) for n in ns])
         a_.set_xlabel("N")
     ax.set_yticks(range(len(keys)), labels, fontsize=8)
     ax_k.set_yticks(range(len(keys)), [""] * len(keys))
@@ -880,7 +914,8 @@ def fig_significance(st):
                  fontsize=10)
     ax_k.set_title("(b) equivalent resolution k (16-84% over sigma);\nblank: no FV run or FD ladder not monotone there",
                    fontsize=10)
-    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-1024", fontsize=12)
+    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-1024 (FV-2048: k only)",
+                 fontsize=12)
     fig.tight_layout()
     path = f"{FIG_DIR}/fvfd_summary_significance.png"
     fig.savefig(path, dpi=110)
@@ -909,7 +944,7 @@ def fig_convergence(st, runs, data):
                 if len(mem) > 1:
                     ax.plot(np.full(len(mem), n * off * (0.95 if scheme == "FD" else 1.05)), mem, ls="none",
                             marker="_", color=color, alpha=0.6, ms=6)
-            r = richardson(cell, scheme)
+            r = finest_richardson(cell, scheme)
             if r and "minf_q" in r and r["frac_mono"] > 0.5:
                 lo, _mid, hi = r["minf_q"]
                 ax.axhspan(lo, hi, xmin=0.9, xmax=1.0, color=color, alpha=0.25)
@@ -922,7 +957,7 @@ def fig_convergence(st, runs, data):
         ax.set_xscale("log")
         ax.minorticks_off()
         ax.set_xticks(RES, [str(n) for n in RES])
-        ax.set_xlim(100, 1500)
+        ax.set_xlim(100, 2900)
         if key in ("lx1_60_75", "lx1_15_40", "ssv256", "ssv128"):
             ax.set_yscale("log")
         ax.set_title(METRICS[key][0], fontsize=9.5)
@@ -933,8 +968,9 @@ def fig_convergence(st, runs, data):
             handles.setdefault(l, h)
     fig.legend(handles.values(), handles.keys(), loc="lower center", ncol=8, fontsize=8.5, frameon=False,
                bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle("Self-convergence of FD and FV (error bars: conservative sigma; dashes: realisations; "
-                 "right-edge band: Richardson M_inf 16-84% if monotone; offset markers: ablations)", fontsize=11)
+    fig.suptitle("Self-convergence of FD (128-1024) and FV (128-2048) (error bars: conservative sigma; dashes: "
+                 "realisations;\nright-edge band: Richardson M_inf 16-84% of the finest 3-run ladder if monotone; "
+                 "offset markers: ablations)", fontsize=11)
     fig.tight_layout(rect=(0, 0.04, 1, 0.97))
     path = f"{FIG_DIR}/fvfd_convergence.png"
     fig.savefig(path, dpi=100)
@@ -951,7 +987,7 @@ def fig_cost(st):
     for i, key in enumerate(COST_KEYS):
         cell = st[key]
         for scheme, ls in (("FD", "-"), ("FV", "--")):
-            ns = [n for n in RES if (scheme, n) in cell]
+            ns = [n for n in RES if (scheme, n) in cell and (scheme, n) in GPU_HOURS]
             pts = []
             for a, b in itertools.pairwise(ns):
                 va, vb = cell[(scheme, a)]["value"], cell[(scheme, b)]["value"]
@@ -966,14 +1002,17 @@ def fig_cost(st):
     ax.legend(fontsize=7.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.14), frameon=False)
     ax = axes[1]
     for scheme, color in (("FD", "C0"), ("FV", "C3")):
-        ax.loglog(RES, [GPU_HOURS[(scheme, n)] for n in RES], marker="o", color=color, label=scheme)
+        ns = [n for n in RES if (scheme, n) in GPU_HOURS]
+        ax.loglog(ns, [GPU_HOURS[(scheme, n)] for n in ns], marker="o", color=color, label=scheme)
     ax.loglog([1024], [GPU_HOURS_FD1024_TOTAL], marker="o", mfc="none", color="C0", ls="none",
               label="FD-1024 incl. 3-leg restarts/I/O")
     for n in RES:
+        if ("FD", n) not in GPU_HOURS or ("FV", n) not in GPU_HOURS:
+            continue
         ratio = GPU_HOURS[("FD", n)] / GPU_HOURS[("FV", n)]
         ax.text(n, GPU_HOURS[("FV", n)] * 0.55, f"x{ratio:.1f}", ha="center", fontsize=9, color="0.3")
     ax.set(xlabel="N", ylabel="GPU-hours to 75 Myr", title="Run cost (FD / FV ratio under the FV points)",
-           ylim=(3e-3, 600))
+           ylim=(3e-3, 1000))
     ax.minorticks_off()
     ax.set_xticks(RES, [str(n) for n in RES])
     ax.grid(alpha=0.3, which="both")
