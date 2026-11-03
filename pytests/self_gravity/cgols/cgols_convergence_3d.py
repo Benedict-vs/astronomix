@@ -32,7 +32,7 @@ and caches them in data/studies/convergence3d<tag>.npz (resumable). With
 --plot it compares cached runs (figures/cgols/comparisons/
 <prefix>_convergence3d_*.png, prefix a_series by default).
 
-    python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8]
+    python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8] [--parts 3]
     python cgols_convergence_3d.py --plot A128=_A128 A256=_A256 A512=_A512 A1024=_A1024
     python cgols_convergence_3d.py --suffix _fv --cmap Reds --plot \
         FV128=_A128fv:cgols_snapshots_diagnostics/A128fv FV256=_A256fv:cgols_snapshots_diagnostics/A256fv \
@@ -42,6 +42,9 @@ and caches them in data/studies/convergence3d<tag>.npz (resumable). With
         # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
+--parts P splits every checkpoint's tiles into P tasks (all measurements are
+sums over cells, so the parts add up); finished parts are cached in
+convergence3d_v3<tag>_parts.npz, so a timed-out job loses only running parts.
 """
 
 # ruff: noqa: E402
@@ -50,7 +53,7 @@ CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 import argparse
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # CPU only: astronomix imports JAX, which would otherwise grab a (shared) GPU.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -113,8 +116,12 @@ def _open(step_directory, name):
     return tensorstore.open(spec, context=context, read=True).result()
 
 
-def measure_checkpoint(step_directory):
-    """All per-snapshot measurements of one checkpoint (see the module docstring)."""
+def measure_checkpoint(step_directory, part=0, parts=1):
+    """All per-snapshot measurements of one checkpoint (see the module docstring).
+
+    With parts > 1 only every parts-th (x, y) tile from tile `part` on; the
+    partial results add up (merge_parts).
+    """
     state = _open(step_directory, "primitive_state")
     time_myr = float(_open(step_directory, "time").read().result()) * CODE_TIME_MYR
     num_vars, nx, ny, nz = state.shape
@@ -162,9 +169,17 @@ def measure_checkpoint(step_directory):
         (slice(i, min(i + chunk_x, nx)), slice(j, min(j + chunk_y, ny)))
         for i in range(0, nx, chunk_x)
         for j in range(0, ny, chunk_y)
-    ]
-    pending = state[:, tiles[0][0], tiles[0][1], :].read()
+    ][part::parts]
+    start, reported = time.time(), 0
+    print(f"    {os.path.basename(step_directory)} part {part + 1}/{parts}: state {state.shape}, "
+          f"read chunk {tuple(state.chunk_layout.read_chunk.shape)}, {len(tiles)} tiles", flush=True)
+    # (a part can be empty when the checkpoint has fewer tiles than parts)
+    pending = state[:, tiles[0][0], tiles[0][1], :].read() if tiles else None
     for index, (xs, ys) in enumerate(tiles):
+        if 4 * index >= (reported + 1) * len(tiles):
+            reported += 1
+            print(f"    {os.path.basename(step_directory)} part {part + 1}/{parts}: tile {index}/{len(tiles)} "
+                  f"of {chunk_x}x{chunk_y} after {time.time() - start:.0f} s", flush=True)
         block = pending.result()
         if index + 1 < len(tiles):
             pending = state[:, tiles[index + 1][0], tiles[index + 1][1], :].read()
@@ -268,10 +283,24 @@ def measure_checkpoint(step_directory):
 
 
 def _measure(args):
-    step, step_directory = args
+    step, step_directory, part, parts = args
     start = time.time()
-    result = measure_checkpoint(step_directory)
-    return step, result, time.time() - start
+    result = measure_checkpoint(step_directory, part, parts)
+    return step, part, result, time.time() - start
+
+
+# Not sums over cells: identical in every part.
+_PER_SNAPSHOT = ("time_myr", "z_kpc", "dim")
+
+
+def merge_parts(results):
+    """Sum the partial measurements of one checkpoint."""
+    merged = dict(results[0])
+    for result in results[1:]:
+        for key, value in result.items():
+            if key not in _PER_SNAPSHOT:
+                merged[key] = merged[key] + value
+    return merged
 
 
 def parse_steps(spec, available):
@@ -294,32 +323,51 @@ def cache_path(tag):
     return os.path.join(SCRIPT_DIR, "data", "studies", f"convergence3d_v3{tag}.npz")
 
 
-def load_cache(tag):
-    path = cache_path(tag)
+def load_cache(tag, suffix=""):
+    path = cache_path(tag + suffix)
     if not os.path.exists(path):
         return {}
     data = np.load(path, allow_pickle=True)
     return data["records"].item()
 
 
-def save_cache(tag, records):
-    path = cache_path(tag)
+def save_cache(tag, records, suffix=""):
+    path = cache_path(tag + suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez(path + ".tmp.npz", records=np.array(records, dtype=object))
     os.replace(path + ".tmp.npz", path)
 
 
-def run(tag, checkpoint_dir, steps_spec, workers):
+def run(tag, checkpoint_dir, steps_spec, workers, parts=1):
     checkpoint_dir = checkpoint_dir or os.path.join(SCRIPT_DIR, "data", f"cgols_checkpoints{tag}")
     available = sorted(int(e) for e in os.listdir(checkpoint_dir) if e.isdigit())
     records = load_cache(tag)
     todo = [s for s in parse_steps(steps_spec, available) if s not in records]
     # Skip step directories still being transferred (no Orbax commit marker yet).
     todo = [s for s in todo if os.path.exists(os.path.join(checkpoint_dir, str(s), "_CHECKPOINT_METADATA"))]
-    print(f"{tag}: {len(records)} cached, {len(todo)} to measure from {checkpoint_dir}", flush=True)
+    # Finished parts of earlier (timed-out) jobs, keyed (step, part); only
+    # valid for the same number of parts.
+    done = {key: value for key, value in load_cache(tag, "_parts").items() if value["parts"] == parts}
+    print(f"{tag}: {len(records)} cached, {len(todo)} to measure from {checkpoint_dir}"
+          + (f" in {parts} parts each ({sum(key[0] in todo for key in done)} parts cached)" if parts > 1 else ""),
+          flush=True)
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        jobs = [(s, os.path.join(checkpoint_dir, str(s))) for s in todo]
-        for step, result, seconds in pool.map(_measure, jobs):
+        jobs = [(s, os.path.join(checkpoint_dir, str(s)), p, parts)
+                for s in todo for p in range(parts) if (s, p) not in done]
+        futures = [pool.submit(_measure, job) for job in jobs]
+        for step in todo:  # checkpoints whose parts were all cached already
+            if all((step, p) in done for p in range(parts)):
+                records[step] = merge_parts([done[(step, p)]["result"] for p in range(parts)])
+                save_cache(tag, records)
+        for future in as_completed(futures):
+            step, part, result, seconds = future.result()
+            if parts > 1:
+                done[(step, part)] = {"result": result, "parts": parts}
+                save_cache(tag, done, "_parts")
+                print(f"  [{step:3d}] part {part + 1}/{parts} done ({seconds:.0f} s)", flush=True)
+                if not all((step, p) in done for p in range(parts)):
+                    continue
+                result = merge_parts([done[(step, p)]["result"] for p in range(parts)])
             records[step] = result
             save_cache(tag, records)
             print(
@@ -856,6 +904,7 @@ def main():
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--steps", default="all", help="'all', 'a-b', 'a-b/k' or a comma list")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--parts", type=int, default=1, help="split every checkpoint into this many tile groups")
     parser.add_argument("--plot", nargs="*", help="LABEL=TAG[:FRAMES_DIR] pairs of cached runs to compare")
     parser.add_argument("--suffix", default="", help="figure-name suffix, e.g. _fv (default: the FD A-series names)")
     parser.add_argument("--cmap", default="Blues", help="colormap of the resolution ladder")
@@ -869,7 +918,7 @@ def main():
         plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start,
              args.prefix)
     else:
-        run(args.tag, args.checkpoint_dir, args.steps, args.workers)
+        run(args.tag, args.checkpoint_dir, args.steps, args.workers, args.parts)
 
 
 if __name__ == "__main__":
