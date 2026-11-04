@@ -26,7 +26,7 @@ Per run (cached in data/studies/fvfd_synthesis_metrics.json, --recompute to rebu
 
 Noise. sigma_traj = sample std over the realisations of one scheme at one N: IC-noise seeds 0-3, the checkpoint-
 segmented vs unsegmented baselines and reruns (fp32 only). The IC noise (1e-3) perturbs less than checkpoint
-segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-512, FD-1024, FV-1024) it is
+segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-1024, FV-1024) it is
 extrapolated as "noise does not shrink with N, and FD is as noisy as FV": the largest sigma measured for either
 scheme at any N' <= N (relative for positive fluxes/luminosities, absolute for log or shape metrics); the
 pessimistic variant also applies the FV 256 -> 512 growth once more at 1024. sigma_t is the standard error of a
@@ -61,6 +61,9 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     # self-convergence table adds the FV 512 -> 1024 -> 2048 ladder (the convergence figure's M_inf band uses the
     # finest ladder per scheme). A run is re-measured when its frame count changes or its emission / 3D cache
     # appears; the other cached runs are reused.
+
+    # 2026-11-04: + FD-512 seed 1 (RUNS["FD512s1"], HoreKa job 117181; emission cache from cgols_emission.py --tag
+    # _A512s1 --source frames): FD-512 sigma_traj is measured (2 members) instead of extrapolated.
 
 Writes figures/cgols/comparisons/fvfd_summary_significance.png, fvfd_convergence.png and fvfd_cost.png and prints
 the markdown tables. CPU only, numpy + scipy + matplotlib (no jax).
@@ -132,6 +135,8 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A256fvhlle.log"),
     "FV256c03": ("FV", 256, "CFL 0.3", f"{DIAG}/A256c03fv", None, None, f"{LOGS}/diagnostics/cgols_diag_A256c03fv.log"),
     "FD512": ("FD", 512, "base", "cgols_snapshots_A512", "_A512", "_A512", f"{LOGS}/cgols_diag_A512.log"),
+    # HoreKa job 117181 (2 H200, split (1, 2, 1, 1), code 494d1b5): IC seed 1, the first measured FD-512 sigma
+    "FD512s1": ("FD", 512, "ens", "cgols_snapshots_A512s1", "_A512s1", None, f"{LOGS}/cgols_diag_A512s1.log"),
     "FV512": ("FV", 512, "base", "cgols_snapshots_A512fvf32", "_A512fvf32", "_A512fvf32",
               f"{LOGS}/cgols_diag_A512fvf32.log"),
     "FV512b": ("FV", 512, "ens", f"{DIAG}/A512fv", None, None, f"{LOGS}/diagnostics/cgols_diag_A512fv.log"),
