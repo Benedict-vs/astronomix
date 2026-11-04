@@ -19,8 +19,10 @@ Per run (cached in data/studies/fvfd_synthesis_metrics.json, --recompute to rebu
             states;
   3D        entropy-split fluxes (wind-entropy outflow at 1 kpc, mixed outflow at 1 kpc, Edot at 5 kpc), the
             cumulative energy through |z| = 5 kpc and the cone half-opening at z = 1 kpc -- on the common 5 Myr
-            snapshot cadence (FV-512 has every 4th checkpoint) and, for the 1024 pair, at the matched times 30 and
-            60 Myr (FV-1024 has only 4 checkpoints).
+            snapshot cadence (FV-512 has every 4th checkpoint, FD-1024 and FV-2048 every 2nd) and at the matched
+            times 30 and 60 Myr. The 5 Myr subsampling biases the spiky mixed outflow: FV-1024 mixed1_15_40 is
+            2.91 / 2.98 / 3.18 at 1.25 / 2.5 / 5 Myr cadence, FV-2048 2.53 / 2.85 at 2.5 / 5 (ecum5 +2-3%, Edot
+            and cone < 1%); it is the same for every run, so differences stay comparable.
 
 Noise. sigma_traj = sample std over the realisations of one scheme at one N: IC-noise seeds 0-3, the checkpoint-
 segmented vs unsegmented baselines and reruns (fp32 only). The IC noise (1e-3) perturbs less than checkpoint
@@ -55,7 +57,7 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     python cgols_fvfd_synthesis.py --ppm-gpu [--ppm ... as above]
 
     # 2026-11-03: + FV-2048 (RUNS["FV2048"], frames + emission cache from cgols_emission.py --tag _A2048fv --source
-    # frames; no 3D cache yet, so its 3D metrics are absent). RES runs to 2048 (FD-FV rows stop at 1024); the
+    # frames; 3D cache added 2026-11-04 from HoreKa, cgols_convergence_3d.py --parts 8). RES runs to 2048 (FD-FV rows stop at 1024); the
     # self-convergence table adds the FV 512 -> 1024 -> 2048 ladder (the convergence figure's M_inf band uses the
     # finest ladder per scheme). A run is re-measured when its frame count changes or its emission / 3D cache
     # appears; the other cached runs are reused.
@@ -138,8 +140,8 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A512fvhlle.log"),
     "FD1024": ("FD", 1024, "base", "cgols_snapshots_A1024", "_A1024", "_A1024", f"{LOGS}/cgols_diag_A1024.log"),
     "FV1024": ("FV", 1024, "base", "cgols_snapshots_A1024fv", "_A1024fv", "_A1024fv", f"{LOGS}/cgols_diag_A1024fv.log"),
-    # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission only; no 3D cache yet (the
-    # 3D metrics are absent, not zero, until data/studies/convergence3d_v3_A2048fv.npz exists)
+    # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
+    # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
     "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
 }
 

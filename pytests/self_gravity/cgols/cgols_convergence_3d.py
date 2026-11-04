@@ -36,10 +36,11 @@ and caches them in data/studies/convergence3d<tag>.npz (resumable). With
     python cgols_convergence_3d.py --plot A128=_A128 A256=_A256 A512=_A512 A1024=_A1024
     python cgols_convergence_3d.py --suffix _fv --cmap Reds --plot \
         FV128=_A128fv:cgols_snapshots_diagnostics/A128fv FV256=_A256fv:cgols_snapshots_diagnostics/A256fv \
-        FV512=_A512fvf32 FV1024=_A1024fv
+        FV512=_A512fvf32 FV1024=_A1024fv FV2048=_A2048fv
     python cgols_convergence_3d.py --cmap-start 0.5667 --plot A256=_A256 A512=_A512 A1024=_A1024 --fv \
-        FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv
-        # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png
+        FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv FV2048=_A2048fv
+        # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png; an FV run beyond the FD
+        # list (FV2048=_A2048fv appended to --fv) is drawn unpaired, dash-dotted in a darker colour
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 --parts P splits every checkpoint's tiles into P tasks (all measurements are
@@ -479,7 +480,8 @@ FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
 def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_prefix="a_series"):
     """Compare cached runs; with fv_runs, FD (solid) and FV (dashed) in one figure set.
 
-    fv_runs pairs with runs by position (same resolution, same colour).
+    fv_runs pairs with runs by position (same resolution, same colour); FV runs beyond the FD list are drawn
+    unpaired (dash-dotted, a darker colour, e.g. FV-2048).
     """
     import matplotlib
 
@@ -507,6 +509,11 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(cmap_start, 1.0, len(labels)))))
     for (fd_label, _), (fv_label, _) in zip(runs, fv_runs):
         colors[fv_label] = colors[fd_label]
+    # FV runs beyond the FD list (e.g. FV-2048, no FD-2048) are unpaired: dash-dotted, in the ladder's darkest
+    # colour darkened once more per extra run.
+    unpaired = [label for label, _ in fv_runs[len(runs):]]
+    for k, label in enumerate(unpaired, start=1):
+        colors[label] = np.array(plt.get_cmap(cmap)(1.0)) * np.array([0.55**k] * 3 + [1.0])
     fv_labels = {label for label, _ in fv_runs}
     sparse = {label: len(rec) for label, rec in data.items() if len(rec) < SPARSE_SNAPSHOTS}
     fig_dir = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
@@ -518,7 +525,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         """One run's curve: colour by run, dashed for FV when merged, markers if sparse."""
         style = {"color": colors[label], "label": label if legend_label is None else legend_label}
         if merged:
-            style["ls"] = "--" if label in fv_labels else "-"
+            style["ls"] = "-." if label in unpaired else "--" if label in fv_labels else "-"
         if series and label in sparse:
             style.update(ls="none", marker="o", ms=5)
             if legend_label is None:
@@ -533,6 +540,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
             ax.legend(**kwargs)
             return
         handles = [Line2D([], [], color=colors[label], lw=2.5, label=label) for label, _ in runs]
+        handles += [Line2D([], [], color=colors[label], lw=2.0, ls="-.", label=f"{label} (no FD partner, dash-dot)")
+                    for label in unpaired]
         handles += [
             Line2D([], [], color="0.25", ls="-", label=f"{FD_NAME} (solid)"),
             Line2D([], [], color="0.25", ls="--", label=f"{FV_NAME} (dashed)"),
@@ -666,7 +675,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         return mesh
 
     if merged:
-        num_cols = max(len(runs), 3)
+        num_cols = max(len(runs), len(fv_runs), 3)
         fig, axes = plt.subplots(3, num_cols, figsize=(5.0 * num_cols + 1.5, 14), squeeze=False, layout="constrained")
         vmax = max(data[label][s]["hist_nT"].max() for label in data for s in data[label])
         norm = LogNorm(1e3, vmax)
