@@ -343,3 +343,36 @@ def test_attenuation_leaves_the_background_unattenuated():
     f = fuv_attenuation_factor(rho, rho, params, FUV_ATTENUATION_LOCAL_JEANS, 1.0)
     field = (100.0 - params.background) * f + params.background
     np.testing.assert_allclose(np.asarray(field), 0.0024, rtol=1e-6)
+
+
+def test_line_of_sight_factor_is_bilinear_in_the_table():
+    """exp(-tau) with tau bilinear in the (R, z) table around the source."""
+    from astronomix._modules._cooling._cooling import fuv_line_of_sight_factor
+
+    R_t = np.arange(6) * 0.5
+    z_t = -1.0 + np.arange(9) * 0.25
+    table = 0.3 * R_t[:, None] + 0.7 * (z_t[None, :] + 1.0)  # bilinear, so exact
+    params = FUVSourceParams(source_positions=jnp.array([[1.0, 1.0, 1.0]]),
+                             los_tau_table=jnp.asarray(table), los_r_spacing=0.5,
+                             los_z_min=-1.0, los_z_spacing=0.25)
+    c = jnp.linspace(0.1, 1.9, 5)
+    f = np.asarray(fuv_line_of_sight_factor(params, c, c, c))
+    cn = np.asarray(c)
+    R = np.sqrt((cn - 1)[:, None, None] ** 2 + (cn - 1)[None, :, None] ** 2)
+    tau = 0.3 * R + 0.7 * ((cn - 1)[None, None, :] + 1.0)
+    np.testing.assert_allclose(f, np.exp(-tau), rtol=1e-5)
+
+
+def test_disk_field_is_kennicutt_schmidt_times_slab_factor():
+    """coefficient * Sigma^index * min(1, (1 - E_2(tau/2)) / tau), constant along the column."""
+    from scipy.special import expn
+
+    from astronomix._modules._cooling._cooling import fuv_disk_field
+
+    rho = jnp.ones((2, 1, 10)) * jnp.array([2.0, 20.0])[:, None, None]
+    params = FUVSourceParams(dust_opacity=0.05, disk_sfr_coefficient=0.1, disk_sfr_index=1.4)
+    field = np.asarray(fuv_disk_field(rho, params, 0.5))
+    sigma = np.array([2.0, 20.0]) * 10 * 0.5
+    tau = 0.05 * sigma
+    expected = 0.1 * sigma**1.4 * np.minimum((1 - expn(2, tau / 2)) / tau, 1.0)
+    np.testing.assert_allclose(field[:, 0, :], np.repeat(expected[:, None], 10, 1), rtol=1e-5)

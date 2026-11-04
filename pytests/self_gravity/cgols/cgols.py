@@ -381,6 +381,7 @@ from astronomix._modules._cooling.cooling_options import (
     COOLING_FLOOR_CLIP,
     COOLING_OPERATOR_SPLIT,
     ELECTRON_HYDROGEN_DENSITY,
+    FUV_ATTENUATION_LINE_OF_SIGHT,
     FUV_ATTENUATION_LOCAL_JEANS,
     FUV_ATTENUATION_NONE,
     FUV_ATTENUATION_SLAB,
@@ -1050,11 +1051,20 @@ HEAT_RATIO = float(os.environ.get("CGOLS_HEAT_RATIO", "1"))
 # (local shielding exp(-kappa rho L_J), the Jeans length at T <= the cap,
 # Safranek-Shrader+2017). CGOLS_FUV_SIGMA_DUST: FUV dust cross-section per H
 # [cm^2] (1e-21, solar dust; uncertain by ~2x); CGOLS_FUV_JEANS_TCAP [K].
+# "los": exp(-tau) along the line of sight from the starburst, tau from the
+# analytic initial gas outside the 300 pc source radius (build_fuv_los_tau_table).
 FUV_ATTENUATION = os.environ.get("CGOLS_FUV_ATTENUATION", "none")
-if FUV_ATTENUATION not in ("none", "slab", "jeans"):
-    raise ValueError(f"CGOLS_FUV_ATTENUATION must be 'none', 'slab' or 'jeans', got {FUV_ATTENUATION!r}")
+if FUV_ATTENUATION not in ("none", "slab", "jeans", "los"):
+    raise ValueError(f"CGOLS_FUV_ATTENUATION must be 'none', 'slab', 'jeans' or 'los', got {FUV_ATTENUATION!r}")
 FUV_SIGMA_DUST = float(os.environ.get("CGOLS_FUV_SIGMA_DUST", "1e-21"))
 FUV_JEANS_TCAP = float(os.environ.get("CGOLS_FUV_JEANS_TCAP", "40"))
+# CGOLS_FUV_DISK=1 adds the FUV of the disk's own star formation: Kennicutt
+# (1998) Sigma_SFR = CGOLS_FUV_KS_A (Sigma_gas / Msun pc^-2)^CGOLS_FUV_KS_N
+# Msun/yr/kpc^2 of each column, over Sigma_SFR,0, slab-attenuated (TIGRESS /
+# OML10 geometry). "Model C" = CGOLS_FUV_DISK=1 CGOLS_FUV_ATTENUATION=los.
+FUV_DISK = os.environ.get("CGOLS_FUV_DISK", "0") == "1"
+FUV_KS_A = float(os.environ.get("CGOLS_FUV_KS_A", "2.5e-4"))
+FUV_KS_N = float(os.environ.get("CGOLS_FUV_KS_N", "1.4"))
 # Table lookup of the ki02gf12 curve and its heating factor: "search" (binary
 # search, jnp.searchsorted / jnp.interp) or "direct" (O(1) indexing on the
 # evenly log-spaced tables ki02_gf12_cooling builds; same bins, 9x faster on
@@ -1400,6 +1410,11 @@ def build_fuv_source_params():
         gravitational_constant=const.G.to(
             code_units.code_length**3 / (code_units.code_mass * code_units.code_time**2)
         ).value,
+        # Sigma_SFR / Sigma_SFR,0 = A Sigma^N / Sigma_SFR,0; the code surface
+        # density unit, 1e6 Msun / kpc^2, is exactly 1 Msun / pc^2.
+        disk_sfr_coefficient=FUV_KS_A / FUV_SIGMA_SFR0,
+        disk_sfr_index=FUV_KS_N,
+        **(build_fuv_los_tau_table() if FUV_ATTENUATION == "los" else {}),
     )
 
 
@@ -1697,6 +1712,86 @@ def Phi_halo_function(r):
     )
 
 
+def _ic_gas_density_rz(R, z):
+    """Unsmoothed analytic initial gas density (code units) on an (R, z) grid.
+
+    The disk and halo of build_initial_conditions before the grid smoothing:
+    the isothermal disk of surface density Sigma(R) in the external potential
+    plus the adiabatic hydrostatic halo. Resolution-independent, so the FUV
+    optical depth built from it is the same at every CGOLS_DIM.
+    """
+    Rg, Zg = jnp.meshgrid(jnp.asarray(R), jnp.asarray(z), indexing="ij")
+    r_sph = jnp.maximum(jnp.sqrt(Rg**2 + Zg**2), 1e-3)
+    phi = Phi_disk_function(Rg, Zg) + Phi_halo_function(r_sph)
+    phi_mid = Phi_disk_function(Rg[:, :1], 0.0) + Phi_halo_function(jnp.maximum(Rg[:, :1], 1e-3))
+    k_B_code = k_B.to(code_units.code_energy / u.K).value
+    m_p_code = m_p.to(code_units.code_mass).value
+    T_disk_code = KI02_DISK_T_OVER_MU * mu if KI02 else T_disk.to(u.K).value
+    c2_disk = k_B_code * T_disk_code / (mu * m_p_code)
+    M_gas_code = M_gas.to(code_units.code_mass).value
+    R_gas_code = R_gas.to(code_units.code_length).value
+    R_trunc_code = R_trunc.to(code_units.code_length).value
+    delta = (0.15 * u.kiloparsec).to(code_units.code_length).value
+    cutoff = jnp.where(Rg < R_trunc_code, 1.0, jnp.exp(-((Rg - R_trunc_code) / delta) ** 2))
+    sigma = M_gas_code / (2 * jnp.pi * R_gas_code**2) * jnp.exp(-Rg / R_gas_code) * cutoff
+    shape = jnp.exp(-(phi - phi_mid) / c2_disk)
+    rho_disk = sigma[:, :1] * shape / (jnp.sum(shape, axis=1, keepdims=True) * (z[1] - z[0]))
+    c2_halo = k_B_code * T_halo.to(u.K).value / (mu * m_p_code)
+    r_ref = (100 * u.kiloparsec).to(code_units.code_length).value
+    phi_0h = Phi_disk_function(0, r_ref) + Phi_halo_function(r_ref)
+    bracket = 1 - (gamma - 1) * (Phi_disk_function(0, r_sph) + Phi_halo_function(r_sph) - phi_0h) / c2_halo
+    rho_halo = rho_0h.to(code_units.code_density).value * jnp.maximum(bracket, 0.0) ** (1 / (gamma - 1))
+    return rho_disk + rho_halo
+
+
+def build_fuv_los_tau_table(spacing=0.02, n_samples=800):
+    """FUVSourceParams fields of the starburst's line-of-sight optical depth.
+
+    tau(R, z) = kappa * int rho dl along the straight ray from the box centre,
+    starting at the source radius r_s (the starburst region, taken as cleared
+    by its own feedback), through the analytic initial gas (_ic_gas_density_rz,
+    on a 10 pc grid). Static: the disk barely moves radially, and the ionised
+    wind gas that does move has no photoelectric heating.
+    """
+    kappa = (FUV_SIGMA_DUST * u.cm**2 / (TIGRESS_MU_H * const.m_p)).to(
+        code_units.code_length**2 / code_units.code_mass
+    ).value
+    r_s = (FUV_SOFTENING_PC * u.pc).to(code_units.code_length).value
+    fine = 0.01
+    R_f = jnp.arange(0.0, 7.3, fine)
+    z_f = jnp.arange(-10.2, 10.2 + fine / 2, fine)
+    rho = _ic_gas_density_rz(R_f, z_f)
+
+    def sample(Rq, zq):
+        fi = jnp.clip(Rq / fine, 0, R_f.size - 1.001)
+        fj = jnp.clip((zq - z_f[0]) / fine, 0, z_f.size - 1.001)
+        i0, j0 = jnp.floor(fi).astype(jnp.int32), jnp.floor(fj).astype(jnp.int32)
+        wi, wj = fi - i0, fj - j0
+        return ((1 - wi) * (1 - wj) * rho[i0, j0] + wi * (1 - wj) * rho[i0 + 1, j0]
+                + (1 - wi) * wj * rho[i0, j0 + 1] + wi * wj * rho[i0 + 1, j0 + 1])
+
+    R_t = jnp.arange(0.0, 7.2 + spacing / 2, spacing)
+    z_t = jnp.arange(-10.1, 10.1 + spacing / 2, spacing)
+    t = (jnp.arange(n_samples) + 0.5) / n_samples
+
+    @jax.jit
+    def row(Ri):
+        d = jnp.sqrt(Ri**2 + z_t**2)                       # (nz,)
+        length = jnp.maximum(d - r_s, 0.0)
+        s = r_s + length[:, None] * t[None, :]             # (nz, n)
+        dd = jnp.maximum(d, 1e-9)[:, None]
+        mean_rho = jnp.mean(sample(Ri * s / dd, z_t[:, None] * s / dd), axis=1)
+        return kappa * mean_rho * length
+
+    tau = jnp.stack([row(Ri) for Ri in R_t])
+    return dict(
+        los_tau_table=tau,
+        los_r_spacing=float(spacing),
+        los_z_min=float(z_t[0]),
+        los_z_spacing=float(spacing),
+    )
+
+
 def vertical_hse_pressure(rho, Phi, dz_, P_top, P_bottom=None):
     """Pressure in discrete vertical HSE: integrate dP/dz = -rho dPhi/dz.
 
@@ -1987,7 +2082,8 @@ def build_config():
             + (
                 f"FUV point source (Sigma_SFR,0 {FUV_SIGMA_SFR0:g}, r_s {FUV_SOFTENING_PC:g} pc, "
                 + (f"SFR fixed {FUV_SFR}" if FUV_SFR is not None else f"SFR floor {FUV_SFR_FLOOR:g}")
-                + f", attenuation {FUV_ATTENUATION})"
+                + f", attenuation {FUV_ATTENUATION}"
+                + (f", disk SF Kennicutt-Schmidt {FUV_KS_A:g} Sigma^{FUV_KS_N:g})" if FUV_DISK else ")")
                 if FUV
                 else f"uniform J/J0 = {HEAT_RATIO:g}"
             )
@@ -2161,7 +2257,9 @@ def build_config():
                         "none": FUV_ATTENUATION_NONE,
                         "slab": FUV_ATTENUATION_SLAB,
                         "jeans": FUV_ATTENUATION_LOCAL_JEANS,
+                        "los": FUV_ATTENUATION_LINE_OF_SIGHT,
                     }[FUV_ATTENUATION],
+                    fuv_disk_source=KI02 and FUV and FUV_DISK,
                 )
             )
             if COOLING

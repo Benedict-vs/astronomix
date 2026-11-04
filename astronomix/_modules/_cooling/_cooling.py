@@ -62,6 +62,7 @@ from astronomix.option_classes.simulation_config import (
 from astronomix._modules._cooling.cooling_options import (
     CoolingConfig,
     CoolingCurveConfig,
+    FUV_ATTENUATION_LINE_OF_SIGHT,
     FUV_ATTENUATION_LOCAL_JEANS,
     FUV_ATTENUATION_NONE,
     FUV_ATTENUATION_SLAB,
@@ -1304,6 +1305,72 @@ def fuv_heating_factor(
     return luminosity_area * intensity + fuv_source_params.background
 
 
+def _slab_factor(tau):
+    """min(1, (1 - E_2(tau / 2)) / tau), the slab mean intensity over the thin value."""
+    tau = jnp.maximum(tau, 1e-6)
+    half = 0.5 * tau
+    e2 = jnp.exp(-half) - half * jax.scipy.special.exp1(half)
+    return jnp.minimum((1.0 - e2) / tau, 1.0)
+
+
+def fuv_line_of_sight_factor(
+    fuv_source_params: FUVSourceParams,
+    cell_centers_x: jnp.ndarray,
+    cell_centers_y: jnp.ndarray,
+    cell_centers_z: jnp.ndarray,
+) -> FIELD_TYPE:
+    """exp(-tau) of the first source, tau bilinear in its (R, z) table.
+
+    The table (``FUVSourceParams.los_tau_table``) is precomputed by the caller,
+    e.g. from the initial gas; cells beyond its range take the edge values.
+    """
+    p = fuv_source_params
+    source = p.source_positions[0]
+    radius = jnp.sqrt(
+        ((cell_centers_x - source[0]) ** 2)[:, None, None]
+        + ((cell_centers_y - source[1]) ** 2)[None, :, None]
+    )
+    height = (cell_centers_z - source[2])[None, None, :]
+    table = p.los_tau_table
+    fi = radius / p.los_r_spacing
+    fj = (height - p.los_z_min) / p.los_z_spacing
+    i0 = jnp.clip(jnp.floor(fi).astype(jnp.int32), 0, table.shape[0] - 2)
+    j0 = jnp.clip(jnp.floor(fj).astype(jnp.int32), 0, table.shape[1] - 2)
+    wi = jnp.clip(fi - i0, 0.0, 1.0)
+    wj = jnp.clip(fj - j0, 0.0, 1.0)
+    tau = (
+        (1 - wi) * (1 - wj) * table[i0, j0]
+        + wi * (1 - wj) * table[i0 + 1, j0]
+        + (1 - wi) * wj * table[i0, j0 + 1]
+        + wi * wj * table[i0 + 1, j0 + 1]
+    )
+    return jnp.exp(-tau)
+
+
+def fuv_disk_field(
+    density: FIELD_TYPE,
+    fuv_source_params: FUVSourceParams,
+    column_spacing: float,
+) -> FIELD_TYPE:
+    """J / J_0 of the disk's own star formation, attenuated as a slab.
+
+    Sigma_SFR / Sigma_SFR,0 = coefficient * Sigma^index (Kennicutt-Schmidt) with
+    Sigma the gas column of the cell's (x, y) column, times the slab factor of
+    tau = kappa Sigma (Ostriker, McKee & Leroy 2010: sources spread through the
+    slab, the geometry that formula is for). Constant along the column; above
+    the disk this is only a rough value, but there the gas is ionised and the
+    photoelectric heating is off.
+    """
+    p = fuv_source_params
+    column = jnp.sum(density, axis=-1, keepdims=True) * column_spacing
+    field = (
+        p.disk_sfr_coefficient
+        * jnp.maximum(column, 0.0) ** p.disk_sfr_index
+        * _slab_factor(p.dust_opacity * column)
+    )
+    return jnp.broadcast_to(field, density.shape)
+
+
 def fuv_attenuation_factor(
     density: FIELD_TYPE,
     pressure: FIELD_TYPE,
@@ -1336,12 +1403,8 @@ def fuv_attenuation_factor(
     """
     kappa = fuv_source_params.dust_opacity
     if attenuation == FUV_ATTENUATION_SLAB:
-        tau = kappa * jnp.sum(density, axis=-1, keepdims=True) * column_spacing
-        tau = jnp.maximum(tau, 1e-6)
-        half = 0.5 * tau
-        e2 = jnp.exp(-half) - half * jax.scipy.special.exp1(half)
-        factor = jnp.minimum((1.0 - e2) / tau, 1.0)
-        return jnp.broadcast_to(factor, density.shape)
+        column = jnp.sum(density, axis=-1, keepdims=True) * column_spacing
+        return jnp.broadcast_to(_slab_factor(kappa * column), density.shape)
     if attenuation == FUV_ATTENUATION_LOCAL_JEANS:
         sound_speed2 = jnp.minimum(
             pressure / density, fuv_source_params.jeans_sound_speed_squared_cap
@@ -1430,15 +1493,27 @@ def update_pressure_by_cooling(
             helper_data.cell_centers_z,
             time,
         )
-        if cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
-            # Attenuate the sources, not the metagalactic background.
-            field = (field - fuv_params.background) * fuv_attenuation_factor(
+        column_spacing = helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0]
+        if cooling_config.fuv_attenuation == FUV_ATTENUATION_LINE_OF_SIGHT:
+            attenuation = fuv_line_of_sight_factor(
+                fuv_params,
+                helper_data.cell_centers_x,
+                helper_data.cell_centers_y,
+                helper_data.cell_centers_z,
+            )
+        elif cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
+            attenuation = fuv_attenuation_factor(
                 density,
                 pressure,
                 fuv_params,
                 cooling_config.fuv_attenuation,
-                helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0],
-            ) + fuv_params.background
+                column_spacing,
+            )
+        if cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
+            # Attenuate the sources, not the metagalactic background.
+            field = (field - fuv_params.background) * attenuation + fuv_params.background
+        if cooling_config.fuv_disk_source:
+            field = field + fuv_disk_field(density, fuv_params, column_spacing)
         heating_rate = heating_rate * field
     with_heating = (
         cooling_config.fuv_point_source_heating

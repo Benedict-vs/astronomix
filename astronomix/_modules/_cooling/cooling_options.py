@@ -235,8 +235,14 @@ class CoolingConfig(NamedTuple):
 
     #: Dust attenuation of the point-source FUV field (the background is not
     #: attenuated): ``FUV_ATTENUATION_NONE`` (default), ``FUV_ATTENUATION_SLAB``
-    #: or ``FUV_ATTENUATION_LOCAL_JEANS`` (see ``fuv_attenuation_factor``).
+    #: ``FUV_ATTENUATION_LOCAL_JEANS`` (see ``fuv_attenuation_factor``) or
+    #: ``FUV_ATTENUATION_LINE_OF_SIGHT`` (see ``fuv_line_of_sight_factor``).
     fuv_attenuation: int = 0
+
+    #: Add the FUV of the disk's own star formation (see ``fuv_disk_field``):
+    #: Kennicutt-Schmidt on each column's gas surface density, attenuated by
+    #: the slab factor. Needs ``fuv_point_source_heating``.
+    fuv_disk_source: bool = False
 
 
 #: No attenuation of the point-source FUV field.
@@ -248,6 +254,9 @@ FUV_ATTENUATION_SLAB = 1
 #: sound speed capped at ``jeans_sound_speed_squared_cap`` (Safranek-Shrader
 #: et al. 2017).
 FUV_ATTENUATION_LOCAL_JEANS = 2
+#: exp(-tau) along the straight line from the (single) source, tau read from
+#: the tabulated (R, z) map ``FUVSourceParams.los_tau_table`` around it.
+FUV_ATTENUATION_LINE_OF_SIGHT = 3
 
 
 class FUVSourceParams(NamedTuple):
@@ -294,6 +303,21 @@ class FUVSourceParams(NamedTuple):
 
     #: G in code units, for the Jeans length of the local shielding.
     gravitational_constant: float = 0.0
+
+    #: Line-of-sight optical depth of the source, tau(R, z) on a uniform grid
+    #: in cylindrical radius R >= 0 and height z, both relative to the first
+    #: source: tau[i, j] at R = i * los_r_spacing, z = los_z_min + j *
+    #: los_z_spacing (``FUV_ATTENUATION_LINE_OF_SIGHT``).
+    los_tau_table: jnp.ndarray = jnp.zeros((2, 2))
+    los_r_spacing: float = 1.0
+    los_z_min: float = 0.0
+    los_z_spacing: float = 1.0
+
+    #: Disk FUV of ``CoolingConfig.fuv_disk_source``: J / J_0 =
+    #: disk_sfr_coefficient * Sigma^disk_sfr_index (Sigma in code surface
+    #: density) before the slab attenuation, i.e. Sigma_SFR(Sigma) / Sigma_SFR,0.
+    disk_sfr_coefficient: float = 0.0
+    disk_sfr_index: float = 1.4
 
 
 class CoolingParams(NamedTuple):
