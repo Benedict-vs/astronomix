@@ -147,8 +147,9 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A512fvhlle.log"),
     "FD1024": ("FD", 1024, "base", "cgols_snapshots_A1024", "_A1024", "_A1024", f"{LOGS}/cgols_diag_A1024.log"),
     "FV1024": ("FV", 1024, "base", "cgols_snapshots_A1024fv", "_A1024fv", "_A1024fv", f"{LOGS}/cgols_diag_A1024fv.log"),
-    # HoreKa job 117180 (4 H200, split (1, 2, 2, 1), code 494d1b5): IC seed 1, the first measured FV-1024 sigma
-    "FV1024s1": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs1", "_A1024fvs1", None,
+    # HoreKa job 117180 (4 H200, split (1, 2, 2, 1), code 494d1b5): IC seed 1, the first measured FV-1024 sigma;
+    # 3D cache from HoreKa job 121315 (all 60 checkpoints)
+    "FV1024s1": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs1", "_A1024fvs1", "_A1024fvs1",
                  f"{LOGS}/cgols_diag_A1024fvs1.log"),
     # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
     # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
