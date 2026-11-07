@@ -3,7 +3,8 @@ The VL2 finite-volume scheme of AthenaPK.
 
 A re-implementation of AthenaPK's default second-order scheme: the van Leer
 predictor-corrector ("VL2", Stone & Gardiner 2009) with a donor-cell predictor
-half step and a piecewise-linear (harmonic van Leer slope) corrector step,
+half step and a piecewise-linear (harmonic van Leer slope) corrector step, or
+optionally AthenaPK's piecewise-parabolic corrector (``limiter = PPM``),
 AthenaPK's HLLD / HLLE / HLLC / LLF interface solvers, and — for MHD — the
 cell-centred GLM-MHD system of Dedner et al. (2002) with the cleaning scalar psi
 carried as a ninth variable. AthenaPK's first-order flux correction and its
@@ -26,6 +27,7 @@ One step of size ``dt`` from the primitive state ``W^n`` (conserved form
     U^{n+½}  = U^n - dt/2 L_DC(W^n)       then  psi *= exp(-α c_h (dt/2) / dx)
     W^{n+½}  = W(U^{n+½})
     U^{n+1}  = U^n - dt   L_PLM(W^{n+½})  then  psi *= exp(-α c_h dt / dx)
+               (L_PPM with limiter = PPM)
     W^{n+1}  = W(U^{n+1})
 
 with the flux divergence ``L(W)_i = (1/dx) Σ_d (F_{i+½} - F_{i-½})``. With
@@ -65,6 +67,7 @@ from astronomix.option_classes.simulation_config import (
     HLLD,
     LAX_FRIEDRICHS,
     POSITIVITY_HARD_FLOOR,
+    PPM,
     SIMPLE_SOURCE,
     STATE_TYPE,
 )
@@ -124,6 +127,23 @@ DENSITY_FAILURE = 2
 #: AthenaPK. Correcting a face also changes the neighbour's update, so the
 #: check is repeated; the last pass only corrects density failures.
 NUM_FLUX_CORRECTION_ATTEMPTS = 4
+
+#: The reconstruction of a stage: donor cell (the predictor, and the corrector
+#: with ``first_order_fallback``), AthenaPK's piecewise-linear reconstruction
+#: with van Leer slopes (the default corrector) or its piecewise-parabolic
+#: reconstruction (the corrector with ``limiter = PPM``).
+DONOR_CELL = 0
+PIECEWISE_LINEAR = 1
+PIECEWISE_PARABOLIC = 2
+
+#: The number of cells a stage reads on each side of the cell it updates, per
+#: reconstruction: the faces of the cell are reconstructed from its
+#: neighbours, whose reconstruction reaches zero, one or two cells further.
+STENCIL_REACH = {DONOR_CELL: 1, PIECEWISE_LINEAR: 2, PIECEWISE_PARABOLIC: 3}
+
+#: The constant ``C2 > 1`` of the second-derivative limiter of PPM (Colella &
+#: Sekora 2008), as in AthenaPK.
+PPM_SECOND_DERIVATIVE_LIMIT = 1.25
 
 # -------------------------------------------------------------
 # =================== ↑ Module constants ↑ ====================
@@ -431,7 +451,186 @@ def _van_leer_slopes(cell_minus, cell, cell_plus):
     return cell + limited_half_slope, cell - limited_half_slope
 
 
-def _reconstructed_face_states(primitive_state: STATE_TYPE, axis: int, piecewise_linear: bool):
+def _athena_sign(value):
+    """
+    Athena's ``SIGN``: ``+1`` for ``value >= 0`` and ``-1`` otherwise (unlike
+    ``jnp.sign``, which is zero at zero). The arms are built from the typed
+    operand, as a select between two bare literals enters Triton untyped.
+    """
+    one = jnp.ones_like(value)
+    return jnp.where(value >= 0.0, one, -one)
+
+
+def _same_sign(first_value, *other_values):
+    """Whether all values have the same Athena ``SIGN``."""
+    first_sign = _athena_sign(first_value)
+    same_sign = _athena_sign(other_values[0]) == first_sign
+    for value in other_values[1:]:
+        same_sign = same_sign & (_athena_sign(value) == first_sign)
+    return same_sign
+
+
+def _ppm_limited_interface_value(
+    cell_minus,
+    cell_plus,
+    interface_value,
+    curvature_minus,
+    curvature_plus,
+):
+    """
+    The PPM interface value between two cells after AthenaPK's limiter for a
+    local extremum at the interface (Colella et al. 2011, Sec. 4.3.1): where
+    the interpolated value is not between the two cell values, it is replaced
+    by the cells' mean corrected with the limited second derivative.
+
+    Args:
+        cell_minus: The value in the cell left of the interface.
+        cell_plus: The value in the cell right of the interface.
+        interface_value: The interpolated interface value.
+        curvature_minus: The undivided second difference of the left cell.
+        curvature_plus: The undivided second difference of the right cell.
+
+    Returns:
+        The limited interface value.
+    """
+    is_extremum = (interface_value - cell_minus) * (cell_plus - interface_value) < 0.0
+    # The off-centred quantities are added first, as in AthenaPK, which keeps
+    # the result mirror symmetric in floating point.
+    interface_curvature = 3.0 * (cell_minus + cell_plus - 2.0 * interface_value)
+    limited_magnitude = jnp.minimum(
+        PPM_SECOND_DERIVATIVE_LIMIT * jnp.abs(curvature_minus),
+        jnp.minimum(
+            PPM_SECOND_DERIVATIVE_LIMIT * jnp.abs(curvature_plus),
+            jnp.abs(interface_curvature),
+        ),
+    )
+    limited_curvature = jnp.where(
+        _same_sign(interface_curvature, curvature_minus, curvature_plus),
+        _athena_sign(interface_curvature) * limited_magnitude,
+        0.0,
+    )
+    limited_value = 0.5 * (cell_minus + cell_plus) - limited_curvature / 6.0
+    return jnp.where(is_extremum, limited_value, interface_value)
+
+
+def _ppm_face_values(cell_minus_2, cell_minus_1, cell, cell_plus_1, cell_plus_2):
+    """
+    The piecewise-parabolic reconstruction of one cell, a line-by-line port of
+    AthenaPK's ``PPM`` (``ppm_simple.hpp``): the fourth-order interface values
+    of Colella & Woodward (1984, eq. 1.6), limited at local extrema of the
+    interfaces, and then the parabola limited with the smooth-extremum
+    preserving limiter of Colella & Sekora (2008) / McCorquodale & Colella
+    (2011) (constant ``C2 = 1.25``, roundoff thresholds ``1e-12``). The
+    operations are grouped as in AthenaPK so that the reconstruction is mirror
+    symmetric in floating point. Elementwise, so the Pallas kernels call it as
+    well; divisions are guarded so that discarded branches stay finite.
+
+    The limiter is discontinuous in its data: its extremum test is the exact
+    sign of ``(q_{i+1} - q_i) (q_i - q_{i-1})``, so where two neighbouring
+    cells are equal (a plateau, e.g. a uniform medium next to a jump), a
+    round-off difference decides between flattening the cell and keeping a
+    parabola with an overshoot. Runs that differ only in round-off (backend,
+    sharding) therefore drift apart to the truncation-error level, unlike
+    with the continuous van Leer slope.
+
+    Args:
+        cell_minus_2: The value two cells to the left.
+        cell_minus_1: The value in the left neighbour.
+        cell: The value in the cell.
+        cell_plus_1: The value in the right neighbour.
+        cell_plus_2: The value two cells to the right.
+
+    Returns:
+        ``(value at the cell's right face, value at the cell's left face)``.
+    """
+    # Step 1: interface values at i - 1/2 and i + 1/2 (CW eq. 1.6), with the
+    # biased stencil quantities grouped for floating-point symmetry.
+    difference_left = cell - cell_minus_1
+    difference_right = cell_plus_1 - cell
+    mean_slope_minus = 0.5 * difference_left + 0.5 * (cell_minus_1 - cell_minus_2)
+    mean_slope = 0.5 * difference_right + 0.5 * difference_left
+    mean_slope_plus = 0.5 * (cell_plus_2 - cell_plus_1) + 0.5 * difference_right
+    left_interface = 0.5 * (cell_minus_1 + cell) + (mean_slope_minus - mean_slope) / 6.0
+    right_interface = 0.5 * (cell + cell_plus_1) + (mean_slope - mean_slope_plus) / 6.0
+
+    # Step 2: limit the interface values at local extrema, with the undivided
+    # second differences of the cells (the off-centred values added first).
+    curvature_minus = cell_minus_2 + cell - 2.0 * cell_minus_1
+    curvature = cell_minus_1 + cell_plus_1 - 2.0 * cell
+    curvature_plus = cell + cell_plus_2 - 2.0 * cell_plus_1
+    left_interface = _ppm_limited_interface_value(
+        cell_minus_1,
+        cell,
+        left_interface,
+        curvature_minus,
+        curvature,
+    )
+    right_interface = _ppm_limited_interface_value(
+        cell,
+        cell_plus_1,
+        right_interface,
+        curvature,
+        curvature_plus,
+    )
+
+    # The parabola's curvature (-2 times its a6 coefficient).
+    face_curvature = 6.0 * (left_interface + right_interface - 2.0 * cell)
+
+    # Step 3: the cell-centred differences to the interface values.
+    difference_to_left_face = cell - left_interface
+    difference_to_right_face = right_interface - cell
+
+    # Step 4: the limiter of Colella & Sekora (2008) on the parabola. At a
+    # smooth extremum (all second differences of one sign) the curvature is
+    # limited (CS eq. 22) and the parabola scaled by the limited ratio (MC
+    # eq. 27), unless the curvature is at roundoff level.
+    is_smooth = _same_sign(curvature_minus, curvature, curvature_plus, face_curvature)
+    limited_magnitude = jnp.minimum(
+        jnp.minimum(
+            PPM_SECOND_DERIVATIVE_LIMIT * jnp.abs(curvature_minus),
+            PPM_SECOND_DERIVATIVE_LIMIT * jnp.abs(curvature),
+        ),
+        jnp.minimum(
+            PPM_SECOND_DERIVATIVE_LIMIT * jnp.abs(curvature_plus),
+            jnp.abs(face_curvature),
+        ),
+    )
+    limited_curvature = jnp.where(
+        is_smooth,
+        _athena_sign(face_curvature) * limited_magnitude,
+        0.0,
+    )
+    stencil_scale = jnp.maximum(
+        jnp.maximum(jnp.abs(cell_minus_1), jnp.abs(cell_minus_2)),
+        jnp.maximum(jnp.maximum(jnp.abs(cell), jnp.abs(cell_plus_1)), jnp.abs(cell_plus_2)),
+    )
+    is_above_roundoff = jnp.abs(face_curvature) > 1.0e-12 * stencil_scale
+    # The denominator is guarded so that the discarded branch stays finite.
+    safe_face_curvature = jnp.where(is_above_roundoff, face_curvature, 1.0)
+    limited_ratio = jnp.where(is_above_roundoff, limited_curvature / safe_face_curvature, 0.0)
+
+    is_local_extremum = (difference_to_left_face * difference_to_right_face <= 0.0) | (
+        difference_right * difference_left <= 0.0
+    )
+    # At an extremum, limit unless the limited ratio is one up to roundoff
+    # (CS eq. 23); elsewhere, clip the side of the parabola that overshoots.
+    limit_extremum = limited_ratio <= 1.0 - 1.0e-12
+    clip_left = jnp.abs(difference_to_left_face) >= 2.0 * jnp.abs(difference_to_right_face)
+    clip_right = jnp.abs(difference_to_right_face) >= 2.0 * jnp.abs(difference_to_left_face)
+    left_face_value = jnp.where(
+        is_local_extremum,
+        jnp.where(limit_extremum, cell - limited_ratio * difference_to_left_face, left_interface),
+        jnp.where(clip_left, cell - 2.0 * difference_to_right_face, left_interface),
+    )
+    right_face_value = jnp.where(
+        is_local_extremum,
+        jnp.where(limit_extremum, cell + limited_ratio * difference_to_right_face, right_interface),
+        jnp.where(clip_right, cell + 2.0 * difference_to_left_face, right_interface),
+    )
+    return right_face_value, left_face_value
+
+
+def _reconstructed_face_states(primitive_state: STATE_TYPE, axis: int, reconstruction: int):
     """
     The left and right primitive states at every interface ``i - 1/2`` along
     ``axis`` (stored at index ``i``).
@@ -439,19 +638,29 @@ def _reconstructed_face_states(primitive_state: STATE_TYPE, axis: int, piecewise
     Args:
         primitive_state: The primitive state.
         axis: The spatial axis (1-based, i.e. the array axis).
-        piecewise_linear: Use the van Leer limited PLM; otherwise donor cell.
+        reconstruction: ``DONOR_CELL``, ``PIECEWISE_LINEAR`` (van Leer limited
+            PLM) or ``PIECEWISE_PARABOLIC`` (AthenaPK's PPM).
 
     Returns:
         The (left, right) interface states, each shaped like the state.
     """
-    if not piecewise_linear:
+    if reconstruction == DONOR_CELL:
         return jnp.roll(primitive_state, 1, axis=axis), primitive_state
 
-    right_face_values, left_face_values = _van_leer_slopes(
-        jnp.roll(primitive_state, 1, axis=axis),
-        primitive_state,
-        jnp.roll(primitive_state, -1, axis=axis),
-    )
+    if reconstruction == PIECEWISE_LINEAR:
+        right_face_values, left_face_values = _van_leer_slopes(
+            jnp.roll(primitive_state, 1, axis=axis),
+            primitive_state,
+            jnp.roll(primitive_state, -1, axis=axis),
+        )
+    else:
+        right_face_values, left_face_values = _ppm_face_values(
+            jnp.roll(primitive_state, 2, axis=axis),
+            jnp.roll(primitive_state, 1, axis=axis),
+            primitive_state,
+            jnp.roll(primitive_state, -1, axis=axis),
+            jnp.roll(primitive_state, -2, axis=axis),
+        )
     return jnp.roll(right_face_values, 1, axis=axis), left_face_values
 
 
@@ -503,7 +712,7 @@ def _interface_flux_from_states(
 def _interface_fluxes(
     primitive_state: STATE_TYPE,
     axis: int,
-    piecewise_linear: bool,
+    reconstruction: int,
     riemann_solver: int,
     gamma,
     cleaning_speed,
@@ -517,7 +726,8 @@ def _interface_fluxes(
     Args:
         primitive_state: The primitive state.
         axis: The spatial axis (1-based).
-        piecewise_linear: Use PLM (else donor-cell) reconstruction.
+        reconstruction: The reconstruction (``DONOR_CELL``,
+            ``PIECEWISE_LINEAR`` or ``PIECEWISE_PARABOLIC``).
         riemann_solver: The Riemann solver.
         gamma: The adiabatic index.
         cleaning_speed: The GLM cleaning speed (MHD only).
@@ -527,7 +737,7 @@ def _interface_fluxes(
     Returns:
         The flux array, laid out like the state.
     """
-    left_states, right_states = _reconstructed_face_states(primitive_state, axis, piecewise_linear)
+    left_states, right_states = _reconstructed_face_states(primitive_state, axis, reconstruction)
     frame_indices = _interface_frame_indices(axis, config, registered_variables)
 
     # Velocity components the layout lacks enter the solver as zeros.
@@ -708,7 +918,7 @@ def _first_order_fluxes(
         _interface_fluxes(
             stage_primitive_state,
             axis,
-            piecewise_linear=False,
+            reconstruction=DONOR_CELL,
             riemann_solver=LAX_FRIEDRICHS,
             gamma=gamma,
             cleaning_speed=cleaning_speed,
@@ -970,7 +1180,7 @@ def _vl2_stage(
     stage_primitive_state: STATE_TYPE,
     base_conserved_state: STATE_TYPE,
     stage_time_step,
-    piecewise_linear: bool,
+    reconstruction: int,
     cleaning_speed,
     damping_factor,
     gamma,
@@ -989,7 +1199,8 @@ def _vl2_stage(
         stage_primitive_state: The primitive state the fluxes are computed from.
         base_conserved_state: The conserved register the update starts from.
         stage_time_step: The stage's time-step weight ``beta * dt``.
-        piecewise_linear: PLM (corrector) or donor-cell (predictor) fluxes.
+        reconstruction: The reconstruction of the stage's fluxes (donor cell
+            in the predictor).
         cleaning_speed: The GLM cleaning speed (MHD only).
         damping_factor: The stage's psi damping factor (MHD only).
         gamma: The adiabatic index.
@@ -1010,7 +1221,7 @@ def _vl2_stage(
         _interface_fluxes(
             stage_primitive_state,
             axis,
-            piecewise_linear,
+            reconstruction,
             config.riemann_solver,
             gamma,
             cleaning_speed,
@@ -1087,7 +1298,7 @@ def _native_stage_from_primitive_base(
     stage_primitive_state: STATE_TYPE,
     base_primitive_state: STATE_TYPE,
     stage_time_step,
-    piecewise_linear: bool,
+    reconstruction: int,
     cleaning_speed,
     damping_factor,
     gamma,
@@ -1107,7 +1318,8 @@ def _native_stage_from_primitive_base(
         base_primitive_state: The primitive state ``W^n`` whose conserved form
             the update starts from.
         stage_time_step: The stage's time-step weight ``beta * dt``.
-        piecewise_linear: PLM (corrector) or donor-cell (predictor) fluxes.
+        reconstruction: The reconstruction of the stage's fluxes (donor cell
+            in the predictor).
         cleaning_speed: The GLM cleaning speed (MHD only).
         damping_factor: The stage's psi damping factor (MHD only).
         gamma: The adiabatic index.
@@ -1132,7 +1344,7 @@ def _native_stage_from_primitive_base(
         _interface_fluxes(
             stage_primitive_state,
             axis,
-            piecewise_linear,
+            reconstruction,
             config.riemann_solver,
             gamma,
             cleaning_speed,
@@ -1189,6 +1401,19 @@ def _native_stage_from_primitive_base(
     if correction_mask is None:
         return primitive_state
     return primitive_state, failure_codes[None].astype(primitive_state.dtype)
+
+
+def _corrector_reconstruction(config: SimulationConfig) -> int:
+    """
+    The reconstruction of the VL2 corrector: donor cell with
+    ``first_order_fallback``, PPM with ``limiter == PPM``, otherwise the van
+    Leer limited PLM (the predictor is always donor cell, as in AthenaPK).
+    """
+    if config.first_order_fallback:
+        return DONOR_CELL
+    if config.limiter == PPM:
+        return PIECEWISE_PARABOLIC
+    return PIECEWISE_LINEAR
 
 
 def _cleaning_speed_and_damping(
@@ -1259,9 +1484,10 @@ def _evolve_state_vl2(
 ) -> STATE_TYPE:
     """
     Advance the primitive state by one VL2 step: a donor-cell predictor to the
-    half step, then the corrector with the van Leer limited PLM, or with donor
-    cell when ``config.first_order_fallback`` is set (``config.limiter`` is not
-    read). Runs on the Pallas backend when it supports the configuration and
+    half step, then the corrector with the van Leer limited PLM, with PPM when
+    ``config.limiter == PPM``, or with donor cell when
+    ``config.first_order_fallback`` is set (see ``_corrector_reconstruction``).
+    Runs on the Pallas backend when it supports the configuration and
     natively otherwise; with Athena++'s gravity coupling always natively. The
     stage sources (cell-centred external gravity, CGOLS wind) are added after
     either backend's stages.
@@ -1279,7 +1505,15 @@ def _evolve_state_vl2(
     Returns:
         The primitive state ``W^{n+1}``.
     """
-    corrector_piecewise_linear = not config.first_order_fallback
+    corrector_reconstruction = _corrector_reconstruction(config)
+    if (
+        config.boundary_handling == GHOST_CELLS
+        and config.num_ghost_cells < STENCIL_REACH[corrector_reconstruction]
+    ):
+        raise ValueError(
+            f"The VL2 corrector needs {STENCIL_REACH[corrector_reconstruction]} ghost "
+            f"cells, the configuration has {config.num_ghost_cells} (run finalize_config)."
+        )
 
     # Updates between steps (turbulent forcing, cooling, ...) may have changed
     # the physical cells without touching the halo.
@@ -1334,7 +1568,7 @@ def _evolve_state_vl2(
             primitive_state,
             base_primitive_state=None,
             stage_time_step=0.5 * dt,
-            piecewise_linear=False,
+            reconstruction=DONOR_CELL,
             cleaning_speed=cleaning_speed,
             damping_factor=predictor_damping_factor,
             gamma=gamma,
@@ -1357,7 +1591,7 @@ def _evolve_state_vl2(
             half_step_primitive_state,
             base_primitive_state=primitive_state,
             stage_time_step=dt,
-            piecewise_linear=corrector_piecewise_linear,
+            reconstruction=corrector_reconstruction,
             cleaning_speed=cleaning_speed,
             damping_factor=corrector_damping_factor,
             gamma=gamma,
@@ -1399,7 +1633,7 @@ def _evolve_state_vl2(
         primitive_state,
         initial_conserved_state,
         stage_time_step=0.5 * dt,
-        piecewise_linear=False,
+        reconstruction=DONOR_CELL,
         cleaning_speed=cleaning_speed,
         damping_factor=predictor_damping_factor,
         gamma=gamma,
@@ -1437,7 +1671,7 @@ def _evolve_state_vl2(
         half_step_primitive_state,
         initial_conserved_state,
         stage_time_step=dt,
-        piecewise_linear=corrector_piecewise_linear,
+        reconstruction=corrector_reconstruction,
         cleaning_speed=cleaning_speed,
         damping_factor=corrector_damping_factor,
         gamma=gamma,

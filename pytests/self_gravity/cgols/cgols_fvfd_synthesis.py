@@ -19,12 +19,14 @@ Per run (cached in data/studies/fvfd_synthesis_metrics.json, --recompute to rebu
             states;
   3D        entropy-split fluxes (wind-entropy outflow at 1 kpc, mixed outflow at 1 kpc, Edot at 5 kpc), the
             cumulative energy through |z| = 5 kpc and the cone half-opening at z = 1 kpc -- on the common 5 Myr
-            snapshot cadence (FV-512 has every 4th checkpoint) and, for the 1024 pair, at the matched times 30 and
-            60 Myr (FV-1024 has only 4 checkpoints).
+            snapshot cadence (FV-512 has every 4th checkpoint, FD-1024 and FV-2048 every 2nd) and at the matched
+            times 30 and 60 Myr. The 5 Myr subsampling biases the spiky mixed outflow: FV-1024 mixed1_15_40 is
+            2.91 / 2.98 / 3.18 at 1.25 / 2.5 / 5 Myr cadence, FV-2048 2.53 / 2.85 at 2.5 / 5 (ecum5 +2-3%, Edot
+            and cone < 1%); it is the same for every run, so differences stay comparable.
 
 Noise. sigma_traj = sample std over the realisations of one scheme at one N: IC-noise seeds 0-3, the checkpoint-
 segmented vs unsegmented baselines and reruns (fp32 only). The IC noise (1e-3) perturbs less than checkpoint
-segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-512, FD-1024, FV-1024) it is
+segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-1024) it is
 extrapolated as "noise does not shrink with N, and FD is as noisy as FV": the largest sigma measured for either
 scheme at any N' <= N (relative for positive fluxes/luminosities, absolute for log or shape metrics); the
 pessimistic variant also applies the FV 256 -> 512 growth once more at 1024. sigma_t is the standard error of a
@@ -48,6 +50,22 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     python cgols_fvfd_synthesis.py \
         --ppm FV128ppm=PPM:/export/scratch/bschuber/ppmrun_cpu/frames/A128fvppm:<diag log>:_A128fvppm \
         --ppm "FV128plmcpu=PLM CPU:/export/scratch/bschuber/ppmrun_cpu/frames/A128fvplmcpu:<diag log>:_A128fvplmcpu"
+
+    # 2026-10-31: + the GPU FV-PPM 256/512 runs (PPM_GPU_RUNS; emission caches from the frames with
+    # cgols_emission.py --tag _A{256,512}fvppm --source frames); prints the PPM direction / cost tables and adds
+    # figures/cgols/comparisons/fv_ppm_A256_A512.png (the other figures are unchanged)
+    python cgols_fvfd_synthesis.py --ppm-gpu [--ppm ... as above]
+
+    # 2026-11-03: + FV-2048 (RUNS["FV2048"], frames + emission cache from cgols_emission.py --tag _A2048fv --source
+    # frames; 3D cache added 2026-11-04 from HoreKa, cgols_convergence_3d.py --parts 8). RES runs to 2048 (FD-FV rows stop at 1024); the
+    # self-convergence table adds the FV 512 -> 1024 -> 2048 ladder (the convergence figure's M_inf band uses the
+    # finest ladder per scheme). A run is re-measured when its frame count changes or its emission / 3D cache
+    # appears; the other cached runs are reused.
+
+    # 2026-11-04: + FD-512 seed 1 (RUNS["FD512s1"], HoreKa job 117181; emission cache from cgols_emission.py --tag
+    # _A512s1 --source frames): FD-512 sigma_traj is measured (2 members) instead of extrapolated.
+    # 2026-11-05: + FV-1024 seed 1 (RUNS["FV1024s1"], HoreKa job 117180, emission cache from the frames): FV-1024
+    # sigma_traj measured (2 members).
 
 Writes figures/cgols/comparisons/fvfd_summary_significance.png, fvfd_convergence.png and fvfd_cost.png and prints
 the markdown tables. CPU only, numpy + scipy + matplotlib (no jax).
@@ -80,7 +98,7 @@ CACHE = "data/studies/fvfd_synthesis_metrics.json"
 FIG_DIR = "figures/cgols/comparisons"
 BOX_Z = 20.0
 MYR_PER_CODE_TIME = 9.777922216807893
-RES = (128, 256, 512, 1024)
+RES = (128, 256, 512, 1024, 2048)  # FD to 1024; FV to 2048 (FD-FV differences exist where both do)
 HEIGHTS_KPC = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0])  # = cgols_convergence_3d.HEIGHTS_KPC
 RNG = np.random.default_rng(1)
 
@@ -119,6 +137,8 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A256fvhlle.log"),
     "FV256c03": ("FV", 256, "CFL 0.3", f"{DIAG}/A256c03fv", None, None, f"{LOGS}/diagnostics/cgols_diag_A256c03fv.log"),
     "FD512": ("FD", 512, "base", "cgols_snapshots_A512", "_A512", "_A512", f"{LOGS}/cgols_diag_A512.log"),
+    # HoreKa job 117181 (2 H200, split (1, 2, 1, 1), code 494d1b5): IC seed 1, the first measured FD-512 sigma
+    "FD512s1": ("FD", 512, "ens", "cgols_snapshots_A512s1", "_A512s1", None, f"{LOGS}/cgols_diag_A512s1.log"),
     "FV512": ("FV", 512, "base", "cgols_snapshots_A512fvf32", "_A512fvf32", "_A512fvf32",
               f"{LOGS}/cgols_diag_A512fvf32.log"),
     "FV512b": ("FV", 512, "ens", f"{DIAG}/A512fv", None, None, f"{LOGS}/diagnostics/cgols_diag_A512fv.log"),
@@ -127,6 +147,13 @@ RUNS = {
                   f"{LOGS}/diagnostics/cgols_diag_A512fvhlle.log"),
     "FD1024": ("FD", 1024, "base", "cgols_snapshots_A1024", "_A1024", "_A1024", f"{LOGS}/cgols_diag_A1024.log"),
     "FV1024": ("FV", 1024, "base", "cgols_snapshots_A1024fv", "_A1024fv", "_A1024fv", f"{LOGS}/cgols_diag_A1024fv.log"),
+    # HoreKa job 117180 (4 H200, split (1, 2, 2, 1), code 494d1b5): IC seed 1, the first measured FV-1024 sigma;
+    # 3D cache from HoreKa job 121315 (all 60 checkpoints)
+    "FV1024s1": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs1", "_A1024fvs1", "_A1024fvs1",
+                 f"{LOGS}/cgols_diag_A1024fvs1.log"),
+    # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
+    # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
+    "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
 }
 
 #: Solver GPU-hours (H200) to 75 Myr from the console logs (time_integration wall x GPUs); 128/256 from the
@@ -137,8 +164,28 @@ GPU_HOURS = {
     ("FD", 256): 1154.8 / 3600, ("FV", 256): 198.6 / 3600,
     ("FD", 512): 20898.4 / 3600, ("FV", 512): 3571.9 / 3600,
     ("FD", 1024): 3.13 * 42341 * 4 / 3600, ("FV", 1024): 17449.4 * 4 / 3600,
+    ("FV", 2048): 39422.9 * 32 / 3600,  # 68952 steps, 32 H200, one leg (job 112293)
 }
 GPU_HOURS_FD1024_TOTAL = 246.0
+
+#: FV-PPM on GPU (HoreKa jobs 112240 / 112241, 1 H200 each, code b834d0f of branch fv-ppm): FV production (VL2 +
+#: HLLC, CFL 0.4, FOFC, hard floor, fp32) with the AthenaPK ppm_simple corrector instead of PLM. Added only with
+#: --ppm-gpu, so the default outputs do not change.
+PPM_GPU_RUNS = {
+    "FV256ppm": ("FV", 256, "PPM", "cgols_snapshots_A256fvppm", "_A256fvppm", None, f"{LOGS}/cgols_diag_A256fvppm.log"),
+    "FV512ppm": ("FV", 512, "PPM", "cgols_snapshots_A512fvppm", "_A512fvppm", None, f"{LOGS}/cgols_diag_A512fvppm.log"),
+}
+#: label -> (time_integration wall [s], GPUs, diag log for the step count, note). PPM: HoreKa job logs
+#: (cgols_logs/horeka/cgols_11224{0,1}.out); PLM / FD: local console logs as in GPU_HOURS (256: un-checkpointed seed
+#: run, 512: the base runs incl. checkpoint I/O).
+PPM_COST = {
+    "FD256": (1154.8, 1, f"{LOGS}/diagnostics/cgols_diag_A256s1.log", "local, seed run, no ckpts"),
+    "FV256": (198.6, 1, f"{LOGS}/diagnostics/cgols_diag_A256fvs1.log", "local, seed run, no ckpts"),
+    "FV256ppm": (516.7, 1, f"{LOGS}/cgols_diag_A256fvppm.log", "HoreKa job 112240"),
+    "FD512": (20898.4, 1, f"{LOGS}/cgols_diag_A512.log", "local, ckpt every frame"),
+    "FV512": (3571.9, 1, f"{LOGS}/cgols_diag_A512fvf32.log", "local, ckpt every 4th frame"),
+    "FV512ppm": (7458.5, 1, f"{LOGS}/cgols_diag_A512fvppm.log", "HoreKa job 112241"),
+}
 
 # -------------------------------------------------------------
 # =============== ↓ Metrics ↓ =================================
@@ -411,7 +458,14 @@ def measure(label, spec):
         m.update(a)
         se.update(b)
     clean = lambda d: {k: (None if v is None or not np.isfinite(v) else float(v)) for k, v in d.items()}
-    return {"m": clean(m), "se": clean(se), "series": series, "nframes": len(series["t"])}
+    return {"m": clean(m), "se": clean(se), "series": series, "nframes": len(series["t"]), "sources": sources(spec)}
+
+
+def sources(spec):
+    """Which optional inputs (emission cache, 3D cache) of a run exist: a change triggers a re-measure."""
+    _scheme, _n, _role, _frames, emis, tag3d, _diag = spec
+    return [bool(emis and os.path.exists(f"data/studies/emission{emis}.npz")),
+            bool(tag3d and os.path.exists(f"data/studies/convergence3d_v3{tag3d}.npz"))]
 
 
 def load_all(recompute, extra):
@@ -427,7 +481,9 @@ def load_all(recompute, extra):
             continue
         nframes = len([f for f in os.listdir(spec[3]) if f.startswith("frame_")])
         if label in cache and cache[label]["nframes"] == nframes:
-            continue
+            # entries written before the "sources" field: taken as measured with the inputs present now
+            if cache[label].setdefault("sources", sources(spec)) == sources(spec):
+                continue
         print(f"  measuring {label} ({spec[3]}, {nframes} frames)", flush=True)
         cache[label] = measure(label, spec)
     with open(CACHE, "w") as fh:
@@ -481,7 +537,7 @@ def stats(runs, data):
                 c["sig_traj"], c["extrap"] = (max(below) * norm(c) if below else None), True
             c["sig_traj_pess"] = c["sig_traj"]
             fv = {m: cc["sig_meas"] / norm(cc) for (s, m), cc in cell.items() if s == "FV" and cc["sig_meas"]}
-            if n == 1024 and c["extrap"] and 256 in fv and 512 in fv and c["sig_traj"] is not None:
+            if n >= 1024 and c["extrap"] and 256 in fv and 512 in fv and c["sig_traj"] is not None:
                 c["sig_traj_pess"] = max(c["sig_traj"], fv[512] * max(1.0, fv[512] / fv[256]) * norm(c))
         for c in cell.values():
             if key in EARLY:
@@ -671,20 +727,21 @@ def tables(st, runs, data):
         print(line)
         summary[key] = {"rows": {str(n): r for n, r in rows.items()}, "trend": [b, berr, note]}
 
-    print("\n## Self-convergence per scheme (256 -> 512 -> 1024): d1, d2, order p, Richardson M_inf; "
-          "MC: fraction monotone, p and M_inf 16/50/84%\n")
-    print("| metric | scheme | 256 / 512 / 1024 | d1 | d2 | p | M_inf | MC mono | MC p | MC M_inf |")
-    print("|---|---|---|---|---|---|---|---|---|---|")
+    print("\n## Self-convergence per scheme (N/4 -> N/2 -> N; FD and FV 256 -> 1024, FV also 512 -> 2048): d1, d2, "
+          "order p, Richardson M_inf; MC: fraction monotone, p and M_inf 16/50/84%\n")
+    print("| metric | scheme | ladder | values | d1 | d2 | p | M_inf | MC mono | MC p | MC M_inf |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for key, (label, _, _) in METRICS.items():
-        for scheme in ("FD", "FV"):
-            r = richardson(st[key], scheme)
+        for scheme, ladder in RICH_LADDERS:
+            r = richardson(st[key], scheme, ns=ladder)
             if r is None:
                 continue
             q = lambda name, r=r: "/".join(fmt(x) for x in r[name]) if name in r else "-"
-            print(f"| {label} | {scheme} | {' / '.join(fmt(x) for x in r['values'])} | {fmt(r['d1'])} | "
-                  f"{fmt(r['d2'])} | {fmt(r.get('p'), 2)} | {fmt(r.get('minf'))} | {r['frac_mono']:.2f} | "
-                  f"{q('p_q')} | {q('minf_q')} |")
-            summary[key][f"rich_{scheme}"] = r
+            print(f"| {label} | {scheme} | {'-'.join(map(str, ladder))} | {' / '.join(fmt(x) for x in r['values'])} | "
+                  f"{fmt(r['d1'])} | {fmt(r['d2'])} | {fmt(r.get('p'), 2)} | {fmt(r.get('minf'))} | "
+                  f"{r['frac_mono']:.2f} | {q('p_q')} | {q('minf_q')} |")
+            # the 256-1024 ladders keep their historical keys; the FV 512-2048 one is rich_FV_2048
+            summary[key][f"rich_{scheme}" + ("" if ladder[-1] == 1024 else f"_{ladder[-1]}")] = r
 
     print("\n## Equivalent resolution k: FV(N) = FD(k N)  (16-84%)\n")
     print("| metric | " + " | ".join(f"k @ FV-{n}" for n in RES) + " |")
@@ -762,6 +819,18 @@ def tables(st, runs, data):
     return summary
 
 
+#: (scheme, N ladder) of the self-convergence table; the finest available one feeds the figure's M_inf band
+RICH_LADDERS = (("FD", (256, 512, 1024)), ("FV", (256, 512, 1024)), ("FV", (512, 1024, 2048)))
+
+
+def finest_richardson(cell, scheme):
+    """richardson() over the finest of RICH_LADDERS this scheme has, or None."""
+    for sch, ladder in reversed(RICH_LADDERS):
+        if sch == scheme and all((scheme, n) in cell for n in ladder):
+            return richardson(cell, scheme, ns=ladder)
+    return None
+
+
 ATTR_KEYS = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "lx1_15_40", "lx1_60_75", "ha_60_75",
              "pinch_60_75", "asym_50_75", "ssv128", "ssv256", "cc85_dv", "side_loss", "mass_75")
 
@@ -813,17 +882,19 @@ def fig_significance(st):
     from matplotlib.colors import SymLogNorm, TwoSlopeNorm
 
     keys = [k for k in HEAT_KEYS if differences(st[k])]
-    z = np.full((len(keys), len(RES)), np.nan)
+    pair_res = [n for n in RES if any(n in differences(st[k]) for k in keys)]  # (a): N with both schemes
+    z = np.full((len(keys), len(pair_res)), np.nan)
     kk = np.full((len(keys), len(RES)), np.nan)
     fig, (ax, ax_k) = plt.subplots(1, 2, figsize=(17, 0.42 * len(keys) + 2.6), gridspec_kw={"width_ratios": (1.5, 1)})
     for i, key in enumerate(keys):
         rows = differences(st[key])
         for j, n in enumerate(RES):
             if n in rows:
+                j_a = pair_res.index(n)
                 r = rows[n]
-                z[i, j] = np.clip(r["z"], -1e3, 1e3)
+                z[i, j_a] = np.clip(r["z"], -1e3, 1e3)
                 rel = f"{100 * r['rel']:+.0f}%" if METRICS[key][1] == "rel" else f"{r['delta']:+.2g}"
-                ax.text(j, i, f"{rel}  R {fmt(r['R'], 2)} {verdict(r)}", ha="center", va="center", fontsize=7.5,
+                ax.text(j_a, i, f"{rel}  R {fmt(r['R'], 2)} {verdict(r)}", ha="center", va="center", fontsize=7.5,
                         color="k" if abs(r["z"]) < 30 else "w")
             k, q, note = k_factor(st[key], n, key=key)
             txt = ""
@@ -846,8 +917,8 @@ def fig_significance(st):
     cbk = fig.colorbar(imk, ax=ax_k, fraction=0.05, pad=0.01)
     cbk.set_label("log2 k   (FV(N) = FD(k N); k > 1: FV acts like a finer FD grid)")
     labels = [METRICS[k][0] + ("" if k in EARLY else "  [late]") for k in keys]
-    for a_ in (ax, ax_k):
-        a_.set_xticks(range(len(RES)), [str(n) for n in RES])
+    for a_, ns in ((ax, pair_res), (ax_k, RES)):
+        a_.set_xticks(range(len(ns)), [str(n) for n in ns])
         a_.set_xlabel("N")
     ax.set_yticks(range(len(keys)), labels, fontsize=8)
     ax_k.set_yticks(range(len(keys)), [""] * len(keys))
@@ -856,7 +927,8 @@ def fig_significance(st):
                  fontsize=10)
     ax_k.set_title("(b) equivalent resolution k (16-84% over sigma);\nblank: no FV run or FD ladder not monotone there",
                    fontsize=10)
-    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-1024", fontsize=12)
+    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-1024 (FV-2048: k only)",
+                 fontsize=12)
     fig.tight_layout()
     path = f"{FIG_DIR}/fvfd_summary_significance.png"
     fig.savefig(path, dpi=110)
@@ -885,7 +957,7 @@ def fig_convergence(st, runs, data):
                 if len(mem) > 1:
                     ax.plot(np.full(len(mem), n * off * (0.95 if scheme == "FD" else 1.05)), mem, ls="none",
                             marker="_", color=color, alpha=0.6, ms=6)
-            r = richardson(cell, scheme)
+            r = finest_richardson(cell, scheme)
             if r and "minf_q" in r and r["frac_mono"] > 0.5:
                 lo, _mid, hi = r["minf_q"]
                 ax.axhspan(lo, hi, xmin=0.9, xmax=1.0, color=color, alpha=0.25)
@@ -898,7 +970,7 @@ def fig_convergence(st, runs, data):
         ax.set_xscale("log")
         ax.minorticks_off()
         ax.set_xticks(RES, [str(n) for n in RES])
-        ax.set_xlim(100, 1500)
+        ax.set_xlim(100, 2900)
         if key in ("lx1_60_75", "lx1_15_40", "ssv256", "ssv128"):
             ax.set_yscale("log")
         ax.set_title(METRICS[key][0], fontsize=9.5)
@@ -909,8 +981,9 @@ def fig_convergence(st, runs, data):
             handles.setdefault(l, h)
     fig.legend(handles.values(), handles.keys(), loc="lower center", ncol=8, fontsize=8.5, frameon=False,
                bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle("Self-convergence of FD and FV (error bars: conservative sigma; dashes: realisations; "
-                 "right-edge band: Richardson M_inf 16-84% if monotone; offset markers: ablations)", fontsize=11)
+    fig.suptitle("Self-convergence of FD (128-1024) and FV (128-2048) (error bars: conservative sigma; dashes: "
+                 "realisations;\nright-edge band: Richardson M_inf 16-84% of the finest 3-run ladder if monotone; "
+                 "offset markers: ablations)", fontsize=11)
     fig.tight_layout(rect=(0, 0.04, 1, 0.97))
     path = f"{FIG_DIR}/fvfd_convergence.png"
     fig.savefig(path, dpi=100)
@@ -927,7 +1000,7 @@ def fig_cost(st):
     for i, key in enumerate(COST_KEYS):
         cell = st[key]
         for scheme, ls in (("FD", "-"), ("FV", "--")):
-            ns = [n for n in RES if (scheme, n) in cell]
+            ns = [n for n in RES if (scheme, n) in cell and (scheme, n) in GPU_HOURS]
             pts = []
             for a, b in itertools.pairwise(ns):
                 va, vb = cell[(scheme, a)]["value"], cell[(scheme, b)]["value"]
@@ -942,14 +1015,17 @@ def fig_cost(st):
     ax.legend(fontsize=7.5, ncol=2, loc="upper center", bbox_to_anchor=(0.5, -0.14), frameon=False)
     ax = axes[1]
     for scheme, color in (("FD", "C0"), ("FV", "C3")):
-        ax.loglog(RES, [GPU_HOURS[(scheme, n)] for n in RES], marker="o", color=color, label=scheme)
+        ns = [n for n in RES if (scheme, n) in GPU_HOURS]
+        ax.loglog(ns, [GPU_HOURS[(scheme, n)] for n in ns], marker="o", color=color, label=scheme)
     ax.loglog([1024], [GPU_HOURS_FD1024_TOTAL], marker="o", mfc="none", color="C0", ls="none",
               label="FD-1024 incl. 3-leg restarts/I/O")
     for n in RES:
+        if ("FD", n) not in GPU_HOURS or ("FV", n) not in GPU_HOURS:
+            continue
         ratio = GPU_HOURS[("FD", n)] / GPU_HOURS[("FV", n)]
         ax.text(n, GPU_HOURS[("FV", n)] * 0.55, f"x{ratio:.1f}", ha="center", fontsize=9, color="0.3")
     ax.set(xlabel="N", ylabel="GPU-hours to 75 Myr", title="Run cost (FD / FV ratio under the FV points)",
-           ylim=(3e-3, 600))
+           ylim=(3e-3, 1000))
     ax.minorticks_off()
     ax.set_xticks(RES, [str(n) for n in RES])
     ax.grid(alpha=0.3, which="both")
@@ -1027,12 +1103,254 @@ def fig_ppm(runs, data, st, labels):
     print(path)
 
 
+# -------------------------------------------------------------
+# =============== ↓ FV-PPM on GPU (256, 512) ↓ ================
+# -------------------------------------------------------------
+
+#: the metrics of the PPM comparison; PPM_INTEGRATED = the 7 integrated ones of fv_ppm_A128.png (its bar panel
+#: without the small-scale variance), for the "toward / away from FD" count
+PPM_KEYS = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "mout5_cum", "lx1_15_40", "lx1_60_75",
+            "lx2_60_75", "ha_60_75", "pinch_60_75", "pinched_frac", "asym_50_75", "ssv256", "cc85_dlogn", "cc85_dv",
+            "side_loss", "mass_75")
+PPM_INTEGRATED = ("out5_15_40", "out5_peak", "out5_50_75", "lx1_15_40", "lx1_60_75", "cc85_dv", "side_loss")
+
+
+def ppm_shift(st, data, key, n, label):
+    """PPM(N) against PLM(N) and FD(N), FD(2N).
+
+    z = (PPM - PLM) / sigma_diff with sigma_diff = sqrt(2) sigma_FV(N) (PPM is one realisation, given the PLM noise);
+    the direction says whether PPM lies closer to FD(N) [and to FD(2N)] than PLM does: 'toward' / 'away' if |z| >= 3,
+    with '?' for 2 <= |z| < 3, '=' (neither) if |z| < 2. f = (PPM - PLM) / (FD(N) - PLM) as in the attribution table.
+    """
+    c_fv, c_fd, c_fd2 = (st[key].get((s, m)) for s, m in (("FV", n), ("FD", n), ("FD", 2 * n)))
+    v = data.get(label, {}).get("m", {}).get(key)
+    if v is None or c_fv is None or c_fd is None:
+        return None
+    plm, fd = c_fv["value"], c_fd["value"]
+    sig = np.sqrt(2) * c_fv["sigma"] if np.isfinite(c_fv["sigma"]) else np.nan
+    z = (v - plm) / sig if sig > 0 else np.inf
+
+    def direction(target):
+        if abs(z) < 2:
+            return "="
+        word = "toward" if abs(v - target) < abs(plm - target) else "away"
+        return word + ("?" if abs(z) < 3 else "")
+
+    return {"ppm": v, "plm": plm, "fd": fd, "fd2": c_fd2["value"] if c_fd2 else None, "sigma": sig, "z": z,
+            "dir": direction(fd), "dir2": direction(c_fd2["value"]) if c_fd2 else "-",
+            "f": (v - plm) / (fd - plm) if fd != plm else np.nan}
+
+
+def k_of(st, key, n, value, sigma):
+    """Equivalent FD resolution k of an arbitrary FV-like value at N (k_factor with that value in place of FV(N))."""
+    cell = dict(st[key])
+    cell[("FV", n)] = {"value": value, "sigma": sigma}
+    return k_factor(cell, n, key=key)
+
+
+def steps_of(path):
+    with open(path) as fh:
+        return sum(1 for line in fh if "[diag] t=" in line)
+
+
+def asym_series(frame_dir):
+    """(t [Myr], up-down mirror asymmetry rms dlog n of the xz slice) per frame, as frame_metrics."""
+    t, asym = [], []
+    for name in sorted(f for f in os.listdir(frame_dir) if f.startswith("frame_") and f.endswith(".npz")):
+        with np.load(os.path.join(frame_dir, name)) as f:
+            t.append(float(f["time_myr"]))
+            log_n = np.log10(f["n_xz"].astype(np.float64))
+        asym.append(np.sqrt(np.mean((log_n - log_n[:, ::-1]) ** 2)))
+    order = np.argsort(t)
+    return np.array(t)[order], np.array(asym)[order]
+
+
+def ppm_tables(st, runs, data):
+    """Markdown tables of the GPU FV-PPM runs: per metric FD / PLM / PPM / FD(2N) with z and direction; the
+    equivalent FD resolution of the small-scale variance; mirror asymmetry; cost. Returns a summary dict."""
+    rng_state = RNG.bit_generator.state  # k_factor draws from RNG: restored below so the later figures do not change
+    summary = {}
+    labels = [lab for lab in PPM_GPU_RUNS if lab in data]
+    print("\n## FV-PPM (GPU) vs FV-PLM and FD at the same N: z = (PPM - PLM) / (sqrt(2) sigma_FV(N)); direction "
+          "relative to FD(N) / FD(2N): toward | away (|z| >= 3; ? for 2 <= |z| < 3) | = (|z| < 2); "
+          "f = (PPM - PLM) / (FD - PLM)\n")
+    print("| metric | N | FD(N) | PLM ± sigma | PPM | FD(2N) | z | vs FD(N) | vs FD(2N) | f |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    for key in PPM_KEYS:
+        for lab in labels:
+            n = runs[lab][1]
+            r = ppm_shift(st, data, key, n, lab)
+            if r is None:
+                continue
+            summary.setdefault(key, {})[str(n)] = r
+            print(f"| {METRICS[key][0]} | {n} | {fmt(r['fd'])} | {fmt(r['plm'])} ± {fmt(r['sigma'] / np.sqrt(2), 2)} | "
+                  f"{fmt(r['ppm'])} | {fmt(r['fd2'])} | {r['z']:+.1f} | {r['dir']} | {r['dir2']} | {r['f']:+.2f} |")
+    print("\nIntegrated metrics (" + ", ".join(PPM_INTEGRATED) + "): direction vs FD(N)")
+    for lab in labels:
+        n = runs[lab][1]
+        dirs = [summary.get(k, {}).get(str(n), {}).get("dir", "-") for k in PPM_INTEGRATED]
+        print(f"  FV-PPM-{n}: toward {sum(d.startswith('toward') for d in dirs)}, away "
+              f"{sum(d.startswith('away') for d in dirs)}, neither {dirs.count('=')} of {len(dirs)}  ({' '.join(dirs)})")
+
+    print("\n## Small-scale variance fraction 80-300 pc (50-75 Myr) and its equivalent FD resolution k (16-84%)\n")
+    print("| N | FD(N) | FD(2N) | PLM | PPM | PPM / PLM | k PLM | k PPM |")
+    print("|---|---|---|---|---|---|---|---|")
+    for lab in labels:
+        n = runs[lab][1]
+        c = st["ssv256"]
+        ppm = data[lab]["m"].get("ssv256")
+        if ppm is None or ("FV", n) not in c:
+            continue
+        kp = k_factor(c, n, key="ssv256")
+        kq = k_of(st, "ssv256", n, ppm, c[("FV", n)]["sigma"])
+        txt = lambda k: (f"{k[0]:.2f}" + (f" [{k[1][0]:.2f}, {k[1][1]:.2f}]" if k[1] else "")
+                         if k[0] is not None and np.isfinite(k[0]) else k[2])
+        fd2 = c.get(("FD", 2 * n), {}).get("value")
+        print(f"| {n} | {fmt(c[('FD', n)]['value'])} | {fmt(fd2)} | {fmt(c[('FV', n)]['value'])} | {fmt(ppm)} | "
+              f"{ppm / c[('FV', n)]['value']:.2f} | {txt(kp)} | {txt(kq)} |")
+        summary.setdefault("_ssv_k", {})[str(n)] = {"plm": kp[:2], "ppm": kq[:2]}
+
+    print("\n## Up-down mirror asymmetry rms dlog n (xz slice): 50-75 Myr mean, max over 0-75 Myr, first t > 0.05\n")
+    print("| run | 50-75 mean | max | first t [Myr] with asym > 0.05 |")
+    print("|---|---|---|---|")
+    for n in (256, 512):
+        for lab in (f"FD{n}", f"FV{n}", f"FV{n}ppm"):
+            if lab not in data:
+                continue
+            t, a = asym_series(runs[lab][3])
+            first = t[np.argmax(a > 0.05)] if (a > 0.05).any() else np.nan
+            print(f"| {lab} | {fmt(data[lab]['m']['asym_50_75'])} | {fmt(a.max())} | {fmt(first)} |")
+            summary.setdefault("_asym", {})[lab] = [data[lab]["m"]["asym_50_75"], float(a.max()), float(first)]
+
+    print("\n## Cost: solver wall (time_integration) to 75 Myr, steps, s/step, GPU-hours\n")
+    print("| run | steps | wall [s] | s/step | GPU-h | source |")
+    print("|---|---|---|---|---|---|")
+    for lab, (wall, gpus, diag, note) in PPM_COST.items():
+        steps = steps_of(diag)
+        summary.setdefault("_cost", {})[lab] = {"steps": steps, "wall": wall, "s_step": wall / steps,
+                                                "gpu_h": wall * gpus / 3600}
+        print(f"| {lab} | {steps} | {wall:.1f} | {wall / steps:.4f} | {wall * gpus / 3600:.3f} | {note} |")
+    cost = summary["_cost"]
+    for n in (256, 512):
+        a, b = cost[f"FV{n}ppm"], cost[f"FV{n}"]
+        print(f"  {n}: PPM/PLM per step {a['s_step'] / b['s_step']:.2f}x, steps {a['steps'] / b['steps']:.3f}x, "
+              f"GPU-h {a['gpu_h'] / b['gpu_h']:.2f}x; FD/PPM GPU-h {cost[f'FD{n}']['gpu_h'] / a['gpu_h']:.2f}x")
+    RNG.bit_generator.state = rng_state
+    return summary
+
+
+def fig_ppm_ladder(runs, data, st, summary):
+    """FV-PPM 256 / 512 (GPU) against FV-PLM, FD at the same N and FD at 2N: outflow, X-ray, asymmetry, small-scale
+    variance, the per-metric shift and the cost (the 256 / 512 counterpart of fv_ppm_A128.png)."""
+    fig = plt.figure(figsize=(21, 13))
+    gs = fig.add_gridspec(3, 4)
+    styles = lambda n: {f"FD{n}": ("C0", "-", f"FD-{n}"), f"FV{n}": ("C3", "-", f"FV-{n} PLM"),
+                        f"FV{n}ppm": ("C1", "-", f"FV-{n} PPM (GPU)"), f"FD{2 * n}": ("C0", ":", f"FD-{2 * n}")}
+    ax_as, ax_ss = fig.add_subplot(gs[0, 3]), fig.add_subplot(gs[1, 3])
+    for row, n in enumerate((256, 512)):
+        ax_out, ax_late, ax_x = (fig.add_subplot(gs[row, j]) for j in range(3))
+        for lab, (color, ls, name) in styles(n).items():
+            if lab not in data:
+                continue
+            ser = data[lab]["series"]
+            t, out5 = np.array(ser["t"]), np.array(ser["out5"])
+            lw = 2.0 if lab.endswith("ppm") else 1.2
+            ax_out.plot(t, out5, color=color, ls=ls, lw=lw, label=name)
+            ax_late.plot(t, out5, color=color, ls=ls, lw=lw)
+            if "te" in ser:
+                ax_x.semilogy(ser["te"], ser["lx1"], color=color, ls=ls, lw=lw)
+            if lab.startswith("FV") or lab == f"FD{n}":  # asymmetry / small scales: same-N runs only
+                lw2 = 1.8 if n == 512 else 1.0
+                ls2 = "-" if n == 512 else "--"
+                t_a, a = asym_series(runs[lab][3])
+                ax_as.semilogy(t_a, np.maximum(a, 1e-7), color=color, ls=ls2, lw=lw2, label=name)
+                ax_ss.semilogy(t, ser["ssv256"], color=color, ls=ls2, lw=lw2, label=name)
+        for lab, s in runs.items():  # FV realisations (seeds, segmentation, reruns) as thin lines
+            if s[:2] == ("FV", n) and s[2] == "ens" and lab in data:
+                ser = data[lab]["series"]
+                ax_late.plot(ser["t"], ser["out5"], color="C3", lw=0.5, alpha=0.5)
+        ax_out.set(xlabel="t [Myr]", ylabel="net outflow |z| = 5 kpc [Msun/yr]", xlim=(0, 75), title=f"N = {n}")
+        ax_late.set(xlabel="t [Myr]", ylabel="net outflow |z| = 5 kpc [Msun/yr]", xlim=(40, 75), ylim=(0, 8),
+                    title=f"late phase, N = {n} (thin: FV-PLM realisations)")
+        ax_x.set(xlabel="t [Myr]", ylabel="L_X1 [1e39 erg/s]", xlim=(0, 75), ylim=(1, 3e3), title=f"soft X-ray, N = {n}")
+        ax_out.legend(fontsize=8)
+        for ax in (ax_out, ax_late, ax_x):
+            ax.grid(alpha=0.3)
+    ax_as.set(xlabel="t [Myr]", ylabel="up-down asymmetry rms dlog n (xz)", xlim=(0, 75),
+              title="mirror asymmetry (dashed 256, solid 512)")
+    ax_ss.set(xlabel="t [Myr]", ylabel="small-scale variance fraction 80-300 pc", xlim=(0, 75),
+              title="small scales, 1 < |z| < 6 kpc (dashed 256, solid 512)")
+    ax_as.legend(fontsize=7.5, ncol=2)
+    for ax in (ax_as, ax_ss):
+        ax.grid(alpha=0.3, which="both")
+    # bar panel: change vs FV-N PLM of FD(N), FD(2N) and PPM(N), grey = 3 sigma_diff
+    keys = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "lx1_15_40", "lx1_60_75", "ha_60_75", "ssv256",
+            "side_loss", "mass_75")
+    ax_b = fig.add_subplot(gs[2, :3])
+    refs = [(256, "FD", "C0", 0.45), (256, "FD2", "C0", 0.2), (256, "PPM", "C1", 0.5),
+            (512, "FD", "C0", 0.85), (512, "FD2", "C0", 0.45), (512, "PPM", "C1", 0.95)]
+    width = 0.8 / len(refs)
+    for j, (n, which, color, alpha) in enumerate(refs):
+        vals = []
+        for key in keys:
+            r = summary.get(key, {}).get(str(n))
+            v = None if r is None else {"FD": r["fd"], "FD2": r["fd2"], "PPM": r["ppm"]}[which]
+            vals.append(100 * (v - r["plm"]) / abs(r["plm"]) if v is not None and r["plm"] else np.nan)
+        name = {"FD": f"FD-{n}", "FD2": f"FD-{2 * n}", "PPM": f"FV-{n} PPM"}[which]
+        ax_b.bar(np.arange(len(keys)) + (j - (len(refs) - 1) / 2) * width, vals, width, color=color, alpha=alpha,
+                 label=f"{name} vs FV-{n} PLM", edgecolor="k" if which == "PPM" else "none",
+                 hatch="//" if which == "FD2" else None)
+    for i, key in enumerate(keys):
+        for half, n in ((-1, 256), (1, 512)):
+            r = summary.get(key, {}).get(str(n))
+            if r and np.isfinite(r["sigma"]) and r["plm"]:
+                sig = 100 * 3 * r["sigma"] / abs(r["plm"])
+                x0 = i - 0.42 if half < 0 else i
+                ax_b.add_patch(plt.Rectangle((x0, -sig), 0.42, 2 * sig, color="0.85", zorder=0))
+                if key in PPM_INTEGRATED or key == "ssv256":
+                    ax_b.text(i + half * 0.2, 1.0, r["dir"], transform=ax_b.get_xaxis_transform(), ha="center",
+                              va="top", fontsize=7, color="C1")
+    ax_b.axhline(0, color="k", lw=0.7)
+    ax_b.set_yscale("symlog", linthresh=10)
+    ax_b.set_xticks(range(len(keys)), [METRICS[k][0] for k in keys], fontsize=8, rotation=12)
+    ax_b.set_ylabel("change vs FV-N PLM [%] (symlog; grey: 3 sigma_diff,\nleft half 256, right half 512)")
+    ax_b.set_title("Does PPM move FV-N toward FD-N / FD-2N?  (orange text: PPM direction vs FD-N, 256 | 512)")
+    ax_b.legend(fontsize=7.5, ncol=3, loc="lower left")
+    ax_b.grid(alpha=0.3, axis="y")
+    # cost panel
+    ax_c = fig.add_subplot(gs[2, 3])
+    cost = summary["_cost"]
+    for j, (lab_fmt, color, name) in enumerate((("FD{}", "C0", "FD"), ("FV{}", "C3", "FV PLM"),
+                                               ("FV{}ppm", "C1", "FV PPM"))):
+        xs = np.arange(2) + (j - 1) * 0.27
+        ys = [cost[lab_fmt.format(n)]["gpu_h"] for n in (256, 512)]
+        ax_c.bar(xs, ys, 0.27, color=color, label=name)
+        for x, n, y in zip(xs, (256, 512), ys):
+            c = cost[lab_fmt.format(n)]
+            ax_c.text(x, y * 1.08, f"{c['s_step'] * 1e3:.0f} ms\n{c['steps']}", ha="center", fontsize=7)
+    ax_c.set_yscale("log")
+    ax_c.set_xticks(range(2), ["256", "512"])
+    ax_c.set(ylabel="GPU-hours (H200) to 75 Myr", ylim=(0.02, 30),
+             title="cost (labels: ms/step, steps)\nPPM on HoreKa, PLM / FD local")
+    ax_c.legend(fontsize=8)
+    ax_c.grid(alpha=0.3, axis="y", which="both")
+    fig.suptitle("CGOLS A256 / A512, FV VL2 + HLLC: PPM (AthenaPK ppm_simple, GPU) vs PLM corrector, against FD at N "
+                 "and 2N")
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    path = f"{FIG_DIR}/fv_ppm_A256_A512.png"
+    fig.savefig(path, dpi=100)
+    plt.close(fig)
+    print(path)
+
+
 def main():
     os.chdir(SCRIPT_DIR)
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--recompute", action="store_true")
     parser.add_argument("--ppm", action="append", default=[],
                         help="LABEL=ROLE:FRAMES_DIR:DIAG_LOG[:EMISSION_TAG] extra FV-128 ablation (e.g. the CPU PPM run)")
+    parser.add_argument("--ppm-gpu", action="store_true",
+                        help="add the GPU FV-PPM 256/512 runs (PPM_GPU_RUNS): tables + fv_ppm_A256_A512.png")
     parser.add_argument("--json", default=None)
     parser.add_argument("--no-figures", action="store_true")
     args = parser.parse_args()
@@ -1043,10 +1361,15 @@ def main():
         role, frames, diag = parts[:3]
         emis = parts[3] if len(parts) > 3 else None
         extra[label] = ("FV", 128, role, frames, emis, None, diag)
+    ppm128 = list(extra)
+    if args.ppm_gpu:
+        extra.update(PPM_GPU_RUNS)
     runs, data = load_all(args.recompute, extra)
     st = stats(runs, data)
     noise_table(st)
     summary = tables(st, runs, data)
+    if args.ppm_gpu:
+        summary["_ppm_gpu"] = ppm_tables(st, runs, data)
     if args.json:
         conv = lambda o: o.tolist() if isinstance(o, np.ndarray) else float(o) if isinstance(o, np.floating) else str(o)
         stj = {k: {f"{s}{n}": {kk: vv for kk, vv in c.items()} for (s, n), c in cell.items()} for k, cell in st.items()}
@@ -1055,10 +1378,13 @@ def main():
                       fh, default=conv, indent=1)
     if not args.no_figures:
         fig_significance(st)
-        fig_convergence(st, runs, data)
+        # the GPU PPM runs only feed fv_ppm_A256_A512.png and the tables: the standard figures stay as they are
+        fig_convergence(st, {k: v for k, v in runs.items() if k not in PPM_GPU_RUNS}, data)
         fig_cost(st)
-        if extra:
-            fig_ppm(runs, data, st, list(extra))
+        if ppm128:
+            fig_ppm(runs, data, st, ppm128)
+        if args.ppm_gpu:
+            fig_ppm_ladder(runs, data, st, summary["_ppm_gpu"])
 
 
 if __name__ == "__main__":

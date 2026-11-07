@@ -2,8 +2,8 @@
 Pallas backend of the VL2 finite-volume scheme.
 
 Each VL2 stage is a single fused Pallas kernel: for a block of cells it reads
-the stage's primitive stencil, reconstructs (donor cell or AthenaPK's PLM) the
-two interface states on every face of the cell, evaluates the configured
+the stage's primitive stencil, reconstructs (donor cell, AthenaPK's PLM or its
+PPM) the two interface states on every face of the cell, evaluates the configured
 Riemann solver on all ``2 * dim`` faces, forms the flux divergence, applies the
 Dedner GLM source, and converts the updated conserved state back to primitives.
 The initial conserved state ``U^n`` is recomputed in-kernel from ``W^n`` (a
@@ -21,6 +21,16 @@ kernel reports which cells' updates lost positivity, and a re-evaluation with a
 correction mask replaces the fluxes of the faces around those cells by
 donor-cell local Lax-Friedrichs fluxes. In the common case that no cell fails,
 this costs only one reduction over the reported codes.
+
+On a device mesh every shard runs the kernel on its block of the array plus a
+halo from its neighbours (``_pallas_call_sharded``). With ghost cells the split
+array is the ghost-padded one, so a shard's block may hold ghost cells (the
+outer shards) or none; along split axes the kernel therefore updates every cell
+of the padded local block, locates it in the global array from the shard's
+origin, and leaves the global ghost cells to the boundary handler (it passes
+their stage values through and reports them as positive). The halo exchange is
+periodic, but its wrapped-around cells only enter the stencils of global ghost
+cells, as the ghost layer is at least the stencil reach deep.
 
 The physics is not re-implemented here: the kernel calls the same elementwise
 functions as the native path (``_athena_riemann_solvers``, the component
@@ -46,6 +56,9 @@ from astronomix.option_classes.simulation_config import SimulationConfig
 from astronomix.option_classes.simulation_params import SimulationParams
 from astronomix.variable_registry.registered_variables import RegisteredVariables
 
+# general
+import warnings
+
 # astronomix functions
 from astronomix._finite_volume._magnetic_update._glm_divergence_cleaning import (
     _extended_dedner_source_terms,
@@ -56,6 +69,8 @@ from astronomix._pallas_helpers import (
     _current_pallas_mesh,
     _pallas_call_sharded,
     _pallas_compiler_params,
+    _resolve_state_pspec,
+    _spatial_sharded_axes,
     diffable_pallas_call_n,
     pl,
 )
@@ -85,6 +100,30 @@ def _vl2_block_shape(state, config: SimulationConfig):
     )
 
 
+def _ghost_cell_split_supported(state, ndim: int) -> bool:
+    """
+    Whether the active device mesh (if any) can split the ghost-padded state:
+    ``shard_map`` needs every split axis, ghost cells included, to divide
+    evenly into the shards (one mesh axis per array axis).
+    """
+    mesh = _current_pallas_mesh()
+    if mesh is None or mesh.size <= 1:
+        return True
+    sharded_axes = _spatial_sharded_axes(mesh, _resolve_state_pspec(state, mesh), ndim)
+    if len({array_axis for array_axis, _, _ in sharded_axes}) != len(sharded_axes):
+        return False
+    for array_axis, _, num_devices in sharded_axes:
+        if state.shape[array_axis] % num_devices != 0:
+            warnings.warn(
+                f"VL2 Pallas: the ghost-padded extent {state.shape[array_axis]} of "
+                f"spatial axis {array_axis - 1} does not split into {num_devices} "
+                "shards; the stages run on the native backend.",
+                stacklevel=2,
+            )
+            return False
+    return True
+
+
 def _vl2_pallas_supported(state, config: SimulationConfig) -> bool:
     """
     Whether the fused VL2 stage kernel applies to this state and configuration.
@@ -107,12 +146,8 @@ def _vl2_pallas_supported(state, config: SimulationConfig) -> bool:
         return False
     if config.boundary_handling not in (GHOST_CELLS, PERIODIC_ROLL):
         return False
-    if config.boundary_handling == GHOST_CELLS:
-        # The halo exchange of the multi-device wrapper is periodic, which only
-        # matches the periodic-roll layout.
-        mesh = _current_pallas_mesh()
-        if mesh is not None and mesh.size > 1:
-            return False
+    if config.boundary_handling == GHOST_CELLS and not _ghost_cell_split_supported(state, ndim):
+        return False
     block_shape = _vl2_block_shape(state, config)
     for extent, block in zip(_interior_spatial_shape(state, config), block_shape[:ndim], strict=True):
         if extent % block != 0:
@@ -140,16 +175,22 @@ def _vl2_stage_pallas_local(
     density_floor,
     pressure_floor,
     *,
-    piecewise_linear: bool,
+    reconstruction: int,
     report_failures: bool,
+    block_extents,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
+    shard_layout=None,
 ):
     """
     Build and run the fused stage kernel on one (possibly halo-padded) shard.
 
     Every shape-dependent quantity is read from ``stage_primitive_state`` so the
-    same build serves the global array and halo-padded local shards.
+    same build serves the global array and halo-padded local shards. Along an
+    axis split over the device mesh (``shard_layout``) the kernel updates every
+    cell of the padded local array, indexing it periodically (the halo cells'
+    outputs are stripped by the wrapper); with ghost cells it then locates the
+    cells in the global array and passes the global ghost cells through.
 
     Args:
         stage_primitive_state: The primitive state the fluxes are computed from.
@@ -164,11 +205,18 @@ def _vl2_stage_pallas_local(
         gamma: The adiabatic index.
         density_floor: The density floor (used only with floors active).
         pressure_floor: The pressure floor (used only with floors active).
-        piecewise_linear: PLM (else donor-cell) reconstruction.
+        reconstruction: The reconstruction (``DONOR_CELL``,
+            ``PIECEWISE_LINEAR`` or ``PIECEWISE_PARABOLIC`` of
+            ``_van_leer_integrator``).
         report_failures: Also return the positivity failure code of every
             cell's update (for the first-order flux correction).
+        block_extents: The Pallas block shape (resolved on the global grid,
+            so that every shard tiles with the block the wrapper aligned to).
         config: The simulation configuration.
         registered_variables: The registered variables.
+        shard_layout: ``None``, or per spatial axis ``None`` (not split) or
+            ``(origin, global_extent)`` of the local array (see
+            ``_pallas_call_sharded``).
 
     Returns:
         The primitive state after the stage (ghost cells not updated), and with
@@ -177,10 +225,15 @@ def _vl2_stage_pallas_local(
     # Imported here because the integrator module imports this module at its
     # top.
     from astronomix._finite_volume._state_evolution._van_leer_integrator import (
+        DONOR_CELL,
+        PIECEWISE_LINEAR,
+        PIECEWISE_PARABOLIC,
+        STENCIL_REACH,
         _conserved_components_from_primitive,
         _interface_flux_from_states,
         _interface_frame_indices,
         _positivity_failure_code,
+        _ppm_face_values,
         _primitive_components_from_conserved,
         _state_components_from_frame,
         _van_leer_slopes,
@@ -196,15 +249,30 @@ def _vl2_stage_pallas_local(
     spatial_shape = tuple(int(extent) for extent in stage_primitive_state.shape[1:])
     extents_3d = spatial_shape + (1,) * (3 - ndim)
     ghost_cells = config.boundary_handling == GHOST_CELLS
-    cell_offset = config.num_ghost_cells if ghost_cells else 0
-    block_extents = _vl2_block_shape(stage_primitive_state, config)
-    interior_extents = _interior_spatial_shape(stage_primitive_state, config)
-    grid = tuple(interior_extents[axis] // block_extents[axis] for axis in range(ndim))
+    num_ghost_cells = config.num_ghost_cells if ghost_cells else 0
+    if shard_layout is None:
+        shard_layout = (None,) * ndim
+    is_split = tuple(layout is not None for layout in shard_layout)
+    # Per axis: the first updated cell, the number of updated cells and
+    # whether stencil reads wrap around. Unsplit ghost-cell axes update their
+    # interior only; split axes (and the periodic-roll layout) every cell.
+    cell_offsets = tuple(
+        num_ghost_cells if ghost_cells and not is_split[axis] else 0 for axis in range(ndim)
+    )
+    updated_extents = tuple(
+        spatial_shape[axis] - 2 * cell_offsets[axis] for axis in range(ndim)
+    )
+    wraps = tuple(not ghost_cells or is_split[axis] for axis in range(ndim))
+    grid = tuple(updated_extents[axis] // block_extents[axis] for axis in range(ndim))
+    # With ghost cells on a split axis, the shard's cells include global ghost
+    # cells (and halo cells) that the kernel must not treat as interior.
+    masks_global_ghost_cells = ghost_cells and any(is_split)
+    split_axes = tuple(axis for axis in range(ndim) if is_split[axis])
 
     frame_indices_per_axis = [
         _interface_frame_indices(axis, config, registered_variables) for axis in range(1, ndim + 1)
     ]
-    stencil_reach = 2 if piecewise_linear else 1
+    stencil_reach = STENCIL_REACH[reconstruction]
     has_base = base_primitive_state is not None
     has_mask = correction_mask is not None
     mhd = config.mhd
@@ -265,6 +333,7 @@ def _vl2_stage_pallas_local(
         gamma_ref = refs.pop(0)
         density_floor_ref = refs.pop(0)
         pressure_floor_ref = refs.pop(0)
+        origin_refs = [refs.pop(0) for _ in split_axes] if masks_global_ghost_cells else []
         output_ref = refs.pop(0)
         codes_ref = refs.pop(0) if report_failures else None
 
@@ -284,17 +353,33 @@ def _vl2_stage_pallas_local(
             shape = [1] * ndim
             shape[axis] = block_extents[axis]
             local = jnp.arange(block_extents[axis]).reshape(shape)
-            cell_indices.append(cell_offset + pl.program_id(axis) * block_extents[axis] + local)
+            cell_indices.append(
+                cell_offsets[axis] + pl.program_id(axis) * block_extents[axis] + local
+            )
 
         def load(ref, variable_index, axis, offset):
             """Value of ``variable_index`` at the cell shifted by ``offset`` along ``axis``."""
             indices = list(cell_indices)
             if offset != 0:
                 shifted = indices[axis] + offset
-                if not ghost_cells:
+                if wraps[axis]:
                     shifted = shifted % extents_3d[axis]
                 indices[axis] = shifted
             return ref[(variable_index, *indices)]
+
+        # Whether the block's cells are interior cells of the global array
+        # (only needed where a split axis carries ghost cells).
+        is_global_interior = None
+        for axis, origin_ref in zip(split_axes, origin_refs):
+            global_index = origin_ref[()] + cell_indices[axis]
+            global_extent = shard_layout[axis][1]
+            is_inside = (global_index >= num_ghost_cells) & (
+                global_index < global_extent - num_ghost_cells
+            )
+            if is_global_interior is None:
+                is_global_interior = is_inside
+            else:
+                is_global_interior = is_global_interior & is_inside
 
         def store(ref, variable_index, value):
             """Write ``value`` of ``variable_index`` to the block's cells."""
@@ -335,24 +420,36 @@ def _vl2_stage_pallas_local(
             stencil_per_axis.append(stencil)
 
             # The (left, right) states of the faces at i - 1/2 and i + 1/2.
-            if piecewise_linear:
+            if reconstruction == DONOR_CELL:
+                minus_face = (stencil[-1], stencil[0])
+                plus_face = (stencil[0], stencil[1])
+            else:
                 right_face_values = {}
                 left_face_values = {}
                 for center in (-1, 0, 1):
-                    faces = [
-                        _van_leer_slopes(
-                            stencil[center - 1][variable],
-                            stencil[center][variable],
-                            stencil[center + 1][variable],
-                        )
-                        for variable in range(num_vars)
-                    ]
+                    if reconstruction == PIECEWISE_LINEAR:
+                        faces = [
+                            _van_leer_slopes(
+                                stencil[center - 1][variable],
+                                stencil[center][variable],
+                                stencil[center + 1][variable],
+                            )
+                            for variable in range(num_vars)
+                        ]
+                    else:
+                        faces = [
+                            _ppm_face_values(
+                                stencil[center - 2][variable],
+                                stencil[center - 1][variable],
+                                stencil[center][variable],
+                                stencil[center + 1][variable],
+                                stencil[center + 2][variable],
+                            )
+                            for variable in range(num_vars)
+                        ]
                     right_face_values[center], left_face_values[center] = zip(*faces)
                 minus_face = (right_face_values[-1], left_face_values[0])
                 plus_face = (right_face_values[0], left_face_values[1])
-            else:
-                minus_face = (stencil[-1], stencil[0])
-                plus_face = (stencil[0], stencil[1])
 
             minus_flux = interface_flux(*minus_face, frame_indices, config.riemann_solver)
             plus_flux = interface_flux(*plus_face, frame_indices, config.riemann_solver)
@@ -414,6 +511,9 @@ def _vl2_stage_pallas_local(
 
         if report_failures:
             codes = _positivity_failure_code(conserved, config, registered_variables)
+            if is_global_interior is not None:
+                # Global ghost cells are never flagged, as on one device.
+                codes = jnp.where(is_global_interior, codes, jnp.zeros_like(codes))
             store(codes_ref, 0, codes.astype(dtype))
 
         if mhd:
@@ -465,8 +565,14 @@ def _vl2_stage_pallas_local(
 
         # --------------- ↓ Output ↓ ----------------
 
+        stage_center_values = stencil_per_axis[0][0]
         for variable in range(num_vars):
-            store(output_ref, variable, primitive[variable])
+            value = primitive[variable]
+            if is_global_interior is not None:
+                # Global ghost cells keep their stage values; the boundary
+                # handler refills them after the stage.
+                value = jnp.where(is_global_interior, value, stage_center_values[variable])
+            store(output_ref, variable, value)
 
         # --------------- ↑ Output ↑ ----------------
 
@@ -503,6 +609,8 @@ def _vl2_stage_pallas_local(
             pressure_floor,
         )
     ]
+    if masks_global_ghost_cells:
+        scalar_arguments += [shard_layout[axis][0] for axis in split_axes]
     in_specs += [scalar_spec] * len(scalar_arguments)
 
     out_shape = [jax.ShapeDtypeStruct(stage_primitive_state.shape, dtype)]
@@ -530,7 +638,11 @@ def _vl2_stage_pallas_local(
         keyword_arguments["compiler_params"] = compiler_params
 
     stage_name = "corrector" if has_base else "predictor"
-    reconstruction_name = "piecewise_linear" if piecewise_linear else "donor_cell"
+    reconstruction_name = {
+        DONOR_CELL: "donor_cell",
+        PIECEWISE_LINEAR: "piecewise_linear",
+        PIECEWISE_PARABOLIC: "piecewise_parabolic",
+    }[reconstruction]
     kernel_name = f"vl2_{stage_name}_{reconstruction_name}"
     if has_mask:
         kernel_name += "_flux_correction"
@@ -571,7 +683,7 @@ def _vl2_stage_pallas_once(
     cleaning_speed,
     damping_factor,
     gamma,
-    piecewise_linear: bool,
+    reconstruction: int,
     report_failures: bool,
     config: SimulationConfig,
     params: SimulationParams,
@@ -595,7 +707,8 @@ def _vl2_stage_pallas_once(
         cleaning_speed: The GLM cleaning speed (zero for hydrodynamics).
         damping_factor: The stage's psi damping factor.
         gamma: The adiabatic index.
-        piecewise_linear: PLM (else donor-cell) reconstruction.
+        reconstruction: The reconstruction (``DONOR_CELL``,
+            ``PIECEWISE_LINEAR`` or ``PIECEWISE_PARABOLIC``).
         report_failures: Also return the positivity failure codes.
         config: The simulation configuration.
         params: The simulation parameters (floors).
@@ -605,9 +718,15 @@ def _vl2_stage_pallas_once(
         The primitive state after the stage (ghost cells not updated), and with
         ``report_failures`` the ``(1, *grid)`` failure codes.
     """
+    # Imported here because the integrator module imports this module at its
+    # top.
+    from astronomix._finite_volume._state_evolution._van_leer_integrator import (
+        STENCIL_REACH,
+    )
+
     ndim = int(config.dimensionality)
     block_shape = _vl2_block_shape(stage_primitive_state, config)
-    halo = (2 if piecewise_linear else 1,) * ndim
+    halo = (STENCIL_REACH[reconstruction],) * ndim
     has_base = base_primitive_state is not None
     has_mask = correction_mask is not None
     dtype = stage_primitive_state.dtype
@@ -630,7 +749,7 @@ def _vl2_stage_pallas_once(
             [stage_state] + ([base_state] if has_base else []) + ([mask] if has_mask else [])
         )
 
-        def local_build(*local_states):
+        def local_build(*local_states, shard_layout=None):
             """The kernel on one halo-padded shard."""
             local_states = list(local_states)
             local_stage = local_states.pop(0)
@@ -646,10 +765,12 @@ def _vl2_stage_pallas_once(
                 gamma_value,
                 simulation_params.minimum_density,
                 simulation_params.minimum_pressure,
-                piecewise_linear=piecewise_linear,
+                reconstruction=reconstruction,
                 report_failures=report_failures,
+                block_extents=block_shape,
                 config=config,
                 registered_variables=registered_variables,
+                shard_layout=shard_layout,
             )
 
         # The kernel reads the base state U^n only in the cell it updates, so
@@ -668,6 +789,7 @@ def _vl2_stage_pallas_once(
             block_shape=block_shape[:ndim],
             num_state_outputs=2 if report_failures else 1,
             input_halos=tuple(input_halos),
+            pass_shard_layout=True,
         )
 
     def native_branch(
@@ -700,7 +822,7 @@ def _vl2_stage_pallas_once(
             stage_state,
             base_state if has_base else stage_state,
             stage_time_step_value,
-            piecewise_linear,
+            reconstruction,
             cleaning_speed_value,
             damping_factor_value,
             gamma_value,
@@ -730,7 +852,7 @@ def _vl2_stage_pallas(
     stage_primitive_state,
     base_primitive_state,
     stage_time_step,
-    piecewise_linear: bool,
+    reconstruction: int,
     cleaning_speed,
     damping_factor,
     gamma,
@@ -754,7 +876,8 @@ def _vl2_stage_pallas(
         base_primitive_state: ``W^n`` (``None`` in the predictor stage, where it
             is the stage state).
         stage_time_step: The stage's time-step weight ``beta * dt``.
-        piecewise_linear: PLM (else donor-cell) reconstruction.
+        reconstruction: The reconstruction (``DONOR_CELL``,
+            ``PIECEWISE_LINEAR`` or ``PIECEWISE_PARABOLIC``).
         cleaning_speed: The GLM cleaning speed (zero for hydrodynamics).
         damping_factor: The stage's psi damping factor.
         gamma: The adiabatic index.
@@ -782,7 +905,7 @@ def _vl2_stage_pallas(
             cleaning_speed,
             damping_factor,
             gamma,
-            piecewise_linear,
+            reconstruction,
             report_failures,
             config,
             params,

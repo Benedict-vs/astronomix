@@ -30,18 +30,22 @@ tile by tile, like cgols_emission.py, and measures per snapshot
 
 and caches them in data/studies/convergence3d<tag>.npz (resumable). With
 --plot it compares cached runs (figures/cgols/comparisons/
-a_series_convergence3d_*.png).
+<prefix>_convergence3d_*.png, prefix a_series by default).
 
-    python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8]
+    python cgols_convergence_3d.py --tag _A512 [--steps 2-60/2] [--workers 8] [--parts 3]
     python cgols_convergence_3d.py --plot A128=_A128 A256=_A256 A512=_A512 A1024=_A1024
     python cgols_convergence_3d.py --suffix _fv --cmap Reds --plot \
         FV128=_A128fv:cgols_snapshots_diagnostics/A128fv FV256=_A256fv:cgols_snapshots_diagnostics/A256fv \
-        FV512=_A512fvf32 FV1024=_A1024fv
+        FV512=_A512fvf32 FV1024=_A1024fv FV2048=_A2048fv
     python cgols_convergence_3d.py --cmap-start 0.5667 --plot A256=_A256 A512=_A512 A1024=_A1024 --fv \
-        FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv
-        # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png
+        FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv FV2048=_A2048fv
+        # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png; an FV run beyond the FD
+        # list (FV2048=_A2048fv appended to --fv) is drawn unpaired, dash-dotted in a darker colour
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
+--parts P splits every checkpoint's tiles into P tasks (all measurements are
+sums over cells, so the parts add up); finished parts are cached in
+convergence3d_v3<tag>_parts.npz, so a timed-out job loses only running parts.
 """
 
 # ruff: noqa: E402
@@ -50,7 +54,7 @@ CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 import argparse
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # CPU only: astronomix imports JAX, which would otherwise grab a (shared) GPU.
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -113,8 +117,12 @@ def _open(step_directory, name):
     return tensorstore.open(spec, context=context, read=True).result()
 
 
-def measure_checkpoint(step_directory):
-    """All per-snapshot measurements of one checkpoint (see the module docstring)."""
+def measure_checkpoint(step_directory, part=0, parts=1):
+    """All per-snapshot measurements of one checkpoint (see the module docstring).
+
+    With parts > 1 only every parts-th (x, y) tile from tile `part` on; the
+    partial results add up (merge_parts).
+    """
     state = _open(step_directory, "primitive_state")
     time_myr = float(_open(step_directory, "time").read().result()) * CODE_TIME_MYR
     num_vars, nx, ny, nz = state.shape
@@ -162,9 +170,17 @@ def measure_checkpoint(step_directory):
         (slice(i, min(i + chunk_x, nx)), slice(j, min(j + chunk_y, ny)))
         for i in range(0, nx, chunk_x)
         for j in range(0, ny, chunk_y)
-    ]
-    pending = state[:, tiles[0][0], tiles[0][1], :].read()
+    ][part::parts]
+    start, reported = time.time(), 0
+    print(f"    {os.path.basename(step_directory)} part {part + 1}/{parts}: state {state.shape}, "
+          f"read chunk {tuple(state.chunk_layout.read_chunk.shape)}, {len(tiles)} tiles", flush=True)
+    # (a part can be empty when the checkpoint has fewer tiles than parts)
+    pending = state[:, tiles[0][0], tiles[0][1], :].read() if tiles else None
     for index, (xs, ys) in enumerate(tiles):
+        if 4 * index >= (reported + 1) * len(tiles):
+            reported += 1
+            print(f"    {os.path.basename(step_directory)} part {part + 1}/{parts}: tile {index}/{len(tiles)} "
+                  f"of {chunk_x}x{chunk_y} after {time.time() - start:.0f} s", flush=True)
         block = pending.result()
         if index + 1 < len(tiles):
             pending = state[:, tiles[index + 1][0], tiles[index + 1][1], :].read()
@@ -268,10 +284,24 @@ def measure_checkpoint(step_directory):
 
 
 def _measure(args):
-    step, step_directory = args
+    step, step_directory, part, parts = args
     start = time.time()
-    result = measure_checkpoint(step_directory)
-    return step, result, time.time() - start
+    result = measure_checkpoint(step_directory, part, parts)
+    return step, part, result, time.time() - start
+
+
+# Not sums over cells: identical in every part.
+_PER_SNAPSHOT = ("time_myr", "z_kpc", "dim")
+
+
+def merge_parts(results):
+    """Sum the partial measurements of one checkpoint."""
+    merged = dict(results[0])
+    for result in results[1:]:
+        for key, value in result.items():
+            if key not in _PER_SNAPSHOT:
+                merged[key] = merged[key] + value
+    return merged
 
 
 def parse_steps(spec, available):
@@ -294,32 +324,51 @@ def cache_path(tag):
     return os.path.join(SCRIPT_DIR, "data", "studies", f"convergence3d_v3{tag}.npz")
 
 
-def load_cache(tag):
-    path = cache_path(tag)
+def load_cache(tag, suffix=""):
+    path = cache_path(tag + suffix)
     if not os.path.exists(path):
         return {}
     data = np.load(path, allow_pickle=True)
     return data["records"].item()
 
 
-def save_cache(tag, records):
-    path = cache_path(tag)
+def save_cache(tag, records, suffix=""):
+    path = cache_path(tag + suffix)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez(path + ".tmp.npz", records=np.array(records, dtype=object))
     os.replace(path + ".tmp.npz", path)
 
 
-def run(tag, checkpoint_dir, steps_spec, workers):
+def run(tag, checkpoint_dir, steps_spec, workers, parts=1):
     checkpoint_dir = checkpoint_dir or os.path.join(SCRIPT_DIR, "data", f"cgols_checkpoints{tag}")
     available = sorted(int(e) for e in os.listdir(checkpoint_dir) if e.isdigit())
     records = load_cache(tag)
     todo = [s for s in parse_steps(steps_spec, available) if s not in records]
     # Skip step directories still being transferred (no Orbax commit marker yet).
     todo = [s for s in todo if os.path.exists(os.path.join(checkpoint_dir, str(s), "_CHECKPOINT_METADATA"))]
-    print(f"{tag}: {len(records)} cached, {len(todo)} to measure from {checkpoint_dir}", flush=True)
+    # Finished parts of earlier (timed-out) jobs, keyed (step, part); only
+    # valid for the same number of parts.
+    done = {key: value for key, value in load_cache(tag, "_parts").items() if value["parts"] == parts}
+    print(f"{tag}: {len(records)} cached, {len(todo)} to measure from {checkpoint_dir}"
+          + (f" in {parts} parts each ({sum(key[0] in todo for key in done)} parts cached)" if parts > 1 else ""),
+          flush=True)
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        jobs = [(s, os.path.join(checkpoint_dir, str(s))) for s in todo]
-        for step, result, seconds in pool.map(_measure, jobs):
+        jobs = [(s, os.path.join(checkpoint_dir, str(s)), p, parts)
+                for s in todo for p in range(parts) if (s, p) not in done]
+        futures = [pool.submit(_measure, job) for job in jobs]
+        for step in todo:  # checkpoints whose parts were all cached already
+            if all((step, p) in done for p in range(parts)):
+                records[step] = merge_parts([done[(step, p)]["result"] for p in range(parts)])
+                save_cache(tag, records)
+        for future in as_completed(futures):
+            step, part, result, seconds = future.result()
+            if parts > 1:
+                done[(step, part)] = {"result": result, "parts": parts}
+                save_cache(tag, done, "_parts")
+                print(f"  [{step:3d}] part {part + 1}/{parts} done ({seconds:.0f} s)", flush=True)
+                if not all((step, p) in done for p in range(parts)):
+                    continue
+                result = merge_parts([done[(step, p)]["result"] for p in range(parts)])
             records[step] = result
             save_cache(tag, records)
             print(
@@ -422,16 +471,17 @@ def _series(records, key, reducer):
 
 
 #: A run with fewer cached snapshots than this is drawn as markers, not a line
-#: (e.g. FV-1024: only the checkpoints at 30, 60, 73.75 and 75 Myr exist).
+#: (e.g. a run whose checkpoints were pruned to a few kept states).
 SPARSE_SNAPSHOTS = 8
 #: Scheme names of the merged FD + FV figures (--fv).
 FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
 
 
-def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
+def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_prefix="a_series"):
     """Compare cached runs; with fv_runs, FD (solid) and FV (dashed) in one figure set.
 
-    fv_runs pairs with runs by position (same resolution, same colour).
+    fv_runs pairs with runs by position (same resolution, same colour); FV runs beyond the FD list are drawn
+    unpaired (dash-dotted, a darker colour, e.g. FV-2048).
     """
     import matplotlib
 
@@ -459,17 +509,23 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(cmap_start, 1.0, len(labels)))))
     for (fd_label, _), (fv_label, _) in zip(runs, fv_runs):
         colors[fv_label] = colors[fd_label]
+    # FV runs beyond the FD list (e.g. FV-2048, no FD-2048) are unpaired: dash-dotted, in the ladder's darkest
+    # colour darkened once more per extra run.
+    unpaired = [label for label, _ in fv_runs[len(runs):]]
+    for k, label in enumerate(unpaired, start=1):
+        colors[label] = np.array(plt.get_cmap(cmap)(1.0)) * np.array([0.55**k] * 3 + [1.0])
     fv_labels = {label for label, _ in fv_runs}
     sparse = {label: len(rec) for label, rec in data.items() if len(rec) < SPARSE_SNAPSHOTS}
     fig_dir = os.path.join(SCRIPT_DIR, "figures", "cgols", "comparisons")
     os.makedirs(fig_dir, exist_ok=True)
+    series = f"{name_prefix.split('_')[0].upper()}-series"  # a_series -> "A-series"
     h1, h5 = int(np.argmin(np.abs(HEIGHTS_KPC - 1))), int(np.argmin(np.abs(HEIGHTS_KPC - 5)))
 
     def draw(ax, x, y, label, series=True, method="plot", legend_label=None, **kwargs):
         """One run's curve: colour by run, dashed for FV when merged, markers if sparse."""
         style = {"color": colors[label], "label": label if legend_label is None else legend_label}
         if merged:
-            style["ls"] = "--" if label in fv_labels else "-"
+            style["ls"] = "-." if label in unpaired else "--" if label in fv_labels else "-"
         if series and label in sparse:
             style.update(ls="none", marker="o", ms=5)
             if legend_label is None:
@@ -484,6 +540,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
             ax.legend(**kwargs)
             return
         handles = [Line2D([], [], color=colors[label], lw=2.5, label=label) for label, _ in runs]
+        handles += [Line2D([], [], color=colors[label], lw=2.0, ls="-.", label=f"{label} (no FD partner, dash-dot)")
+                    for label in unpaired]
         handles += [
             Line2D([], [], color="0.25", ls="-", label=f"{FD_NAME} (solid)"),
             Line2D([], [], color="0.25", ls="--", label=f"{FV_NAME} (dashed)"),
@@ -528,9 +586,9 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
     legend(axes[0, 0])
-    fig.suptitle("A-series, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
+    fig.suptitle(f"{series}, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes_T{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes_T{suffix}.png"), dpi=130)
 
     # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
     fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
@@ -566,10 +624,10 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
     for ax in axes[-1]:
         ax.set_xlabel("t [Myr]")
     legend(axes[0, 0])
-    fig.suptitle("A-series, full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
+    fig.suptitle(f"{series}, " "full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
                  "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo" + title_tail)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_fluxes{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes{suffix}.png"), dpi=130)
 
     # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
     fig, axes = plt.subplots(2, 5, figsize=(26, 9))
@@ -599,9 +657,9 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         ax.set(xlabel="|z| [kpc]", ylabel=r"$\dot M$ [$M_\odot$/yr]")
         ax.grid(alpha=0.3)
     if merged:
-        fig.suptitle("A-series, window-mean outflow by entropy bin against height" + title_tail)
+        fig.suptitle(f"{series}, window-mean outflow by entropy bin against height" + title_tail)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_profiles{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_profiles{suffix}.png"), dpi=130)
 
     # 3) Phase diagrams at ~35 Myr, one per resolution, and the free-wind axis vs CC85.
     def phase_panel(ax, label, norm):
@@ -617,7 +675,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         return mesh
 
     if merged:
-        num_cols = max(len(runs), 3)
+        num_cols = max(len(runs), len(fv_runs), 3)
         fig, axes = plt.subplots(3, num_cols, figsize=(5.0 * num_cols + 1.5, 14), squeeze=False, layout="constrained")
         vmax = max(data[label][s]["hist_nT"].max() for label in data for s in data[label])
         norm = LogNorm(1e3, vmax)
@@ -674,7 +732,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
                      "and the free-wind axis" + title_tail)
     else:
         fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_phases_axis{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_phases_axis{suffix}.png"), dpi=130)
 
     # 4) Instability onset at the cavity rim, from the frames' midplane slices.
     fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
@@ -698,7 +756,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_rim{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_rim{suffix}.png"), dpi=130)
 
     # 5) Morphology from the 3D states: wind radius / opening angle, hot area,
     #    mixed gas and the mixing-layer thickness, per height (N/S averaged).
@@ -786,7 +844,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         morphology(axes, list(data))
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence3d_morphology{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_morphology{suffix}.png"), dpi=130)
 
     # 6) Emission convergence from the cgols_emission.py caches.
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
@@ -815,7 +873,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"a_series_convergence_emission{suffix}.png"), dpi=130)
+    fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_emission{suffix}.png"), dpi=130)
 
     # Tables: window means by entropy bin, then by temperature phase.
     for window in ((15, 30), (30, 45), (45, 75)):
@@ -845,8 +903,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35):
                 f"  {label:7s} {mo[h1, 0]:6.2f} {mo[h1, 1]:6.2f} {mo[h1, 2]:6.2f} | "
                 f"{mo[h5, 0]:6.2f} {mo[h5, 1]:6.2f} {mo[h5, 2]:6.2f} ; {ed[h5].sum() / 1e42:5.2f}  ({len(steps)} snaps)"
             )
-    print(f"wrote a_series_convergence3d_{{fluxes,fluxes_T,profiles,phases_axis,morphology}}{suffix}.png, "
-          f"a_series_convergence_{{rim,emission}}{suffix}.png")
+    print(f"wrote {name_prefix}_convergence3d_{{fluxes,fluxes_T,profiles,phases_axis,morphology}}{suffix}.png, "
+          f"{name_prefix}_convergence_{{rim,emission}}{suffix}.png")
 
 
 def main():
@@ -855,18 +913,21 @@ def main():
     parser.add_argument("--checkpoint-dir")
     parser.add_argument("--steps", default="all", help="'all', 'a-b', 'a-b/k' or a comma list")
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--parts", type=int, default=1, help="split every checkpoint into this many tile groups")
     parser.add_argument("--plot", nargs="*", help="LABEL=TAG[:FRAMES_DIR] pairs of cached runs to compare")
     parser.add_argument("--suffix", default="", help="figure-name suffix, e.g. _fv (default: the FD A-series names)")
     parser.add_argument("--cmap", default="Blues", help="colormap of the resolution ladder")
     parser.add_argument("--cmap-start", type=float, default=0.35,
                         help="colormap value of the first run (0.5667 keeps the 128-1024 colours for a 256-1024 ladder)")
     parser.add_argument("--fv", nargs="*", help="merged FD+FV figures: FV LABEL=TAG[:FRAMES_DIR] runs, paired with --plot by position")
+    parser.add_argument("--prefix", default="a_series", help="figure-name prefix, e.g. c_series for the model-C ladder")
     args = parser.parse_args()
     if args.plot:
         split = lambda specs: [tuple(spec.split("=", 1)) for spec in specs or ()]
-        plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start)
+        plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start,
+             args.prefix)
     else:
-        run(args.tag, args.checkpoint_dir, args.steps, args.workers)
+        run(args.tag, args.checkpoint_dir, args.steps, args.workers, args.parts)
 
 
 if __name__ == "__main__":

@@ -109,13 +109,22 @@ SUPERBEE = 3
 VAN_ALBADA = 4
 VAN_ALBADA_PP = 5
 #: The harmonic-mean (van Leer) slope of AthenaPK's / Athena++'s piecewise
-#: linear reconstruction. This is the slope of the VL2 scheme, which always
-#: uses it and does not read ``limiter`` (its choice between piecewise-linear
-#: and donor-cell reconstruction is ``first_order_fallback``); ``finalize_config``
-#: sets ``limiter = VAN_LEER`` for VL2 only so that the configuration reports
-#: the reconstruction in use. The classic finite-volume scheme does not
-#: implement it.
+#: linear reconstruction. This is the default reconstruction of the VL2
+#: corrector, whose only other choices are ``PPM`` and donor cell
+#: (``first_order_fallback``); ``finalize_config`` sets ``limiter = VAN_LEER``
+#: for VL2 unless ``PPM`` is selected, so that the configuration reports the
+#: reconstruction in use. The classic finite-volume scheme does not implement
+#: it.
 VAN_LEER = 6
+#: AthenaPK's piecewise-parabolic reconstruction (``ppm_simple.hpp``): the
+#: Colella & Woodward (1984) interface values with the smooth-extremum
+#: preserving limiter of Colella & Sekora (2008) / McCorquodale & Colella
+#: (2011), per primitive variable, without characteristic projection. Only the
+#: VL2 corrector implements it (the predictor stays donor cell, as in
+#: AthenaPK); its stencil reaches three cells, so non-periodic VL2 runs carry
+#: three ghost cells instead of two. ``finalize_config`` rejects it for the
+#: other finite-volume time integrators.
+PPM = 7
 
 # splitting modes
 UNSPLIT = 0
@@ -908,7 +917,8 @@ class SimulationConfig(NamedTuple):
     reconstruction_order: int = 1
 
     #: The limiter for the reconstruction of the classic finite-volume
-    #: scheme. The VL2 scheme does not read it (see ``VAN_LEER``).
+    #: scheme. The VL2 scheme only reads whether it is ``PPM`` (see
+    #: ``VAN_LEER``).
     limiter: int = MINMOD
 
     #: The Riemann solver used. Only for finite volume mode; ``HLLD`` is only
@@ -936,7 +946,8 @@ class SimulationConfig(NamedTuple):
     # update                      | 3c'|
     # --> all others are ghost cells
 
-    #: The number of ghost cells.
+    #: The number of ghost cells. ``finalize_config`` sets it from the scheme;
+    #: the VL2 scheme keeps a larger value given here (see ``finalize_config``).
     num_ghost_cells: int = reconstruction_order + 1
 
     #: Grid spacing.
@@ -1509,11 +1520,12 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
         if config.split != UNSPLIT:
             print("Setting unsplit mode for the VL2 scheme.")
             config = config._replace(split=UNSPLIT)
-        # The VL2 scheme does not read ``limiter``: its corrector always uses
-        # the van Leer slope, or donor cell with ``first_order_fallback``.
-        # Setting VAN_LEER only makes the configuration report the
-        # reconstruction actually in use.
-        if config.limiter != VAN_LEER and not config.first_order_fallback:
+        # The VL2 corrector reconstructs with the van Leer slope, with PPM
+        # when ``limiter == PPM``, or with donor cell under
+        # ``first_order_fallback``. Setting VAN_LEER for any other limiter
+        # only makes the configuration report the reconstruction actually in
+        # use.
+        if config.limiter not in (VAN_LEER, PPM) and not config.first_order_fallback:
             print("Setting the VAN_LEER (AthenaPK PLM) limiter for the VL2 scheme.")
             config = config._replace(limiter=VAN_LEER)
         if config.mhd and config.riemann_solver not in (HLLD, HLL, LAX_FRIEDRICHS):
@@ -1538,10 +1550,22 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
                 axis_settings == periodic_1d
                 for axis_settings in tuple(config.boundary_settings)[: config.dimensionality]
             )
+        # A stage updates a cell from the faces of its neighbours, whose
+        # reconstruction reads one cell (PLM) or two cells (PPM) further.
+        uses_ppm = config.limiter == PPM and not config.first_order_fallback
         if fully_periodic:
             config = config._replace(boundary_handling=PERIODIC_ROLL, num_ghost_cells=0)
         else:
-            config = config._replace(boundary_handling=GHOST_CELLS, num_ghost_cells=2)
+            # A larger ghost layer set by the caller is kept: the extra cells
+            # are inert (filled by the boundary handler, read by no interior
+            # stencil), and on a device mesh they let the ghost-padded extent
+            # N + 2 * num_ghost_cells divide into the shards, which the
+            # sharded VL2 Pallas stage requires (e.g. 2048 + 2 * 4 = 8 * 257,
+            # where the minimal 2048 + 2 * 2 splits at most 4 ways).
+            config = config._replace(
+                boundary_handling=GHOST_CELLS,
+                num_ghost_cells=max(config.num_ghost_cells, 3 if uses_ppm else 2),
+            )
 
         # The Poisson solve takes the density array as it is, so with ghost
         # cells it would treat the halo as part of the domain. Isolated
@@ -1559,6 +1583,14 @@ def finalize_config(config: SimulationConfig, state_shape) -> SimulationConfig:
     elif config.solver_mode == FINITE_VOLUME and config.riemann_solver == HLLD:
         raise ValueError(
             "The HLLD Riemann solver is only available with the VL2 time "
+            "integrator (time_integrator=VL2)."
+        )
+
+    # Likewise PPM, which the classic finite-volume limiter dispatch does not
+    # know.
+    if config.solver_mode == FINITE_VOLUME and config.limiter == PPM and not uses_vl2:
+        raise ValueError(
+            "The PPM reconstruction is only available with the VL2 time "
             "integrator (time_integrator=VL2)."
         )
 
@@ -1748,6 +1780,8 @@ def limiter_to_string(limiter: int) -> str:
         return "Van Albada PP"
     elif limiter == VAN_LEER:
         return "Van Leer"
+    elif limiter == PPM:
+        return "PPM"
 
 
 def solver_mode_to_string(solver_mode: int) -> str:
