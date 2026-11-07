@@ -8,10 +8,11 @@
 #     cd /export/home/bschuber/astronomix/pytests/self_gravity/cgols
 #     ./run_bseries_local.sh
 #
-# Outputs are tagged _Bki throughout (snapshots, checkpoints, diag log,
-# figures): model B now defaults to the ki02gf12 cooling with the disk-SF +
-# line-of-sight FUV (cgols.py, 2026-11-07). CGOLS_COOLING_CURVE=cie reruns the
-# original CIE model B under _B. Nothing collides with the A-series runs.
+# Outputs are tagged _B throughout (snapshots, checkpoints, diag log, figures):
+# model B now defaults to the ki02gf12 cooling with the disk-SF + line-of-sight
+# FUV (cgols.py, 2026-11-07). The original CIE model B is
+# CGOLS_COOLING_CURVE=cie CGOLS_RUN_TAG=_B_CIE (old runs: legacy/B<dim>_CIE).
+# Nothing collides with the A-series runs.
 #
 # WHY THE COOLING dt LIMIT IS OFF HERE
 # ------------------------------------

@@ -1023,7 +1023,8 @@ COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 # convert with ki02_gf12_temperature before any temperature cut or emissivity.
 # Default (since 2026-11-07): ki02gf12, the physical curve chosen for model B.
 # The original CGOLS / Cholla model B (CIE, n^2 at mu = 0.6, 1e4 K floor) is
-# CGOLS_COOLING_CURVE=cie; it keeps the _B / _B<dim> tags of the old runs.
+# CGOLS_COOLING_CURVE=cie, tagged _B<dim>_CIE (the old runs are archived
+# under legacy/ as B128_CIE, B256_CIE, B512_CIE).
 COOLING_CURVE = os.environ.get("CGOLS_COOLING_CURVE", "ki02gf12")
 if COOLING_CURVE not in ("cie", "ki02gf12"):
     raise ValueError(f"CGOLS_COOLING_CURVE must be 'cie' or 'ki02gf12', got {COOLING_CURVE!r}")
@@ -1162,8 +1163,8 @@ CT_UPWIND = os.environ.get("CGOLS_CT_UPWIND", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
-# other or the production outputs. Defaults to "_Bki" for a radiative (ki02gf12)
-# run and "_B" for the original CIE model B, so the A- and B-series, and the
+# other or the production outputs. Defaults to "_B" for a radiative (ki02gf12) run
+# and "_B_CIE" for the original CIE model B, so the A- and B-series, and the
 # two B variants, never share snapshot / checkpoint / log / figure filenames.
 # Clustered feedback defaults to "_C" (adiabatic, like A) or "_Ccool"
 # (radiative); the series runner tags them _C<dim> / _C<dim>cool.
@@ -1172,19 +1173,24 @@ if CLUSTERS:
 elif SMOOTH:
     _DEFAULT_RUN_TAG = "_Csmoothcool" if COOLING else "_Csmooth"
 else:
-    _DEFAULT_RUN_TAG = ("_Bki" if KI02 else "_B") if COOLING else ""
+    _DEFAULT_RUN_TAG = ("_B" if KI02 else "_B_CIE") if COOLING else ""
 # CGOLS_X64=1 suffixes the DEFAULT tag with "_x64"; an explicit CGOLS_RUN_TAG
 # is used verbatim (pick one that differs from the float32 run's).
 if X64:
     _DEFAULT_RUN_TAG += "_x64"
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", _DEFAULT_RUN_TAG)
-# A cold start clears its tag's frames and checkpoints, so a ki02gf12 run must
-# never take the tag of an original (CIE) model-B run (_B, _B512, _B512_x64...).
-if KI02 and re.fullmatch(r"_B\d*(_x64)?", RUN_TAG):
+# A cold start clears its tag's frames and checkpoints, so the two model-B
+# variants must never take each other's tags: plain _B / _B<dim> (_x64) are the
+# ki02gf12 production runs, *_CIE the original CIE model B.
+if COOLING and not KI02 and re.fullmatch(r"_B\d*(_x64)?", RUN_TAG):
     raise ValueError(
-        f"CGOLS_RUN_TAG={RUN_TAG!r} belongs to the original CIE model-B runs; a "
-        "ki02gf12 run would overwrite them. Use e.g. _B<dim>ki, or set "
-        "CGOLS_COOLING_CURVE=cie to rerun the CIE model B."
+        f"CGOLS_RUN_TAG={RUN_TAG!r} is a ki02gf12 model-B production tag; a CIE "
+        "run would overwrite it. Use _B<dim>_CIE for the original CIE model B."
+    )
+if KI02 and "_CIE" in RUN_TAG:
+    raise ValueError(
+        f"CGOLS_RUN_TAG={RUN_TAG!r} is a CIE model-B tag; a ki02gf12 run would "
+        "overwrite it. Use _B<dim> (production) or a variant tag."
     )
 FIG_RUN_DIR = RUN_TAG.lstrip("_") or "untagged"
 
