@@ -42,7 +42,11 @@ esac
 for dim in "${@:-128 256 512}"; do
     for d in $dim; do
         # _<series><dim>, except Ccool -> _C<dim>cool.
-        if [ "$SERIES" = Ccool ]; then tag="_C${d}cool"; else tag="_${SERIES}${d}"; fi
+        # B is ki02gf12 by default (cgols.py) -> _B<dim>ki; the original CIE
+        # model B (CGOLS_COOLING_CURVE=cie) keeps _B<dim>.
+        if [ "$SERIES" = Ccool ]; then tag="_C${d}cool"
+        elif [ "$SERIES" = B ] && [ "${CGOLS_COOLING_CURVE:-ki02gf12}" = ki02gf12 ]; then tag="_B${d}ki"
+        else tag="_${SERIES}${d}"; fi
         log="cgols_logs/run${tag}_console.log"
         echo "$(date -Is) ${SERIES}-${d}: start -> $log"
         CGOLS_DIM="$d" CGOLS_RUN_TAG="$tag" CGOLS_IC_MODE=insitu \

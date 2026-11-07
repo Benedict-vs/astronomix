@@ -77,6 +77,7 @@ import contextlib
 import faulthandler
 import math
 import os
+import re
 import signal
 import time
 
@@ -1020,7 +1021,10 @@ COOLING_DT_LIMIT = os.environ.get("CGOLS_COOLING_DT_LIMIT", "0") == "1"
 # n^2 / mu = 0.6 settings of "cie" (a silent 4.3x in the cooling) - both are
 # set from this one knob. The cooling module's T~ then carries T / mu(T):
 # convert with ki02_gf12_temperature before any temperature cut or emissivity.
-COOLING_CURVE = os.environ.get("CGOLS_COOLING_CURVE", "cie")
+# Default (since 2026-11-07): ki02gf12, the physical curve chosen for model B.
+# The original CGOLS / Cholla model B (CIE, n^2 at mu = 0.6, 1e4 K floor) is
+# CGOLS_COOLING_CURVE=cie; it keeps the _B / _B<dim> tags of the old runs.
+COOLING_CURVE = os.environ.get("CGOLS_COOLING_CURVE", "ki02gf12")
 if COOLING_CURVE not in ("cie", "ki02gf12"):
     raise ValueError(f"CGOLS_COOLING_CURVE must be 'cie' or 'ki02gf12', got {COOLING_CURVE!r}")
 KI02 = COOLING and COOLING_CURVE == "ki02gf12"
@@ -1034,7 +1038,10 @@ KI02 = COOLING and COOLING_CURVE == "ki02gf12"
 # i.e. the field KO17 would assign if the SFR were spread over 4 pi (d^2 +
 # r_s^2); the FUV light-to-SFR ratio cancels. Sigma_SFR,0 = 2.5e-3
 # Msun/yr/kpc^2 (Kim, Kim & Ostriker 2011), r_s = the 300 pc injection
-# radius, no attenuation, 0.0024 = the metagalactic floor. SFR(t) follows the
+# radius, 0.0024 = the metagalactic floor. By default (the "disk-SF + line-of-
+# sight" FUV model) the starburst term is attenuated by exp(-tau) along its
+# line of sight and the disk's own star formation is added; see
+# CGOLS_FUV_ATTENUATION and CGOLS_FUV_DISK below. SFR(t) follows the
 # feedback schedule (5 -> 20 -> 5 Msun/yr) but never drops below the low state
 # CGOLS_FUV_SFR_FLOOR (the pre-onset stars shine before the first SNe);
 # CGOLS_FUV_SFR pins it to a constant (static-disk tests). CGOLS_FUV=0 gives a
@@ -1046,23 +1053,26 @@ FUV_SFR = os.environ.get("CGOLS_FUV_SFR")
 FUV_SOFTENING_PC = float(os.environ.get("CGOLS_FUV_SOFTENING_PC", str(INJ_RAD)))
 HEAT_RATIO = float(os.environ.get("CGOLS_HEAT_RATIO", "1"))
 # Dust attenuation of the starburst FUV (the metagalactic floor stays
-# unattenuated): "none" (default), "slab" (Ostriker, McKee & Leroy 2010 slab
+# unattenuated): "los" (default), "none" (the unattenuated point source of the
+# first ki02gf12 runs, e.g. _B256ki), "slab" (Ostriker, McKee & Leroy 2010 slab
 # factor of the cell's column; KO17 note it but do not use it) or "jeans"
 # (local shielding exp(-kappa rho L_J), the Jeans length at T <= the cap,
 # Safranek-Shrader+2017). CGOLS_FUV_SIGMA_DUST: FUV dust cross-section per H
 # [cm^2] (1e-21, solar dust; uncertain by ~2x); CGOLS_FUV_JEANS_TCAP [K].
 # "los": exp(-tau) along the line of sight from the starburst, tau from the
 # analytic initial gas outside the 300 pc source radius (build_fuv_los_tau_table).
-FUV_ATTENUATION = os.environ.get("CGOLS_FUV_ATTENUATION", "none")
+FUV_ATTENUATION = os.environ.get("CGOLS_FUV_ATTENUATION", "los")
 if FUV_ATTENUATION not in ("none", "slab", "jeans", "los"):
     raise ValueError(f"CGOLS_FUV_ATTENUATION must be 'none', 'slab', 'jeans' or 'los', got {FUV_ATTENUATION!r}")
 FUV_SIGMA_DUST = float(os.environ.get("CGOLS_FUV_SIGMA_DUST", "1e-21"))
 FUV_JEANS_TCAP = float(os.environ.get("CGOLS_FUV_JEANS_TCAP", "40"))
-# CGOLS_FUV_DISK=1 adds the FUV of the disk's own star formation: Kennicutt
+# CGOLS_FUV_DISK=1 (default) adds the FUV of the disk's own star formation: Kennicutt
 # (1998) Sigma_SFR = CGOLS_FUV_KS_A (Sigma_gas / Msun pc^-2)^CGOLS_FUV_KS_N
 # Msun/yr/kpc^2 of each column, over Sigma_SFR,0, slab-attenuated (TIGRESS /
-# OML10 geometry). "Model C" = CGOLS_FUV_DISK=1 CGOLS_FUV_ATTENUATION=los.
-FUV_DISK = os.environ.get("CGOLS_FUV_DISK", "0") == "1"
+# OML10 geometry). Default FUV model ("disk-SF + line-of-sight") =
+# CGOLS_FUV_DISK=1 CGOLS_FUV_ATTENUATION=los; the earlier unattenuated point
+# source alone = CGOLS_FUV_DISK=0 CGOLS_FUV_ATTENUATION=none.
+FUV_DISK = os.environ.get("CGOLS_FUV_DISK", "1") == "1"
 FUV_KS_A = float(os.environ.get("CGOLS_FUV_KS_A", "2.5e-4"))
 FUV_KS_N = float(os.environ.get("CGOLS_FUV_KS_N", "1.4"))
 # Table lookup of the ki02gf12 curve and its heating factor: "search" (binary
@@ -1152,8 +1162,9 @@ CT_UPWIND = os.environ.get("CGOLS_CT_UPWIND", "1") == "1"
 
 # Optional suffix for per-run outputs (the snapshots directory and the final
 # state .npy) so several experiment runs can coexist without clobbering each
-# other or the production outputs. Defaults to "_B" for a radiative run, so the
-# A- and B-series never share snapshot / checkpoint / log / figure filenames.
+# other or the production outputs. Defaults to "_Bki" for a radiative (ki02gf12)
+# run and "_B" for the original CIE model B, so the A- and B-series, and the
+# two B variants, never share snapshot / checkpoint / log / figure filenames.
 # Clustered feedback defaults to "_C" (adiabatic, like A) or "_Ccool"
 # (radiative); the series runner tags them _C<dim> / _C<dim>cool.
 if CLUSTERS:
@@ -1161,12 +1172,20 @@ if CLUSTERS:
 elif SMOOTH:
     _DEFAULT_RUN_TAG = "_Csmoothcool" if COOLING else "_Csmooth"
 else:
-    _DEFAULT_RUN_TAG = "_B" if COOLING else ""
+    _DEFAULT_RUN_TAG = ("_Bki" if KI02 else "_B") if COOLING else ""
 # CGOLS_X64=1 suffixes the DEFAULT tag with "_x64"; an explicit CGOLS_RUN_TAG
 # is used verbatim (pick one that differs from the float32 run's).
 if X64:
     _DEFAULT_RUN_TAG += "_x64"
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", _DEFAULT_RUN_TAG)
+# A cold start clears its tag's frames and checkpoints, so a ki02gf12 run must
+# never take the tag of an original (CIE) model-B run (_B, _B512, _B512_x64...).
+if KI02 and re.fullmatch(r"_B\d*(_x64)?", RUN_TAG):
+    raise ValueError(
+        f"CGOLS_RUN_TAG={RUN_TAG!r} belongs to the original CIE model-B runs; a "
+        "ki02gf12 run would overwrite them. Use e.g. _B<dim>ki, or set "
+        "CGOLS_COOLING_CURVE=cie to rerun the CIE model B."
+    )
 FIG_RUN_DIR = RUN_TAG.lstrip("_") or "untagged"
 
 # Full-state checkpointing, via astronomix's Orbax TO_DISK mode: the run is
