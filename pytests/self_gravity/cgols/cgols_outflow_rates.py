@@ -28,8 +28,8 @@ SERIES_SEL = os.environ.get("CGOLS_OUTFLOW_SERIES", "AB")  # e.g. "A" for one pa
 # Frame directory (below cgols_snapshots_) of each run; "F" = the A-series FV
 # (VL2 + HLLC) ladder of the *_fv comparison figures.
 FV_RUNS = {128: "diagnostics/A128fv", 256: "diagnostics/A256fv", 512: "A512fvf32", 1024: "A1024fv", 2048: "A2048fv"}
-# Resolutions per series: 2048 exists for the FV ladder only so far.
-SERIES_RESOLUTIONS = {"F": RESOLUTIONS}
+# Resolutions per series: 2048 exists for the FD (A2048) and FV ladders, not for B.
+SERIES_RESOLUTIONS = {"A": RESOLUTIONS, "F": RESOLUTIONS}
 
 
 def run_name(series, res):
