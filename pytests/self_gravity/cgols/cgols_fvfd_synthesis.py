@@ -26,19 +26,19 @@ Per run (cached in data/studies/fvfd_synthesis_metrics.json, --recompute to rebu
 
 Noise. sigma_traj = sample std over the realisations of one scheme at one N: IC-noise seeds 0-3, the checkpoint-
 segmented vs unsegmented baselines and reruns (fp32 only). The IC noise (1e-3) perturbs less than checkpoint
-segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-1024) it is
+segmentation does, so this is a LOWER bound. Where a scheme/N has no ensemble (FD-1024, FD-2048, FV-2048) it is
 extrapolated as "noise does not shrink with N, and FD is as noisy as FV": the largest sigma measured for either
 scheme at any N' <= N (relative for positive fluxes/luminosities, absolute for log or shape metrics); the
-pessimistic variant also applies the FV 256 -> 512 growth once more at 1024. sigma_t is the standard error of a
+pessimistic variant also applies the FV 256 -> 512 growth once more at 1024 and 2048. sigma_t is the standard error of a
 window mean from 5 Myr block means (a stationarity-based proxy that exists for every run). The conservative
 sigma = max(sigma_traj, sigma_t); a difference is called significant if |FD - FV| > 3 sigma_diff with
 sigma_diff = hypot(sigma_FD, sigma_FV). 3D metrics have no ensembles: they borrow the relative sigma_traj of the
 matching frames metric (out5 window) and take the max with their own sigma_t.
 
-Statistics printed per metric: FD, FV, FD-FV and z = (FD-FV)/sigma_diff at 128/256/512/1024; the power-law slope b
-of |FD-FV| ~ N^b (weighted fit, 256-1024, only if the sign is constant); per scheme the successive differences
-256->512->1024, the observed order p = log2(|d1|/|d2|) and a Richardson value M_inf = M_1024 + d2/(2^p - 1) when
-monotone (Monte Carlo over sigma: the fraction of draws that are monotone, the 16-84% range); the equivalent-
+Statistics printed per metric: FD, FV, FD-FV and z = (FD-FV)/sigma_diff at 128-2048; the power-law slope b
+of |FD-FV| ~ N^b (weighted fit, 256-2048, only if the sign is constant); per scheme the successive differences
+256->512->1024 and 512->1024->2048, the observed order p = log2(|d1|/|d2|) and a Richardson value
+M_inf = M_N + d2/(2^p - 1) when monotone (Monte Carlo over sigma: the fraction of draws that are monotone, the 16-84% range); the equivalent-
 resolution factor k with FV(N) = FD(kN) (interpolated in log2 N on the FD ladder); and the GPU-hours per run. The
 ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baseline in units of sigma.
 
@@ -66,6 +66,8 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     # _A512s1 --source frames): FD-512 sigma_traj is measured (2 members) instead of extrapolated.
     # 2026-11-05: + FV-1024 seed 1 (RUNS["FV1024s1"], HoreKa job 117180, emission cache from the frames): FV-1024
     # sigma_traj measured (2 members).
+    # 2026-11-09: + FD-2048 (RUNS["FD2048"], the A-2048 production run; frames, emission and 3D caches from the
+    # A-2048 analysis). FD-FV rows, the FD 512 -> 1024 -> 2048 ladder and the slope fit now run to 2048.
 
 Writes figures/cgols/comparisons/fvfd_summary_significance.png, fvfd_convergence.png and fvfd_cost.png and prints
 the markdown tables. CPU only, numpy + scipy + matplotlib (no jax).
@@ -98,7 +100,7 @@ CACHE = "data/studies/fvfd_synthesis_metrics.json"
 FIG_DIR = "figures/cgols/comparisons"
 BOX_Z = 20.0
 MYR_PER_CODE_TIME = 9.777922216807893
-RES = (128, 256, 512, 1024, 2048)  # FD to 1024; FV to 2048 (FD-FV differences exist where both do)
+RES = (128, 256, 512, 1024, 2048)
 HEIGHTS_KPC = np.array([0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0])  # = cgols_convergence_3d.HEIGHTS_KPC
 RNG = np.random.default_rng(1)
 
@@ -154,6 +156,9 @@ RUNS = {
     # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
     # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
     "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
+    # HoreKa jobs 96655 + 96657 (32 H200, split (1, 8, 4, 1)); 60 frames (51.25 Myr missing), emission from the
+    # frames, 3D cache from HoreKa job 123745 (all 60 checkpoints)
+    "FD2048": ("FD", 2048, "base", "cgols_snapshots_A2048", "_A2048", "_A2048", f"{LOGS}/cgols_diag_A2048.log"),
 }
 
 #: Solver GPU-hours (H200) to 75 Myr from the console logs (time_integration wall x GPUs); 128/256 from the
@@ -165,6 +170,9 @@ GPU_HOURS = {
     ("FD", 512): 20898.4 / 3600, ("FV", 512): 3571.9 / 3600,
     ("FD", 1024): 3.13 * 42341 * 4 / 3600, ("FV", 1024): 17449.4 * 4 / 3600,
     ("FV", 2048): 39422.9 * 32 / 3600,  # 68952 steps, 32 H200, one leg (job 112293)
+    # 92826 steps, 32 H200, legs 96655 (42.1 h, died writing the 51.25 Myr frame) + 96657 (29.51 h); without the
+    # 780 GPU-h of leg 96656 lost to an InfiniBand hang
+    ("FD", 2048): (42.1 + 29.51) * 32,
 }
 GPU_HOURS_FD1024_TOTAL = 246.0
 
@@ -582,7 +590,7 @@ def verdict(row):
     return "<" if row["R"] < 1 else ">"
 
 
-def trend(rows, ns=(256, 512, 1024)):
+def trend(rows, ns=(256, 512, 1024, 2048)):
     """Weighted fit |Delta| ~ N^b over ns if Delta keeps its sign; (b, err, note)."""
     pts = [(n, rows[n]["delta"], rows[n]["sigma"]) for n in ns if n in rows]
     if len(pts) < 3:
@@ -643,10 +651,12 @@ def k_factor(cell, n, draws=2000, key=None):
         d = np.diff([cell[("FD", m)]["value"] for m in points])
         return len(points) >= 2 and (np.all(d > 0) or np.all(d < 0))
 
-    if not monotone(ns):  # the full FD ladder must be monotone; else try 256-1024 only
+    if not monotone(ns):  # the full FD ladder must be monotone; else try 256-2048, then 512-2048
         ns = [m for m in ns if m >= 256]
         if not monotone(ns):
-            return None, None, "FD non-monotone"
+            ns = [m for m in ns if m >= 512]
+            if not monotone(ns):
+                return None, None, "FD non-monotone"
 
     def solve(fd, target):
         x = np.log2(ns)
@@ -701,9 +711,9 @@ def fmt(v, digits=3):
 def tables(st, runs, data):
     summary = {}
     print("\n## Metric table: FD | FV (+- sigma) and z = (FD-FV)/sigma_diff per N  [* = sigma_traj extrapolated; "
-          "late metrics: z with sigma = max(traj, t) / z with sigma_traj only; (p ...) = pessimistic 1024]\n")
+          "late metrics: z with sigma = max(traj, t) / z with sigma_traj only; (p ...) = pessimistic >= 1024]\n")
     print("| metric | " + " | ".join(f"{n}: FD / FV | z" for n in RES)
-          + " | slope b of abs(FD-FV)~N^b (256-1024) | R = abs(FD-FV) / resolution step, per N; verdict |")
+          + " | slope b of abs(FD-FV)~N^b (256-2048) | R = abs(FD-FV) / resolution step, per N; verdict |")
     print("|---|" + "---|---|" * len(RES) + "---|---|")
     for key, (label, _, _) in METRICS.items():
         cell = st[key]
@@ -716,7 +726,7 @@ def tables(st, runs, data):
                 star = lambda c: "*" if c.get("extrap") else ""
                 r = rows[n]
                 zs = fmt(r["z"], 2) + ("" if key in EARLY else f" / {fmt(r['z_lo'], 2)}")
-                zs += f" (p {fmt(r['z_pess'], 2)})" if n == 1024 and r["z_pess"] != r["z"] else ""
+                zs += f" (p {fmt(r['z_pess'], 2)})" if n >= 1024 and r["z_pess"] != r["z"] else ""
                 line += (f" {fmt(fd['value'])}±{fmt(fd['sigma'], 2)}{star(fd)} / "
                          f"{fmt(fv['value'])}±{fmt(fv['sigma'], 2)}{star(fv)} | {zs} |")
             else:
@@ -727,7 +737,7 @@ def tables(st, runs, data):
         print(line)
         summary[key] = {"rows": {str(n): r for n, r in rows.items()}, "trend": [b, berr, note]}
 
-    print("\n## Self-convergence per scheme (N/4 -> N/2 -> N; FD and FV 256 -> 1024, FV also 512 -> 2048): d1, d2, "
+    print("\n## Self-convergence per scheme (N/4 -> N/2 -> N; FD and FV 256 -> 1024 and 512 -> 2048): d1, d2, "
           "order p, Richardson M_inf; MC: fraction monotone, p and M_inf 16/50/84%\n")
     print("| metric | scheme | ladder | values | d1 | d2 | p | M_inf | MC mono | MC p | MC M_inf |")
     print("|---|---|---|---|---|---|---|---|---|---|---|")
@@ -740,7 +750,7 @@ def tables(st, runs, data):
             print(f"| {label} | {scheme} | {'-'.join(map(str, ladder))} | {' / '.join(fmt(x) for x in r['values'])} | "
                   f"{fmt(r['d1'])} | {fmt(r['d2'])} | {fmt(r.get('p'), 2)} | {fmt(r.get('minf'))} | "
                   f"{r['frac_mono']:.2f} | {q('p_q')} | {q('minf_q')} |")
-            # the 256-1024 ladders keep their historical keys; the FV 512-2048 one is rich_FV_2048
+            # the 256-1024 ladders keep their historical keys; the 512-2048 ones are rich_<scheme>_2048
             summary[key][f"rich_{scheme}" + ("" if ladder[-1] == 1024 else f"_{ladder[-1]}")] = r
 
     print("\n## Equivalent resolution k: FV(N) = FD(k N)  (16-84%)\n")
@@ -820,7 +830,8 @@ def tables(st, runs, data):
 
 
 #: (scheme, N ladder) of the self-convergence table; the finest available one feeds the figure's M_inf band
-RICH_LADDERS = (("FD", (256, 512, 1024)), ("FV", (256, 512, 1024)), ("FV", (512, 1024, 2048)))
+RICH_LADDERS = (("FD", (256, 512, 1024)), ("FV", (256, 512, 1024)), ("FD", (512, 1024, 2048)),
+                ("FV", (512, 1024, 2048)))
 
 
 def finest_richardson(cell, scheme):
@@ -927,7 +938,7 @@ def fig_significance(st):
                  fontsize=10)
     ax_k.set_title("(b) equivalent resolution k (16-84% over sigma);\nblank: no FV run or FD ladder not monotone there",
                    fontsize=10)
-    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-1024 (FV-2048: k only)",
+    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-2048",
                  fontsize=12)
     fig.tight_layout()
     path = f"{FIG_DIR}/fvfd_summary_significance.png"
@@ -981,7 +992,7 @@ def fig_convergence(st, runs, data):
             handles.setdefault(l, h)
     fig.legend(handles.values(), handles.keys(), loc="lower center", ncol=8, fontsize=8.5, frameon=False,
                bbox_to_anchor=(0.5, 0.0))
-    fig.suptitle("Self-convergence of FD (128-1024) and FV (128-2048) (error bars: conservative sigma; dashes: "
+    fig.suptitle("Self-convergence of FD and FV (128-2048) (error bars: conservative sigma; dashes: "
                  "realisations;\nright-edge band: Richardson M_inf 16-84% of the finest 3-run ladder if monotone; "
                  "offset markers: ablations)", fontsize=11)
     fig.tight_layout(rect=(0, 0.04, 1, 0.97))
