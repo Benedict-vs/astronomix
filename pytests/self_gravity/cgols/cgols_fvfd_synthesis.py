@@ -32,14 +32,16 @@ scheme at any N' <= N (relative for positive fluxes/luminosities, absolute for l
 pessimistic variant also applies the FV 256 -> 512 growth once more at 1024 and 2048. sigma_t is the standard error of a
 window mean from 5 Myr block means (a stationarity-based proxy that exists for every run). The conservative
 sigma = max(sigma_traj, sigma_t); a difference is called significant if |FD - FV| > 3 sigma_diff with
-sigma_diff = hypot(sigma_FD, sigma_FV). 3D metrics have no ensembles: they borrow the relative sigma_traj of the
-matching frames metric (out5 window) and take the max with their own sigma_t.
+sigma_diff = hypot(sigma_FD, sigma_FV). 3D metrics have (almost) no ensembles: they borrow the relative sigma_traj
+of the matching frames metric (out5 window) and always (early ones too) take the max with their own sigma_t, the
+time-sampling error of the window mean at the 5 Myr cadence (snapshot scatter about a linear trend / sqrt(n)); the
+borrowed early sigma_traj is ~1e-6 relative and alone gave meaningless z of several hundred.
 
 Statistics printed per metric: FD, FV, FD-FV and z = (FD-FV)/sigma_diff at 128-2048; the power-law slope b
 of |FD-FV| ~ N^b (weighted fit, 256-2048, only if the sign is constant); per scheme the successive differences
 256->512->1024 and 512->1024->2048, the observed order p = log2(|d1|/|d2|) and a Richardson value
-M_inf = M_N + d2/(2^p - 1) when monotone (Monte Carlo over sigma: the fraction of draws that are monotone, the 16-84% range); the equivalent-
-resolution factor k with FV(N) = FD(kN) (interpolated in log2 N on the FD ladder); and the GPU-hours per run. The
+M_inf = M_N + d2/(2^p - 1) when monotone (Monte Carlo over sigma: the fraction of draws that are monotone, the
+16-84% range); the equivalent-resolution factor k with FV(N) = FD(kN) (interpolated in log2 N on the FD ladder); and the GPU-hours per run. The
 ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baseline in units of sigma.
 
     python cgols_fvfd_synthesis.py [--recompute] [--json OUT] [--no-figures] \
@@ -67,7 +69,9 @@ ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baselin
     # 2026-11-05: + FV-1024 seed 1 (RUNS["FV1024s1"], HoreKa job 117180, emission cache from the frames): FV-1024
     # sigma_traj measured (2 members).
     # 2026-11-09: + FD-2048 (RUNS["FD2048"], the A-2048 production run; frames, emission and 3D caches from the
-    # A-2048 analysis). FD-FV rows, the FD 512 -> 1024 -> 2048 ladder and the slope fit now run to 2048.
+    # A-2048 analysis). FD-FV rows, the FD 512 -> 1024 -> 2048 ladder and the slope fit now run to 2048. 3D
+    # metrics now always include their own time-sampling error (also the early ones), and the mixed outflow at 1 kpc
+    # is split into 15-30 Myr (high state before the rim episode) and 30-45 Myr (rim episode).
 
 Writes figures/cgols/comparisons/fvfd_summary_significance.png, fvfd_convergence.png and fvfd_cost.png and prints
 the markdown tables. CPU only, numpy + scipy + matplotlib (no jax).
@@ -223,6 +227,8 @@ METRICS = {
     "mass_75": ("box mass at 75 Myr [1e6 Msun]", "rel", "frames"),
     "wind1_15_40": ("3D: wind-entropy outflow 1 kpc 15-40 [Msun/yr]", "rel", "3d"),
     "mixed1_15_40": ("3D: mixed outflow 1 kpc 15-40 [Msun/yr]", "rel", "3d"),
+    "mixed1_15_30": ("3D: mixed outflow 1 kpc 15-30 [Msun/yr]", "rel", "3d"),
+    "mixed1_30_45": ("3D: mixed outflow 1 kpc 30-45 [Msun/yr]", "rel", "3d"),
     "mixed1_50_75": ("3D: entr.+mixed outflow 1 kpc 50-75 [Msun/yr]", "rel", "3d"),
     "edot5_15_40": ("3D: Edot |z|=5 kpc 15-40 [1e42 erg/s]", "rel", "3d"),
     "ecum5": ("3D: energy out |z|=5 kpc 5-75 Myr [1e57 erg]", "rel", "3d"),
@@ -238,6 +244,7 @@ METRICS = {
 #: 3D metric -> frames metric whose relative sigma_traj it borrows
 BORROW = {
     "wind1_15_40": "out5_15_40", "mixed1_15_40": "out5_15_40", "edot5_15_40": "out5_15_40",
+    "mixed1_15_30": "out5_15_40", "mixed1_30_45": "out5_40_50",
     "mixed1_50_75": "out5_50_75", "ecum5": "mout5_cum", "cone1_20_40": "out5_15_40", "cone1_60_75": "out5_50_75",
     "wind1_t30": "out5_15_40", "edot1_t30": "out5_15_40", "edot5_t30": "out5_15_40", "cone1_t30": "out5_15_40",
     "cone1_t60": "out5_50_75", "mixedmass_t60": "out5_50_75",
@@ -430,10 +437,14 @@ def metrics_3d(tag):
         sel = window(t, a, b)
         if sel.sum() >= 3:
             out[name] = ser[key][sel].mean()
-            se[name] = block_se(t, ser[key], a, b, block=10.0) if b - a >= 20 else np.nan
+            # one 5 Myr block per snapshot: the standard error of the window mean from the snapshot scatter
+            # about a linear trend, i.e. the time-sampling error of the 5 Myr cadence
+            se[name] = block_se(t, ser[key], a, b, block=5.0)
 
     win("wind1", "wind1_15_40", 15, 40)
     win("mixed1", "mixed1_15_40", 15, 40)
+    win("mixed1", "mixed1_15_30", 15, 30)
+    win("mixed1", "mixed1_30_45", 30, 45)
     win("entmixed1", "mixed1_50_75", 50, 75)
     win("edot5", "edot5_15_40", 15, 40)
     win("cone", "cone1_20_40", 20, 40)
@@ -442,6 +453,8 @@ def metrics_3d(tag):
         sel = window(t, 5, 75)
         tt, yy = t[sel], ser["edot5"][sel] * 1e42 * 3.15576e13  # erg/s * s/Myr
         out["ecum5"] = float(np.sum(0.5 * (yy[1:] + yy[:-1]) * np.diff(tt)) / 1e57)
+        # time-sampling error of the integral: that of the mean Edot over 5-75 Myr times the 70 Myr span
+        se["ecum5"] = block_se(t, ser["edot5"], 5, 75, block=5.0) * 70.0 * 1e42 * 3.15576e13 / 1e57
     for key, name, T in (("wind1", "wind1_t30", 30), ("edot1", "edot1_t30", 30), ("edot5", "edot5_t30", 30),
                          ("cone", "cone1_t30", 30), ("cone", "cone1_t60", 60), ("mixedmass", "mixedmass_t60", 60)):
         k = int(np.argmin(np.abs(t - T)))
@@ -548,7 +561,7 @@ def stats(runs, data):
             if n >= 1024 and c["extrap"] and 256 in fv and 512 in fv and c["sig_traj"] is not None:
                 c["sig_traj_pess"] = max(c["sig_traj"], fv[512] * max(1.0, fv[512] / fv[256]) * norm(c))
         for c in cell.values():
-            if key in EARLY:
+            if key in EARLY and METRICS[key][2] != "3d":
                 c["sig_t_used"] = None
             else:
                 c["sig_t_used"] = c.get("sig_t")
@@ -884,8 +897,8 @@ FIG_KEYS = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "mout5_cum", 
 HEAT_KEYS = ("out5_15_40", "out5_40_50", "out5_50_75", "out5_peak", "mout5_cum", "lx1_15_40", "lx1_60_75",
              "lx2_15_40", "lx2_60_75", "ha_15_40", "ha_60_75", "pinch_60_75", "pinched_frac", "asym_50_75",
              "ssv256", "ssv128", "cc85_dlogn", "cc85_dv", "side_loss", "mass_75", "wind1_t30", "edot1_t30",
-             "edot5_t30", "cone1_t30", "cone1_t60", "mixedmass_t60", "mixed1_15_40", "edot5_15_40", "ecum5",
-             "cone1_60_75")
+             "edot5_t30", "cone1_t30", "cone1_t60", "mixedmass_t60", "mixed1_15_40", "mixed1_15_30", "mixed1_30_45",
+             "edot5_15_40", "ecum5", "cone1_60_75")
 
 
 def fig_significance(st):
