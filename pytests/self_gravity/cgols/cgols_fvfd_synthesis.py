@@ -1049,7 +1049,7 @@ def fig_cost(st):
         ratio = GPU_HOURS[("FD", n)] / GPU_HOURS[("FV", n)]
         ax.text(n, GPU_HOURS[("FV", n)] * 0.55, f"x{ratio:.1f}", ha="center", fontsize=9, color="0.3")
     ax.set(xlabel="N", ylabel="GPU-hours to 75 Myr", title="Run cost (FD / FV ratio under the FV points)",
-           ylim=(3e-3, 1000))
+           ylim=(3e-3, 5000))
     ax.minorticks_off()
     ax.set_xticks(RES, [str(n) for n in RES])
     ax.grid(alpha=0.3, which="both")
