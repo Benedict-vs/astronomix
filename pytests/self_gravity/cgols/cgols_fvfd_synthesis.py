@@ -41,8 +41,8 @@ Statistics printed per metric: FD, FV, FD-FV and z = (FD-FV)/sigma_diff at 128-2
 of |FD-FV| ~ N^b (weighted fit, 256-2048, only if the sign is constant); per scheme the successive differences
 256->512->1024 and 512->1024->2048, the observed order p = log2(|d1|/|d2|) and a Richardson value
 M_inf = M_N + d2/(2^p - 1) when monotone (Monte Carlo over sigma: the fraction of draws that are monotone, the
-16-84% range); the equivalent-resolution factor k with FV(N) = FD(kN) (interpolated in log2 N on the FD ladder); and the GPU-hours per run. The
-ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baseline in units of sigma.
+16-84% range); the equivalent-resolution factor k with FV(N) = FD(kN) (interpolated in log2 N on the FD
+ladder); and the GPU-hours per run. The ablations (HLLE, fp64, CFL 0.3, PPM) are listed as offsets from their FV baseline in units of sigma.
 
     python cgols_fvfd_synthesis.py [--recompute] [--json OUT] [--no-figures] \
         [--ppm LABEL=ROLE:FRAMES_DIR:DIAG_LOG[:EMISSION_TAG] ...]
