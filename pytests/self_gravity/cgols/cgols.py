@@ -2738,8 +2738,11 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         "pressure_max": P_total.max(),
         "n_midplane": rho_mid * n_factor,
         "n_zaxis": rho_zax * n_factor,
-        "T_midplane": physical_temperature(P_mid / rho_mid * T_factor),
-        "T_zaxis": physical_temperature(P_zax / rho_zax * T_factor),
+        # The mu = 0.6 temperature: this function runs inside a jit on the
+        # sharded in-situ path, so the host-side physical_temperature (numpy)
+        # is applied where the profiles are plotted instead.
+        "T_midplane": P_mid / rho_mid * T_factor,
+        "T_zaxis": P_zax / rho_zax * T_factor,
     }
     magnetic_kwargs = {}
     if MHD:
@@ -2909,8 +2912,8 @@ def _plot_ic_diagnostics(config, diagnostics):
     ax1.legend()
     ax1.set_title("Density profiles")
 
-    ax2.plot(R_kpc, diagnostics["T_midplane"], "b--", linewidth=2, label="xy-plane")
-    ax2.plot(z_kpc, diagnostics["T_zaxis"], "r:", linewidth=2, label="z-axis")
+    ax2.plot(R_kpc, physical_temperature(diagnostics["T_midplane"]), "b--", linewidth=2, label="xy-plane")
+    ax2.plot(z_kpc, physical_temperature(diagnostics["T_zaxis"]), "r:", linewidth=2, label="z-axis")
     ax2.set_xscale("log")
     ax2.set_yscale("log")
     ax2.set_xlim(1e-2, 1e1)
