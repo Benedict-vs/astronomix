@@ -4157,13 +4157,24 @@ if __name__ == "__main__":
             rprint(f"  {_remaining} of {NUM_SNAPSHOTS} frames left on the run's grid")
 
         if IC_SEED and not RESTART_FROM:
-            _factor = 1.0 + IC_NOISE * jax.random.normal(
-                jax.random.PRNGKey(int(IC_SEED)),
-                initial_state.shape[1:],
-                dtype=initial_state.dtype,
-            )
-            initial_state = initial_state.at[registered_variables.density_index].multiply(_factor)
-            initial_state = initial_state.at[registered_variables.pressure_index].multiply(_factor)
+            # Draw the noise inside a jit that writes straight into the state's
+            # sharding. An eager jax.random.normal of the whole grid lands
+            # unsharded on one device (64 GB at 2048^3) and, in a multi-process
+            # run, cannot be combined with the global (non-addressable) state.
+            # With jax_threefry_partitionable (the default) the numbers do not
+            # depend on the sharding: 1 and 2 CPU processes give identical
+            # states, and the old eager draw agrees to 2e-7 (FMA rounding).
+            def _perturb(state):
+                factor = 1.0 + IC_NOISE * jax.random.normal(
+                    jax.random.PRNGKey(int(IC_SEED)), state.shape[1:], dtype=state.dtype
+                )
+                state = state.at[registered_variables.density_index].multiply(factor)
+                return state.at[registered_variables.pressure_index].multiply(factor)
+
+            if sharding is not None:
+                initial_state = jax.jit(_perturb, out_shardings=sharding)(jax.device_put(initial_state, sharding))
+            else:
+                initial_state = jax.jit(_perturb)(initial_state)
             rprint(f"IC perturbed: seed {IC_SEED}, rho and P x (1 + {IC_NOISE:g} N(0,1))")
 
         if NUM_GPUS > 1:
