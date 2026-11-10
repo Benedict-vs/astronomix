@@ -49,6 +49,7 @@ ladder); and the GPU-hours per run. The ablations (HLLE, fp64, CFL 0.3, PPM) are
 
     # 2026-10-29 incl. the CPU FV-128 runs from the fv-ppm worktree (frames on scratch, emission caches built
     # with cgols_emission.py --source frames --frames-dir ...); adds figures/cgols/comparisons/fv_ppm_A128.png
+    # (2026-11-10: those CPU frames were deleted from scratch; the committed figure is final, --ppm now skips them)
     python cgols_fvfd_synthesis.py \
         --ppm FV128ppm=PPM:/export/scratch/bschuber/ppmrun_cpu/frames/A128fvppm:<diag log>:_A128fvppm \
         --ppm "FV128plmcpu=PLM CPU:/export/scratch/bschuber/ppmrun_cpu/frames/A128fvplmcpu:<diag log>:_A128fvplmcpu"
