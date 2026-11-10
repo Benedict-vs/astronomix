@@ -36,6 +36,13 @@
 #
 #   sbatch --time=04:00:00 \
 #          --export=ALL,CONV3D_TAG=_A2048fv,CONV3D_WORKERS=64,CONV3D_PARTS=8 run_horeka_convergence3d.sh
+#
+# CONV3D_SCRIPT runs another checkpoint analysis with the same command line
+# (--tag/--workers/--parts), e.g. the spherical-shell and box-face fluxes
+# (cache data/studies/shells_v2<TAG>.npz, ~1 MB):
+#
+#   sbatch --job-name=cgols_shells --export=ALL,CONV3D_SCRIPT=cgols_shell_fluxes.py,CONV3D_TAG=_A1024 \
+#          run_horeka_convergence3d.sh
 
 export CGOLS_SITE="${CGOLS_SITE:-horeka2}"
 source "$SLURM_SUBMIT_DIR/_site_env.sh" || exit 1
@@ -48,4 +55,4 @@ cd "$CGOLS_DIR" || exit 1
 : "${CONV3D_TAG:?set CONV3D_TAG, e.g. _A1024fvr}"
 echo "node $SLURM_JOB_NODELIST: $(nproc) CPUs, $(free -g | awk '/Mem:/{print $2}') GB"
 
-python cgols_convergence_3d.py --tag "$CONV3D_TAG" --workers "${CONV3D_WORKERS:-30}" --parts "${CONV3D_PARTS:-1}"
+python "${CONV3D_SCRIPT:-cgols_convergence_3d.py}" --tag "$CONV3D_TAG" --workers "${CONV3D_WORKERS:-30}" --parts "${CONV3D_PARTS:-1}"
