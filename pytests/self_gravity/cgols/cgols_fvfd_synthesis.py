@@ -167,19 +167,21 @@ RUNS = {
 }
 
 #: Solver GPU-hours (H200) to 75 Myr from the console logs (time_integration wall x GPUs); 128/256 from the
-#: un-checkpointed seed runs, 512 incl. checkpoint I/O (FD every frame, FV every 4th), 1024 on 4 GPUs (FD: 3.13
-#: s/step x 42341 steps; its 61.5 h wall over 3 legs incl. restarts = 246 GPU-h).
+#: un-checkpointed seed runs, 512 incl. checkpoint I/O (FD every frame, FV every 4th). FD-1024 = the run analysed
+#: here (cgols_snapshots_A1024, diag 42341 steps): HoreKa job 93951, current numerics, 8 H200 split (1, 4, 2, 1),
+#: time_integration 55650.5 s, job wall 15:30:29 (until 2026-11-10 this used the July 4-GPU run's 3.13 s/step,
+#: i.e. 147 GPU-h, and its 246 GPU-h 3-leg total: a different run). FV-1024 on 4 GPUs.
 GPU_HOURS = {
     ("FD", 128): 98.5 / 3600, ("FV", 128): 35.9 / 3600,
     ("FD", 256): 1154.8 / 3600, ("FV", 256): 198.6 / 3600,
     ("FD", 512): 20898.4 / 3600, ("FV", 512): 3571.9 / 3600,
-    ("FD", 1024): 3.13 * 42341 * 4 / 3600, ("FV", 1024): 17449.4 * 4 / 3600,
+    ("FD", 1024): 55650.5 * 8 / 3600, ("FV", 1024): 17449.4 * 4 / 3600,
     ("FV", 2048): 39422.9 * 32 / 3600,  # 68952 steps, 32 H200, one leg (job 112293)
     # 92826 steps, 32 H200, legs 96655 (42.1 h, died writing the 51.25 Myr frame) + 96657 (29.51 h); without the
     # 780 GPU-h of leg 96656 lost to an InfiniBand hang
     ("FD", 2048): (42.1 + 29.51) * 32,
 }
-GPU_HOURS_FD1024_TOTAL = 246.0
+GPU_HOURS_FD1024_TOTAL = (15 + 30 / 60 + 29 / 3600) * 8  # job 93951 wall incl. IC, compile, I/O
 
 #: FV-PPM on GPU (HoreKa jobs 112240 / 112241, 1 H200 each, code b834d0f of branch fv-ppm): FV production (VL2 +
 #: HLLC, CFL 0.4, FOFC, hard floor, fp32) with the AthenaPK ppm_simple corrector instead of PLM. Added only with
@@ -1043,7 +1045,7 @@ def fig_cost(st):
         ns = [n for n in RES if (scheme, n) in GPU_HOURS]
         ax.loglog(ns, [GPU_HOURS[(scheme, n)] for n in ns], marker="o", color=color, label=scheme)
     ax.loglog([1024], [GPU_HOURS_FD1024_TOTAL], marker="o", mfc="none", color="C0", ls="none",
-              label="FD-1024 incl. 3-leg restarts/I/O")
+              label="FD-1024 whole job (IC, compile, I/O)")
     for n in RES:
         if ("FD", n) not in GPU_HOURS or ("FV", n) not in GPU_HOURS:
             continue

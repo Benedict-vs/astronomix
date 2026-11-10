@@ -24,8 +24,8 @@ first); the momentum / 1 kpc energy / late energy metrics are computed here from
 cadence and borrow the relative seed scatter of the 5 kpc outflow (as the synthesis does for its 3D metrics); the
 rim roughness is computed from the frames of every base and seed run (cgols_convergence_3d.rim_metrics).
 
-Cost: solver GPU-hours (H200) to 75 Myr, cgols_fvfd_synthesis.GPU_HOURS (time integration only; FD-1024 147 GPU-h,
-its 3-leg run with restarts took 246).
+Cost: solver GPU-hours (H200) to 75 Myr, cgols_fvfd_synthesis.GPU_HOURS (time integration only; FD-1024 = job 93951,
+8 H200, 124 GPU-h).
 
     python cgols_cost_accuracy.py [--tols 5,10,20] [--json OUT]
 
