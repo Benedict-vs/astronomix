@@ -41,6 +41,10 @@ and caches them in data/studies/convergence3d<tag>.npz (resumable). With
         FV256=_A256fv:cgols_snapshots_diagnostics/A256fv FV512=_A512fvf32 FV1024=_A1024fv FV2048=_A2048fv
         # merged FD (solid) + FV (dashed), 256-1024 in the 128-1024 colours: *_fdfv.png; an FV run beyond the FD
         # list (FV2048=_A2048fv appended to --fv) is drawn unpaired, dash-dotted in a darker colour
+    python cgols_convergence_3d.py --suffix _fdfv_hires --colors tab:orange,tab:blue --diff --cross A1024:FV2048 \
+        --plot A1024=_A1024 A2048=_A2048 --fv FV1024=_A1024fv FV2048=_A2048fv
+        # 1024 + 2048 only, with an FV - FD panel (FV / FD on log panels) under every line panel, per resolution,
+        # and FV-2048 - FD-1024 grey dotted: *_fdfv_hires.png (not on the phase/axis figure)
 
 CPU only; it never imports cgols.py (whose autocvd would wait for a GPU).
 --parts P splits every checkpoint's tiles into P tasks (all measurements are
@@ -477,11 +481,14 @@ SPARSE_SNAPSHOTS = 8
 FD_NAME, FV_NAME = "FD WENO5", "FV VL2"
 
 
-def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_prefix="a_series"):
+def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_prefix="a_series", color_list=None,
+         diff=False, cross=()):
     """Compare cached runs; with fv_runs, FD (solid) and FV (dashed) in one figure set.
 
     fv_runs pairs with runs by position (same resolution, same colour); FV runs beyond the FD list are drawn
-    unpaired (dash-dotted, a darker colour, e.g. FV-2048).
+    unpaired (dash-dotted, a darker colour, e.g. FV-2048). color_list overrides the colormap (one colour per FD
+    run). diff (merged only) adds a panel under every line panel with FV - FD per resolution (FV / FD on a log
+    panel); cross adds (FD label, FV label) pairs across resolutions to it, grey dotted (e.g. FD-1024 vs FV-2048).
     """
     import matplotlib
 
@@ -507,6 +514,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     # partner's), also for runs without a 3D cache (frame/emission panels only).
     labels = [label for label, _ in runs]
     colors = dict(zip(labels, plt.get_cmap(cmap)(np.linspace(cmap_start, 1.0, len(labels)))))
+    if color_list:
+        colors.update(zip(labels, color_list))
     for (fd_label, _), (fv_label, _) in zip(runs, fv_runs):
         colors[fv_label] = colors[fd_label]
     # FV runs beyond the FD list (e.g. FV-2048, no FD-2048) are unpaired: dash-dotted, in the ladder's darkest
@@ -521,8 +530,15 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     series = f"{name_prefix.split('_')[0].upper()}-series"  # a_series -> "A-series"
     h1, h5 = int(np.argmin(np.abs(HEIGHTS_KPC - 1))), int(np.argmin(np.abs(HEIGHTS_KPC - 5)))
 
+    diff = diff and merged
+    pairs = list(zip([label for label, _ in runs], [label for label, _ in fv_runs]))
+    #: per axes: run label -> (x, y) of its curve, for the difference panels
+    traces = {}
+
     def draw(ax, x, y, label, series=True, method="plot", legend_label=None, **kwargs):
         """One run's curve: colour by run, dashed for FV when merged, markers if sparse."""
+        if diff:
+            traces.setdefault(ax, {})[label] = (np.asarray(x, float), np.asarray(y, float))
         style = {"color": colors[label], "label": label if legend_label is None else legend_label}
         if merged:
             style["ls"] = "-." if label in unpaired else "--" if label in fv_labels else "-"
@@ -550,8 +566,57 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
             Line2D([], [], color=colors[label], ls="none", marker="o", ms=5, label=f"{label}: {count} snapshots only")
             for label, count in sparse.items()
         ]
-        handles += [Line2D([], [], ls="none", label=note) for note in notes]
+        handles += [Line2D([], [], ls="none", label=note) for note in list(notes) + diff_notes()]
         ax.legend(handles=handles, **kwargs)
+
+    def add_diffs(fig, height=0.42):
+        """Under every axes with an FD/FV pair: FV - FD (FV / FD if log) per pair, on the FD run's x."""
+        if not diff:
+            return
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+        for ax, curves in traces.items():
+            todo = [(fd, fv, False) for fd, fv in pairs] + [(fd, fv, True) for fd, fv in cross]
+            todo = [p for p in todo if p[0] in curves and p[1] in curves]
+            if not todo:
+                continue
+            log = ax.get_yscale() == "log"
+            ratios = []
+            dax = make_axes_locatable(ax).append_axes("bottom", size=f"{height * 100:.0f}%", pad=0.06, sharex=ax)
+            for fd, fv, is_cross in todo:
+                (xd, yd), (xv, yv) = curves[fd], curves[fv]
+                order = np.argsort(xv)
+                inside = (xd >= xv.min()) & (xd <= xv.max())
+                yi = np.interp(xd[inside], xv[order], yv[order])
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    d = yi / yd[inside] if log else yi - yd[inside]
+                style = ({"color": "0.45", "ls": ":", "lw": 1.6} if is_cross else {"color": colors[fd], "lw": 1.3})
+                dax.plot(xd[inside], d, **style)
+                ratios.append(d[np.isfinite(d) & (d > 0)])
+            dax.axhline(1.0 if log else 0.0, color="k", lw=0.7)
+            ratios = np.concatenate(ratios) if ratios else np.array([1.0])
+            if log and ratios.size and (ratios.max() > 3 or ratios.min() < 1 / 3):  # a wide ratio: log axis
+                from matplotlib.ticker import FuncFormatter
+
+                dax.set_yscale("log")
+                dax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:g}"))
+            dax.set_ylabel("FV / FD" if log else "FV $-$ FD", fontsize=8)
+            dax.tick_params(labelsize=8)
+            dax.grid(alpha=0.3)
+            if ax.get_xlabel():
+                dax.set_xlabel(ax.get_xlabel())
+                ax.set_xlabel("")
+            ax.tick_params(labelbottom=False)
+            if any(patch.get_zorder() == 0 for patch in ax.patches):  # the 15-40 Myr band of the time panels
+                dax.axvspan(15, 40, color="0.93", zorder=0)
+        traces.clear()  # the next figure starts afresh
+
+    def diff_notes():
+        if not diff or not traces:
+            return []
+        notes = ["lower panels: FV $-$ FD at equal N (FV / FD on log panels)"]
+        notes += [f"grey dotted: {fv} $-$ {fd}" for fd, fv in cross]
+        return notes
 
     def window_label(label, steps):
         return f"{label} (1 snapshot)" if len(steps) == 1 else label
@@ -559,7 +624,8 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     title_tail = f" -- {FD_NAME} solid, {FV_NAME} dashed" if merged else ""
 
     # 1) Phase-resolved fluxes against time at 1 and 5 kpc.
-    fig, axes = plt.subplots(3, 4, figsize=(22, 12), sharex=True)
+    tall = 1.45 if diff else 1.0  # room for the difference panels
+    fig, axes = plt.subplots(3, 4, figsize=(22, 12 * tall), sharex=True)
     for label, rec in data.items():
         for col, (h, name) in enumerate(((h1, "1 kpc"), (h5, "5 kpc"))):
             for row, q in enumerate(range(3)):
@@ -587,11 +653,12 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         ax.set_xlabel("t [Myr]")
     legend(axes[0, 0])
     fig.suptitle(f"{series}, full 3D states: phase-resolved fluxes (cold < 3e4 K < warm < 5e5 K < hot)" + title_tail)
+    add_diffs(fig)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes_T{suffix}.png"), dpi=130)
 
     # 1b) The same by entropy (origin): entrained / mixed / wind / halo.
-    fig, axes = plt.subplots(4, 4, figsize=(22, 15), sharex=True)
+    fig, axes = plt.subplots(4, 4, figsize=(22, 15 * tall), sharex=True)
     for label, rec in data.items():
         for col, (h, name) in enumerate(((h1, "1 kpc"), (h5, "5 kpc"))):
             for b, bin_name in enumerate(ENTROPY_BINS):
@@ -626,11 +693,12 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     legend(axes[0, 0])
     fig.suptitle(f"{series}, " "full 3D states: fluxes by entropy K = T/n$^{2/3}$ [K cm$^2$]: entrained < 10$^{5.5}$ "
                  "< mixed < 10$^{6.8}$ < wind < 10$^{7.9}$ < unmixed halo" + title_tail)
+    add_diffs(fig)
     fig.tight_layout(rect=(0, 0, 1, 0.985) if merged else None)  # merged: longer suptitle
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_fluxes{suffix}.png"), dpi=130)
 
     # 2) Time-averaged flux profiles against height, two windows, by entropy bin.
-    fig, axes = plt.subplots(2, 5, figsize=(26, 9))
+    fig, axes = plt.subplots(2, 5, figsize=(26, 9 * tall))
     for row, window in enumerate(((15, 30), (30, 45))):
         notes, single = [], False
         for label, rec in data.items():
@@ -658,6 +726,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         ax.grid(alpha=0.3)
     if merged:
         fig.suptitle(f"{series}, window-mean outflow by entropy bin against height" + title_tail)
+    add_diffs(fig)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_profiles{suffix}.png"), dpi=130)
 
@@ -722,6 +791,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
             steps = [s for s in sorted(rec) if 20 <= rec[s]["time_myr"] <= 40]
             if len(steps) == 1:
                 notes.append(f"{label}: 1 snapshot ({rec[steps[0]]['time_myr']:.1f} Myr)")
+        traces.clear()  # no difference panels here (the constrained layout does not place divider axes)
         legend(axis_row[0], notes=notes + ["CC85 (high state): black dotted"])
     else:
         axis_row[0].legend(fontsize=8)
@@ -735,7 +805,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_phases_axis{suffix}.png"), dpi=130)
 
     # 4) Instability onset at the cavity rim, from the frames' midplane slices.
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5 * tall))
     for label, tag in all_runs:
         frame_dir = os.path.join(SCRIPT_DIR, frame_dirs[label])
         if not os.path.isdir(frame_dir):
@@ -755,6 +825,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         sparse.clear()  # the rim comes from every frame
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
+    add_diffs(fig)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_rim{suffix}.png"), dpi=130)
 
@@ -847,7 +918,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence3d_morphology{suffix}.png"), dpi=130)
 
     # 6) Emission convergence from the cgols_emission.py caches.
-    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5 * tall))
     for label, tag in all_runs:
         path = os.path.join(SCRIPT_DIR, "data", "studies", f"emission{tag}.npz")
         if not os.path.exists(path):
@@ -872,6 +943,7 @@ def plot(runs, suffix="", cmap="Blues", fv_runs=None, cmap_start=0.35, name_pref
         sparse.clear()  # emission comes from every frame
         legend(axes[0], loc="lower right")
         sparse.update(sparse_backup)
+    add_diffs(fig)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{name_prefix}_convergence_emission{suffix}.png"), dpi=130)
 
@@ -920,12 +992,16 @@ def main():
     parser.add_argument("--cmap-start", type=float, default=0.35,
                         help="colormap value of the first run (0.5667 keeps the 128-1024 colours for a 256-1024 ladder)")
     parser.add_argument("--fv", nargs="*", help="merged FD+FV figures: FV LABEL=TAG[:FRAMES_DIR] runs, paired with --plot by position")
+    parser.add_argument("--colors", help="comma list of matplotlib colours, one per --plot run (overrides --cmap)")
+    parser.add_argument("--diff", action="store_true", help="merged figures: FV - FD panel under every line panel")
+    parser.add_argument("--cross", nargs="*", help="extra FD_LABEL:FV_LABEL pairs for the difference panels")
     parser.add_argument("--prefix", default="a_series", help="figure-name prefix, e.g. c_series for the model-C ladder")
     args = parser.parse_args()
     if args.plot:
         split = lambda specs: [tuple(spec.split("=", 1)) for spec in specs or ()]
         plot(split(args.plot), args.suffix or ("_fdfv" if args.fv else ""), args.cmap, split(args.fv), args.cmap_start,
-             args.prefix)
+             args.prefix, args.colors.split(",") if args.colors else None, args.diff,
+             [tuple(pair.split(":")) for pair in args.cross or []])
     else:
         run(args.tag, args.checkpoint_dir, args.steps, args.workers, args.parts)
 
