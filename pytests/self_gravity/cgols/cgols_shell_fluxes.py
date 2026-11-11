@@ -381,7 +381,7 @@ def r_centers():
 # -------------------------------------------------------------
 
 HIGH, LOW = (15.0, 40.0), (50.0, 75.0)  # Myr: high and low state of the feedback schedule
-CONES = ((30, r"30$\degree$ bicone"), (60, r"60$\degree$ bicone"), (90, r"full sphere"))
+CONES = ((30, r"30$\degree$ bicone"), (60, r"60$\degree$ bicone"), (90, r"$4\pi$ shell"))
 ENTROPY_COLORS = {"entrained": "tab:brown", "mixed": "tab:purple", "wind": "tab:orange", "halo": "0.5"}
 
 
@@ -499,7 +499,7 @@ def plot(runs, prefix="a_series"):
             _, cone60 = series(rec, lambda r_: reduce(r_, "mdot_net", 60)[i].sum())
             _, wind = series(rec, lambda r_: r_["mdot_net_K"][:, i, :, ENTROPY_BINS.index("wind")].sum())
             _, e_sphere = series(rec, lambda r_: reduce(r_, "edot_net", 90)[i].sum())
-            axes[0, col].plot(t, sphere, "-", color=c, lw=1.2, label=f"{label} sphere" if col == 0 else None)
+            axes[0, col].plot(t, sphere, "-", color=c, lw=1.2, label=f"{label} $4\\pi$ shell" if col == 0 else None)
             axes[0, col].plot(t, cone60, ":", color=c, lw=1.2, label=f"{label} 60$\\degree$ bicone" if col == 0 else None)
             axes[1, col].plot(t, e_sphere / 1e42, "-", color=c, lw=1.2)
             heights, planes = _plane_cache(tag)
@@ -511,13 +511,13 @@ def plot(runs, prefix="a_series"):
                 axes[1, col].plot(tp, e_plane / 1e42, "--", color=c, lw=1.0)
             if label == best:
                 axes[0, col].plot(t, wind, "-", color="tab:orange", lw=1.0,
-                                  label=f"{label} sphere, wind entropy only" if col == 0 else None)
+                                  label=f"{label} $4\\pi$ shell, wind entropy only" if col == 0 else None)
         axes[0, col].set_title(f"r = |z| = {radius:g} kpc")
         axes[1, col].set_xlabel("t [Myr]")
         for ax in axes[:, col]:
             ax.axhline(0, color="0.6", lw=0.8)
     axes[0, 0].set_ylabel(r"net $\dot M$ [$M_\odot$ yr$^{-1}$]")
-    axes[1, 0].set_ylabel(r"net $\dot E$ [$10^{42}$ erg s$^{-1}$]  (solid sphere, dashed planes)")
+    axes[1, 0].set_ylabel(r"net $\dot E$ [$10^{42}$ erg s$^{-1}$]  (solid $4\pi$ shell, dashed planes)")
     axes[0, 0].legend(fontsize=7, ncol=2)
     fig.suptitle("Spherical shells vs the two x-y planes")
     fig.tight_layout()
@@ -548,7 +548,7 @@ def plot(runs, prefix="a_series"):
         ax.fill_between(t, side_low + side_high, side_low + side_high + caps, color="tab:red", alpha=0.35, lw=0,
                         label="top + bottom faces")
         ax.plot(t, unbound, "k:", lw=1.0, label="of which unbound (Bernoulli > 0)")
-        ax.plot(t, sphere, "-", color="tab:green", lw=1.3, label="sphere r = 5 kpc (net)")
+        ax.plot(t, sphere, "-", color="tab:green", lw=1.3, label=r"$4\pi$ shell r = 5 kpc (net)")
         heights, planes = _plane_cache(tag)
         if planes:
             h = int(np.argmin(np.abs(heights - 5.0)))
