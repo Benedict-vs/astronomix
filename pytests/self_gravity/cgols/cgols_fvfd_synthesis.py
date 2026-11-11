@@ -69,6 +69,8 @@ ladder); and the GPU-hours per run. The ablations (HLLE, fp64, CFL 0.3, PPM) are
     # _A512s1 --source frames): FD-512 sigma_traj is measured (2 members) instead of extrapolated.
     # 2026-11-05: + FV-1024 seed 1 (RUNS["FV1024s1"], HoreKa job 117180, emission cache from the frames): FV-1024
     # sigma_traj measured (2 members).
+    # 2026-11-11: + FV-1024 seeds 2 and 3 (RUNS["FV1024s2"], ["FV1024s3"], HoreKa jobs 127474 / 127475): FV-1024
+    # sigma_traj from 4 members.
     # 2026-11-09: + FD-2048 (RUNS["FD2048"], the A-2048 production run; frames, emission and 3D caches from the
     # A-2048 analysis). FD-FV rows, the FD 512 -> 1024 -> 2048 ladder and the slope fit now run to 2048. 3D
     # metrics now always include their own time-sampling error (also the early ones), and the mixed outflow at 1 kpc
@@ -158,6 +160,12 @@ RUNS = {
     # 3D cache from HoreKa job 121315 (all 60 checkpoints)
     "FV1024s1": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs1", "_A1024fvs1", "_A1024fvs1",
                  f"{LOGS}/cgols_diag_A1024fvs1.log"),
+    # HoreKa jobs 127474 / 127475 (same layout and code as 117180): IC seeds 2 and 3, 4.88 / 4.84 h on 4 H200;
+    # 3D caches from HoreKa jobs 128276 / 128277
+    "FV1024s2": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs2", "_A1024fvs2", "_A1024fvs2",
+                 f"{LOGS}/cgols_diag_A1024fvs2.log"),
+    "FV1024s3": ("FV", 1024, "ens", "cgols_snapshots_A1024fvs3", "_A1024fvs3", "_A1024fvs3",
+                 f"{LOGS}/cgols_diag_A1024fvs3.log"),
     # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
     # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
     "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
