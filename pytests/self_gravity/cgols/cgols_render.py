@@ -90,6 +90,49 @@ VELOCITY_STOPS = [
 ]
 
 
+@functools.lru_cache(maxsize=1)
+def _xray_grid():
+    """AtomDB 0.3-2 keV band emissivity table (solar metals + H/He) and n_e/n_tot, n_H/n_tot."""
+    from astropy import units as u
+
+    from astronomix import CodeUnits
+    from astronomix.analysis_helpers.emission import (
+        combined_log10_emissivity,
+        emission_conversions,
+        load_xray_emissivity_table,
+        metal_abundance_weights,
+        table_log10_temperature,
+    )
+
+    table = load_xray_emissivity_table()
+    conv = emission_conversions(CodeUnits(1 * u.kiloparsec, 1e6 * u.M_sun, 100 * u.km / u.s))
+    return (table_log10_temperature(table), combined_log10_emissivity(table, metal_abundance_weights(table)),
+            conv.electron_density_per_code_density / conv.total_number_density_per_code_density,
+            conv.hydrogen_density_per_code_density / conv.total_number_density_per_code_density)
+
+
+def xray_log10_emissivity(logn, logT):
+    """log10 n_e n_H eps_{0.3-2 keV}(T) [erg cm^-3 s^-1] for total number density 10^logn [cm^-3]."""
+    log_t_grid, log_eps_grid, e_frac, h_frac = _xray_grid()
+    log_eps = np.interp(logT, log_t_grid, log_eps_grid, left=-60.0)
+    log_eps = log_eps - 0.5 * np.maximum(logT - log_t_grid[-1], 0.0)  # T^-1/2 beyond the table
+    return log_eps + 2 * logn + np.log10(e_frac * h_frac)
+
+
+def halpha_log10_emissivity(logn, logT, window=(5.0e3, 5.0e4)):
+    """log10 of 2.63e-33 n_e n_H T^-0.9 (cgols_emission's H-alpha, Eq. 3) inside the T window, else -60."""
+    _, _, e_frac, h_frac = _xray_grid()
+    value = np.log10(2.63e-33 * e_frac * h_frac) + 2 * logn - 0.9 * logT
+    inside = (logT >= np.log10(window[0])) & (logT <= np.log10(window[1]))
+    return np.where(inside, value, -60.0)
+
+
+def _inferno(u):
+    import matplotlib
+
+    return matplotlib.colormaps["inferno"](np.clip(u, 0, 1))[..., :3]
+
+
 def kappa_of_logn(logn, kappa_ref, logn_ref, slope, kappa_max=4000.0):
     """Extinction [1/kpc]: kappa_ref at logn_ref, rising by 10^slope per dex."""
     return np.minimum(kappa_ref * 10.0 ** (slope * (logn - logn_ref)), kappa_max)
@@ -98,13 +141,16 @@ def kappa_of_logn(logn, kappa_ref, logn_ref, slope, kappa_max=4000.0):
 def build_lut(look, kappa_ref=0.1, logn_ref=-1.5, slope=2.5, glow=0.0, num=256, ramp_shift=0.0,
               hot_fade=1.0, hot_logT=(5.3, 6.3), kappa_knee=None, slope_hi=1.0, dense_dim=None,
               dense_range=(-1.2, -0.2), dense_tint=(1.0, 0.85, 0.75), wind_shift=0.0, wind_pivot=(-2.0, -1.2),
-              auto_q=None):
+              auto_q=None, xray=0.0, xray_ref=-27.0, xray_gamma=0.5, xray_rgb=(0.72, 0.32, 1.0),
+              halpha=0.0, halpha_ref=-28.0, halpha_gamma=1.0, xray_span=4.0, halpha_max_logn=-0.5):
     """(num, num, 7) table over (log n, b): rgb colour, kappa, rgb glow.
 
     hot_fade    opacity factor for hot gas (log T above hot_logT[1]; smooth from hot_logT[0]), so that the
                 dense warm-hot envelope of an adiabatic disk stays translucent while cool gas stays solid
                 (density/phase looks only: the velocity look has no temperature axis)
     kappa_knee  above this log n the opacity rises only by 10^slope_hi per dex (softer dense gas)
+    xray        add AtomDB 0.3-2 keV emission as pure glow: xray * xray_rgb * (eps / 10^xray_ref)^xray_gamma per kpc
+                (eps = n_e n_H eps(T) [erg cm^-3 s^-1]; gamma < 1 compresses the huge dynamic range)
     wind_shift  shift colour + opacity by this many dex for the diffuse wind only (log n < wind_pivot[0]), fading to
                 no shift at wind_pivot[1], so a thinner wind (A vs C) gets the same look while the disk and its
                 envelope (similar density in all runs) keep theirs; |wind_shift| < pivot width keeps it monotonic
@@ -116,7 +162,7 @@ def build_lut(look, kappa_ref=0.1, logn_ref=-1.5, slope=2.5, glow=0.0, num=256, 
     if wind_shift:
         w = np.clip((wind_pivot[1] - logn) / (wind_pivot[1] - wind_pivot[0]), 0, 1)
         logn = logn - wind_shift * w  # effective density: the wind looks as if it were |shift| dex denser/thinner
-    b_name = {"density": "logT", "phase": "logT", "velocity": "vr"}[look]
+    b_name = {"density": "logT", "phase": "logT", "velocity": "vr", "xray": "logT"}[look]
     b = np.linspace(*B_RANGES[b_name], num)[None, :] * np.ones((num, 1))
     if kappa_knee is None:
         kappa = kappa_of_logn(logn, kappa_ref, logn_ref, slope)
@@ -129,16 +175,32 @@ def build_lut(look, kappa_ref=0.1, logn_ref=-1.5, slope=2.5, glow=0.0, num=256, 
         kappa = kappa * 10.0 ** (np.log10(hot_fade) * hot)
     if look == "density":
         colour = _ramp(logn - ramp_shift, DENSITY_STOPS)
+    elif look == "xray":  # emission map in 3D: the wind is transparent, only the dense disk absorbs (dark lane)
+        disk = np.clip((logn + 1.5) / 1.0, 0, 1)
+        kappa = kappa * disk * disk * (3 - 2 * disk)
+        colour = np.broadcast_to(np.array([0.025, 0.02, 0.02]), logn.shape + (3,)).copy()
     elif look == "phase":
         colour = _ramp(b, TEMPERATURE_STOPS)
     else:
         colour = _ramp(b, VELOCITY_STOPS)
     if dense_dim is None:
-        dense_dim = 0.0 if look == "density" else 0.8
+        dense_dim = 0.0 if look in ("density", "xray") else 0.8
     if dense_dim:
         w = np.clip((logn - dense_range[0]) / (dense_range[1] - dense_range[0]), 0, 1)[..., None]
         colour = colour * (1 - dense_dim * w) * (1 - w + w * np.asarray(dense_tint))
     glow_rgb = glow * colour * np.sqrt(kappa)[..., None]  # pure emission, independent of opacity
+    if xray > 0 and b_name == "logT":  # true (unshifted) density: the X-ray glow is physical emissivity
+        logn_true = np.linspace(*LOGN_RANGE, num)[:, None] * np.ones((1, num))
+        log_eps = xray_log10_emissivity(logn_true, b)
+        rel = np.minimum(10.0 ** (xray_gamma * (log_eps - xray_ref)), 1e3)
+        # the xray look colours by emissivity like our maps (inferno over xray_span dex); others use one colour
+        tint = _inferno((log_eps - xray_ref + xray_span) / xray_span) if look == "xray" else np.asarray(xray_rgb)
+        glow_rgb = glow_rgb + xray * rel[..., None] * tint
+    if halpha > 0 and b_name == "logT":
+        logn_true = np.linspace(*LOGN_RANGE, num)[:, None] * np.ones((1, num))
+        rel = np.minimum(10.0 ** (halpha_gamma * (halpha_log10_emissivity(logn_true, b) - halpha_ref)), 1e3)
+        rel = rel * (logn_true < halpha_max_logn)  # outflow filaments only: the dense disk would glow as a slab
+        glow_rgb = glow_rgb + halpha * rel[..., None] * np.array([1.0, 0.12, 0.08])
     lut = np.concatenate([colour, kappa[..., None], glow_rgb], axis=-1).astype(np.float32)
     return lut, b_name
 
@@ -401,6 +463,19 @@ def wind_logn_p90(logn, height_kpc=1.0, samples=128, q=90):
     return float(np.percentile(sub[:, :, np.abs(z) > height_kpc], q))
 
 
+def xray_reference(logn, logT, samples=128, q=99.5, fn=None, zmin=0.5):
+    """q-th percentile of log10 X-ray emissivity in the outflow (0.5 < |z| < 6 kpc), from a strided subsample."""
+    nx, _, nz = logn.shape
+    s = max(1, nx // samples)
+    a = np.asarray(logn[::s, ::s, ::s], np.float32)
+    t = np.asarray(logT[::s, ::s, ::s], np.float32)
+    z = np.abs((np.arange(a.shape[2]) * s + 0.5) * 20.0 / nz - 10.0)
+    sel = (z > zmin) & (z < 6.0)
+    values = (fn or xray_log10_emissivity)(a[:, :, sel], t[:, :, sel])
+    values = values[values > -59]
+    return float(np.percentile(values, q)) if values.size else -30.0
+
+
 class Scene:
     """One volume on the device with a transfer function; render any number of views of it."""
 
@@ -409,7 +484,7 @@ class Scene:
                  chunk=1 << 16, auto=False, light_strength=0.0, light_radius=0.3, light_rgb=(1.0, 0.72, 0.45),
                  light_tau=1.0, light_pos=(0.0, 0.0, 0.0), light_grid=(128, 128, 256), light_kappa_max=2.0,
                  cyl_fade=0.0, **tf):
-        b_name = {"density": "logT", "phase": "logT", "velocity": "vr"}[look]
+        b_name = {"density": "logT", "phase": "logT", "velocity": "vr", "xray": "logT"}[look]
         self.meta, arrays = load_volume(volume_dir, ("logn", b_name))
         if auto is not False:  # follow the wind: shift ramp + opacity by its density relative to the tuning run
             # True: measure on this volume; a number: a shift fixed elsewhere (time-lapse: from the first frame)
@@ -420,6 +495,12 @@ class Scene:
             self.auto_shift = shift
             tf["wind_shift"] = shift  # wind only: the disk keeps its colours and opacity
             print(f"  auto: wind log n p90 shift {shift:+.2f} dex", flush=True)
+        if tf.get("xray", 0) > 0 and "xray_ref" not in tf:  # normalise to this snapshot's bright wind
+            tf["xray_ref"] = xray_reference(arrays["logn"], arrays[b_name])
+            print(f"  xray: reference log10 eps {tf['xray_ref']:.2f} (p99.5 at 0.5 < |z| < 6 kpc)", flush=True)
+        if tf.get("halpha", 0) > 0 and "halpha_ref" not in tf:
+            tf["halpha_ref"] = xray_reference(arrays["logn"], arrays[b_name], fn=halpha_log10_emissivity, zmin=0.7)
+            print(f"  halpha: reference log10 eps {tf['halpha_ref']:.2f}", flush=True)
         lut, _ = build_lut(look, kappa_ref, logn_ref, slope, glow, ramp_shift=ramp_shift, **tf)
         box = np.asarray(self.meta["box_kpc"], float)
         dx = float(self.meta["dx_kpc"])
@@ -519,7 +600,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--preset", choices=sorted(PRESETS), default=None, help="named look (flags override)")
     parser.add_argument("volume_dir", nargs="+", help="one volume (still/orbit) or several (time-lapse)")
-    parser.add_argument("--look", default="density", choices=("density", "phase", "velocity"))
+    parser.add_argument("--look", default="density", choices=("density", "phase", "velocity", "xray"))
     parser.add_argument("--size", default="360x640", help="WxH")
     parser.add_argument("--elev", type=float, default=10.0)
     parser.add_argument("--azim", type=float, default=30.0)
@@ -532,6 +613,10 @@ def main():
     parser.add_argument("--slope", type=float, default=2.5, help="opacity rise per dex of n")
     parser.add_argument("--ramp-shift", type=float, default=0.0, help="shift the density colour ramp [dex]")
     parser.add_argument("--glow", type=float, default=0.0)
+    parser.add_argument("--xray", type=float, default=0.0, help="AtomDB 0.3-2 keV emission glow strength (0 = off)")
+    parser.add_argument("--xray-gamma", type=float, default=0.5, help="compression of the X-ray dynamic range")
+    parser.add_argument("--xray-rgb", default="0.72,0.32,1.0", help="X-ray false colour")
+    parser.add_argument("--halpha", type=float, default=0.0, help="H-alpha (5e3-5e4 K) emission glow, red")
     parser.add_argument("--hot-fade", type=float, default=1.0, help="opacity factor for T > 2e6 K gas")
     parser.add_argument("--kappa-knee", type=float, default=None, help="log n where the opacity slope softens")
     parser.add_argument("--slope-hi", type=float, default=1.0, help="opacity slope above the knee")
@@ -578,6 +663,9 @@ def main():
                     auto=args.wind_shift if args.wind_shift is not None else args.auto, hot_fade=args.hot_fade,
                     light_strength=args.light, light_radius=args.light_radius, light_tau=args.light_tau,
                     light_kappa_max=args.light_kappa_max, cyl_fade=args.cyl_fade, auto_q=args.auto_q,
+                    **({"xray": args.xray, "xray_gamma": args.xray_gamma,
+                        "xray_rgb": tuple(float(v) for v in args.xray_rgb.split(","))} if args.xray > 0 else {}),
+                    **({"halpha": args.halpha} if args.halpha > 0 else {}),
                     **({"wind_pivot": tuple(float(v) for v in args.wind_pivot.split(","))} if args.wind_pivot else {}),
                     light_rgb=tuple(float(v) for v in args.light_rgb.split(",")),
                     kappa_knee=args.kappa_knee, slope_hi=args.slope_hi, dense_dim=args.dense_dim,

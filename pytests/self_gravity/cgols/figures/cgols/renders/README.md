@@ -10,6 +10,7 @@ arXiv:2002.10468, made with NVIDIA IndeX), produced with our own JAX ray marcher
 | `A2048_t35Myr_cgols4_2160x3840.png` | 4K hero of A-2048 at the end of the starburst |
 | `timeseries_C1024_A2048_cgols4.png` | overview of the eight stills |
 | `*_orbit360.mp4` | 360-frame camera orbits at 35 Myr (30 fps, 1080x1920) |
+| `C1024_timeorbit_1-75Myr_cgols4.mp4` | one camera orbit (1 deg/frame) while time runs 1.25 -> 75 Myr: 6 frames per checkpoint, neighbouring checkpoints cross-faded (`cgols_render_timeorbit.py`) |
 
 ## How they were made
 
@@ -30,10 +31,15 @@ arXiv:2002.10468, made with NVIDIA IndeX), produced with our own JAX ray marcher
 - **Per-run colour shift:** A-2048's wind is ~0.4 dex thinner than C-1024's, so its colours are shifted to match
   (`--auto` / `--wind-shift`, thin gas only; the disk keeps its look). A-2048 also uses `--hot-fade` (hot gas
   more transparent) so its dense, smooth, hot inner free wind does not hide the nozzle.
-- **All four times share one brightness scale per run.** After the starburst (SFR 20 -> 5 Msun/yr at 40-45 Myr)
-  the volume-filling wind thins ~4-5x (median log n, |z| > 1 kpc), so at 50 and 75 Myr it renders nearly black:
-  that fading is real, but exaggerated by the steep (~n^3) opacity. Brightness-normalised late frames
-  (`--auto --auto-q 50`; A-2048 `--wind-shift=-1.0 --wind-pivot=-3.0,-1.6`) are planned.
+- **20 and 35 Myr share one brightness scale per run; 50 and 75 Myr are brightness-normalised per frame.**
+  After the starburst (SFR 20 -> 5 Msun/yr at 40-45 Myr) the volume-filling wind thins ~4-5x (median log n,
+  |z| > 1 kpc) and would render nearly black on the fixed scale (the steep ~n^3 opacity exaggerates the fading).
+  The late frames therefore shift the thin gas to the median wind density of that frame (C-1024:
+  `--auto --auto-q 50`; A-2048 50 Myr: `--wind-shift=-1.0 --wind-pivot=-3.0,-1.6 --hot-fade 0.3`; A-2048 75 Myr:
+  `--wind-shift=-1.3 --wind-pivot=-3.4,-1.6 --glow 0.6`, the most strongly brightened frame). Do not read their
+  brightness quantitatively.
+- **The time-orbit** uses the fixed look up to 40 Myr and then follows the thinning wind smoothly (median-based
+  shift, running mean over 5 checkpoints), so its late brightness is normalised too.
 - **No physics outside the box:** the outflow leaves the 10x10x20 kpc domain through the side walls; frames show
   the whole box (no cylindrical cut), so the wind simply runs off the frame edges.
 - Both runs are adiabatic: no cool clouds condense out of the mixed gas, unlike in CGOLS IV/V (radiative
