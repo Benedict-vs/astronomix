@@ -355,6 +355,8 @@ from astronomix.option_classes.simulation_config import (
     finalize_config,
 )
 from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_KERNEL_FULL_GRID,
+    CLUSTER_KERNEL_LOCAL_BOX,
     CLUSTER_MOMENTUM_CLUSTER,
     CLUSTER_MOMENTUM_REST,
     CLUSTER_MOMENTUM_SCALE,
@@ -366,6 +368,7 @@ from astronomix._modules._cgols_wind.cgols_wind_options import (
     CGOLSSmoothDiskParams,
     CGOLSWindConfig,
     CGOLSWindParams,
+    cluster_box_cells,
 )
 from astronomix._modules._cgols_wind.cluster_placement import (
     MASS_EQUAL,
@@ -683,7 +686,9 @@ INJ_RAD = 300 # pc
 #
 # Resolution: model C needs CGOLS_DIM >= 256 (R = 119 pc is 1.5 dx at 128,
 # the cholla preset's 150 pc 1.9 dx); 128 is a smoke test. The edge weighting
-# keeps the injected totals exact at any resolution.
+# keeps the injected totals exact down to R = 0.37 dx; a smaller sphere can
+# fall between the cell centres, get no cell at all and inject nothing (a
+# warning is printed).
 #
 # CGOLS_FEEDBACK=smooth is the N -> infinity limit of the default model C at
 # fixed total injection volume (R = 300 pc / N^(1/3) -> 0, the cluster-number
@@ -839,6 +844,18 @@ CLUSTER_COROTATE = _cluster_knob("COROTATE") == "1"
 # slots that is far noisier than M82's ~1e4 clusters).
 CLUSTER_MASS_FUNCTION = _cluster_knob("MASS_FUNCTION")
 CLUSTER_SEED = int(_cluster_knob("SEED"))
+# How the cluster spheres are evaluated. "full" (default, the path of every
+# run so far): each cluster's weights on the whole grid, one cluster after the
+# other, ~1.5% of a hydro step per cluster (C512: 0.85 s/step at N = 1,
+# 2.45 s/step at N = 128). "local": one small cube of cells per cluster,
+# merged and written into the grid once - the cost no longer grows with the
+# grid and hardly with N, which is what N ~ 1000 needs. Both give the same
+# source to rounding (~1e-7); "local" needs CGOLS_CLUSTER_OVERLAP=sum.
+CLUSTER_KERNEL = os.environ.get("CGOLS_CLUSTER_KERNEL", "full")
+if CLUSTER_KERNEL not in ("full", "local"):
+    raise ValueError(f"CGOLS_CLUSTER_KERNEL must be 'full' or 'local', got {CLUSTER_KERNEL!r}")
+if CLUSTERS and CLUSTER_KERNEL == "local" and CLUSTER_OVERLAP != "sum":
+    raise ValueError("CGOLS_CLUSTER_KERNEL=local needs CGOLS_CLUSTER_OVERLAP=sum")
 if SMOOTH:
     # A smooth profile needs a finite surface density at R = 0 and a finite
     # vertical extent.
@@ -1665,10 +1682,23 @@ def build_cgols_cluster_params():
         f" in R < {CLUSTER_RMAX_PC:.4g} pc, "
         f"{CLUSTER_VERTICAL} in |z| <= {CLUSTER_ZMAX_PC:.4g} pc, {CLUSTER_REDRAW} re-draws "
         f"every {CLUSTER_LIFETIME_MYR:.4g} Myr from {CLUSTER_START_MYR:.4g} Myr, "
-        f"overlap {CLUSTER_OVERLAP}"
+        f"overlap {CLUSTER_OVERLAP}, kernel {CLUSTER_KERNEL}"
+        + (
+            f" ({cluster_box_cells(CLUSTER_RADIUS_PC, 10_000.0 / RESOLUTION)}^3-cell cubes)"
+            if CLUSTER_KERNEL == "local"
+            else ""
+        )
     )
     table = cluster_table(clusters)
     rprint(summary)
+    # A cell is weighted if its centre is within R + dx / 2 of the cluster; the
+    # farthest a point can be from every cell centre is sqrt(3) / 2 dx.
+    if CLUSTER_RADIUS_PC < (3**0.5 - 1) / 2 * 10_000.0 / RESOLUTION:
+        rprint(
+            f"WARNING: R = {CLUSTER_RADIUS_PC:.4g} pc is below 0.37 dx "
+            f"(dx = {10_000.0 / RESOLUTION:.4g} pc): clusters that fall between "
+            "the cell centres inject nothing, so the total rates are not reached."
+        )
     rprint("  (code units: kpc, rad, kpc/(100 km/s); birth in code time)")
     rprint(table)
     if RANK0:
@@ -2304,6 +2334,18 @@ def build_config():
                         "rest": CLUSTER_MOMENTUM_REST,
                         "cluster": CLUSTER_MOMENTUM_CLUSTER,
                     }[CLUSTER_MOMENTUM],
+                    # The cube of one cluster, in cells of this grid (the box
+                    # is 10 kpc wide); only the local kernel uses it.
+                    **(
+                        dict(
+                            cluster_kernel=CLUSTER_KERNEL_LOCAL_BOX,
+                            cluster_box_cells=cluster_box_cells(
+                                CLUSTER_RADIUS_PC, 10_000.0 / RESOLUTION
+                            ),
+                        )
+                        if CLUSTERS and CLUSTER_KERNEL == "local"
+                        else dict(cluster_kernel=CLUSTER_KERNEL_FULL_GRID)
+                    ),
                 )
                 if CLUSTERS or SMOOTH
                 else {}

@@ -25,6 +25,12 @@ their N -> infinity limit, a static axisymmetric profile Sigma(R) h(z) (see
 :func:`_smooth_disk_profile`), and otherwise shares the cluster path. The
 central-sphere path is unchanged by either option.
 
+The cluster spheres are evaluated either on the whole grid, one cluster after
+the other (``CLUSTER_KERNEL_FULL_GRID``, cost proportional to the number of
+clusters), or in a small cube around every cluster
+(``CLUSTER_KERNEL_LOCAL_BOX``, :func:`_cluster_profile_local_boxes`, cost
+independent of the grid), which is what makes ~1000 clusters affordable.
+
 Structured after ``_stellar_wind.stellar_wind._wind_ei3D_source``:
 operates on the conserved state and returns a dt-scaled source term for
 the finite-difference RK integrators.
@@ -35,16 +41,28 @@ from typing import Union
 
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 from jaxtyping import Array, Float
 
 # astronomix constants
 from astronomix._modules._cgols_wind.cgols_wind_options import (
+    CLUSTER_KERNEL_LOCAL_BOX,
     CLUSTER_MOMENTUM_CLUSTER,
     CLUSTER_MOMENTUM_REST,
     CLUSTER_OVERLAP_SUM,
     CLUSTER_OVERLAP_UNION,
     CLUSTER_SPHERES,
     SMOOTH_DISK,
+)
+
+# astronomix sharding helpers
+from astronomix._pallas_helpers import (
+    _current_pallas_mesh,
+    _current_pallas_spec,
+    _default_state_pspec,
+    _spatial_sharded_axes,
+    _with_string_axis_names,
+    shard_map,
 )
 
 # astronomix containers
@@ -338,6 +356,28 @@ def _cluster_injection_profile(
         velocity_y = orbital_speed * jnp.cos(azimuth)
         half_speed2 = 0.5 * (velocity_x**2 + velocity_y**2)
 
+    if config.cgols_wind_config.cluster_kernel == CLUSTER_KERNEL_LOCAL_BOX:
+        if overlap != CLUSTER_OVERLAP_SUM:
+            raise NotImplementedError(
+                "CLUSTER_KERNEL_LOCAL_BOX supports CLUSTER_OVERLAP_SUM only."
+            )
+        if with_velocity:
+            slot_moments = jnp.stack(
+                [jnp.ones_like(velocity_x), velocity_x, velocity_y, half_speed2],
+                axis=-1,
+            )
+        else:
+            slot_moments = jnp.ones_like(rate_fraction)[:, None]
+        fields = _cluster_profile_local_boxes(
+            (center_x, center_y, center_z),
+            rate_fraction,
+            slot_moments,
+            cluster_radius,
+            config,
+            helper_data,
+        )
+        return fields if with_velocity else fields[0]
+
     if overlap == CLUSTER_OVERLAP_SUM:
         volumes = jax.lax.map(
             lambda slot: jnp.sum(_sphere_weights(slot)), jnp.arange(num_slots)
@@ -385,6 +425,282 @@ def _cluster_injection_profile(
         return profile
 
     raise ValueError(f"Unknown CGOLS cluster_overlap mode {overlap}.")
+
+
+#: Sort key of a cube cell that injects nothing: behind every cell index.
+_NO_CELL = 0xFFFFFFFF
+
+
+def _local_box_fields(
+    centers,
+    rate_fraction,
+    slot_moments,
+    cluster_radius,
+    axis_centers,
+    origin,
+    local_shape,
+    dx,
+    box,
+):
+    """The cluster profile on one block of the grid, from one cube per cluster.
+
+    Every cluster only has non-zero weights within ``cluster_radius + dx / 2``
+    of its centre, i.e. inside a cube of ``box`` cells per axis. The weights
+    are evaluated on those cubes alone, ``(num_slots, box, box, box)`` values
+    instead of ``num_slots`` passes over the grid, and written into the block
+    in three steps that keep the result independent of the order in which the
+    device applies the updates:
+
+    1. the cube cells of all clusters are sorted by their cell index in the
+       block (a stable sort, so the clusters of one cell stay in slot order);
+    2. a segmented prefix sum adds up the contributions that share a cell, so
+       the last entry of every run holds the cell's total;
+    3. those last entries, one per cell, are scattered into the block.
+
+    A scatter-add of the unsorted cubes would be the same sum, but where three
+    or more spheres overlap the GPU would add them in a different order from
+    run to run, and the result would no longer be reproducible bit for bit.
+
+    The per-cluster volume is summed over the cluster's whole cube on the
+    global grid, read from the replicated cell-centre axes, so every block
+    normalises a cluster by the bit-identical volume wherever the cluster's
+    cells lie.
+
+    Args:
+        centers: The cluster centres in box coordinates, three ``(num_slots,)``
+            arrays.
+        rate_fraction: Each slot's share of the total rate, ``(num_slots,)``.
+        slot_moments: Per-slot factors of the returned fields,
+            ``(num_slots, num_fields)``: ones for the profile, the cluster
+            velocity for its momentum moments.
+        cluster_radius: The radius of the injection spheres.
+        axis_centers: The cell centres of the global grid along x, y and z.
+        origin: The global index of the block's first cell along each axis, or
+            ``None`` if the block is the whole grid.
+        local_shape: The shape of the block (static).
+        dx: The grid spacing.
+        box: Cells per axis of one cluster's cube (static).
+
+    Returns:
+        One array of ``local_shape`` per column of ``slot_moments``: the
+        normalised profile times that column, summed over the clusters.
+    """
+    num_cells_x, num_cells_y, num_cells_z = local_shape
+    box_offsets = jnp.arange(box, dtype=jnp.int32)
+
+    def cube_weights(first_cells):
+        """Edge weights of every cluster on its cube starting at ``first_cells``."""
+        offsets2 = []
+        for axis in range(3):
+            cells = first_cells[axis][:, None] + box_offsets[None, :]
+            offsets2.append((axis_centers[axis][cells] - centers[axis][:, None]) ** 2)
+        distance = jnp.sqrt(
+            offsets2[0][:, :, None, None]
+            + offsets2[1][:, None, :, None]
+            + offsets2[2][:, None, None, :]
+        )
+        return jnp.clip((cluster_radius + dx / 2 - distance) / dx, 0.0, 1.0)
+
+    # The cube starts at the last cell centre at or below the lower edge of
+    # the sphere's reach and is kept on the grid (a cluster near the boundary
+    # only loses the cells that do not exist).
+    global_first = [
+        jnp.clip(
+            jnp.floor(
+                (centers[axis] - (cluster_radius + dx / 2) - axis_centers[axis][0]) / dx
+            ).astype(jnp.int32),
+            0,
+            axis_centers[axis].shape[0] - box,
+        )
+        for axis in range(3)
+    ]
+    global_weights = cube_weights(global_first)
+    volumes = jnp.sum(global_weights, axis=(1, 2, 3)) * dx**3
+    # A cluster entirely off the grid (volume 0) injects nothing.
+    share = rate_fraction / jnp.maximum(volumes, 1e-30)
+    # The cube must hold the sphere (cgols_wind_options.cluster_box_cells);
+    # poison the source rather than truncate the spheres silently.
+    share = jnp.where(2.0 * cluster_radius / dx + 2.5 > box, jnp.nan, share)
+
+    if origin is None:
+        local_first = global_first
+        weights = global_weights
+    else:
+        # The same cube shifted into the block: the weights come from the
+        # true cell centres, so the cells that the shift adds carry weight 0
+        # and the cluster's cells in the block are all inside the cube.
+        local_first = [
+            jnp.clip(global_first[axis] - origin[axis], 0, local_shape[axis] - box)
+            for axis in range(3)
+        ]
+        weights = cube_weights([local_first[axis] + origin[axis] for axis in range(3)])
+    values = share[:, None, None, None] * weights
+
+    # Cell index in the block of every cube cell.
+    cell_x, cell_y, cell_z = (
+        (local_first[axis][:, None] + box_offsets[None, :]).astype(jnp.uint32)
+        for axis in range(3)
+    )
+    keys = (
+        cell_x[:, :, None, None] * num_cells_y + cell_y[:, None, :, None]
+    ) * num_cells_z + cell_z[:, None, None, :]
+    keys = jnp.where(values != 0, keys, jnp.uint32(_NO_CELL)).reshape(-1)
+
+    order = jnp.argsort(keys, stable=True)
+    sorted_keys = keys[order]
+    sorted_values = (
+        values[..., None] * slot_moments[:, None, None, None, :]
+    ).reshape(-1, slot_moments.shape[-1])[order]
+
+    def add_same_cell(left, right):
+        left_key, left_sum = left
+        right_key, right_sum = right
+        same_cell = (left_key == right_key)[..., None]
+        return right_key, jnp.where(same_cell, left_sum + right_sum, right_sum)
+
+    _, cell_sums = jax.lax.associative_scan(add_same_cell, (sorted_keys, sorted_values))
+
+    next_keys = jnp.concatenate(
+        [sorted_keys[1:], jnp.full((1,), _NO_CELL, dtype=jnp.uint32)]
+    )
+    is_cell_total = (sorted_keys != next_keys) & (sorted_keys != jnp.uint32(_NO_CELL))
+    # Every other entry gets an index beyond the block and is dropped.
+    index_x = jnp.where(
+        is_cell_total,
+        (sorted_keys // (num_cells_y * num_cells_z)).astype(jnp.int32),
+        num_cells_x,
+    )
+    index_y = ((sorted_keys // num_cells_z) % num_cells_y).astype(jnp.int32)
+    index_z = (sorted_keys % num_cells_z).astype(jnp.int32)
+    return tuple(
+        jnp.zeros(local_shape, dtype=cell_sums.dtype)
+        .at[index_x, index_y, index_z]
+        .add(cell_sums[:, field], mode="drop")
+        for field in range(cell_sums.shape[-1])
+    )
+
+
+def _cluster_profile_local_boxes(
+    centers,
+    rate_fraction,
+    slot_moments,
+    cluster_radius,
+    config: SimulationConfig,
+    helper_data: HelperData,
+):
+    """``CLUSTER_KERNEL_LOCAL_BOX``: the cluster profile from one cube per cluster.
+
+    The arithmetic is :func:`_local_box_fields`. On one device it runs on the
+    whole grid. On a device mesh it runs inside a ``shard_map``, once per
+    block of the grid: every device builds only its own block, from the
+    replicated cluster table and cell-centre axes and its position in the
+    mesh. Nothing is exchanged between devices; in particular no array of the
+    size of the grid is gathered, which a scatter into the sharded global
+    array would cause.
+
+    Args:
+        centers: The cluster centres in box coordinates, three ``(num_slots,)``
+            arrays.
+        rate_fraction: Each slot's share of the total rate, ``(num_slots,)``.
+        slot_moments: Per-slot factors of the returned fields,
+            ``(num_slots, num_fields)``.
+        cluster_radius: The radius of the injection spheres.
+        config: The simulation configuration.
+        helper_data: The helper data (uses ``cell_centers_x/y/z``).
+
+    Returns:
+        One array of the (padded) grid shape per column of ``slot_moments``.
+    """
+    dx = config.grid_spacing
+    box = config.cgols_wind_config.cluster_box_cells
+    axis_centers = (
+        helper_data.cell_centers_x,
+        helper_data.cell_centers_y,
+        helper_data.cell_centers_z,
+    )
+    global_shape = tuple(int(axis.shape[0]) for axis in axis_centers)
+    if box < 3:
+        raise ValueError(
+            "CLUSTER_KERNEL_LOCAL_BOX needs CGOLSWindConfig.cluster_box_cells "
+            "(see cgols_wind_options.cluster_box_cells)."
+        )
+
+    # The spatial axes that the active device mesh splits, as for the Pallas
+    # kernels: (array axis of the (var, x, y, z) state, mesh axis, devices).
+    mesh = _current_pallas_mesh()
+    split_axes = []
+    if mesh is not None and mesh.size > 1:
+        spec = _current_pallas_spec()
+        if spec is None:
+            spec = _default_state_pspec(mesh, 3)
+        spec = PartitionSpec(*spec, *((None,) * (4 - len(spec))))
+        # String axis names, which jax.lax.axis_index needs.
+        mesh, spec = _with_string_axis_names(mesh, spec)
+        split_axes = _spatial_sharded_axes(mesh, spec, 3)
+
+    local_shape = list(global_shape)
+    for array_axis, _, num_devices in split_axes:
+        if local_shape[array_axis - 1] != global_shape[array_axis - 1]:
+            raise NotImplementedError(
+                "CLUSTER_KERNEL_LOCAL_BOX supports one mesh axis per array axis only."
+            )
+        if global_shape[array_axis - 1] % num_devices:
+            raise ValueError(
+                f"{global_shape[array_axis - 1]} cells do not split evenly over "
+                f"{num_devices} devices."
+            )
+        local_shape[array_axis - 1] //= num_devices
+    local_shape = tuple(local_shape)
+    if min(local_shape) < box:
+        raise ValueError(
+            f"A {local_shape} block is smaller than the {box}-cell cluster cube."
+        )
+    if local_shape[0] * local_shape[1] * local_shape[2] >= _NO_CELL:
+        raise ValueError(f"A {local_shape} block has too many cells for uint32 keys.")
+
+    cluster_radius = jnp.asarray(cluster_radius)
+    if not split_axes:
+        return _local_box_fields(
+            centers,
+            rate_fraction,
+            slot_moments,
+            cluster_radius,
+            axis_centers,
+            None,
+            local_shape,
+            dx,
+            box,
+        )
+
+    def block_fields(
+        center_x, center_y, center_z, shares, moments, radius, axis_x, axis_y, axis_z
+    ):
+        """The profile of this device's block."""
+        origin = [jnp.int32(0)] * 3
+        for array_axis, mesh_axis_name, _ in split_axes:
+            origin[array_axis - 1] = (
+                jax.lax.axis_index(mesh_axis_name).astype(jnp.int32)
+                * local_shape[array_axis - 1]
+            )
+        return _local_box_fields(
+            (center_x, center_y, center_z),
+            shares,
+            moments,
+            radius,
+            (axis_x, axis_y, axis_z),
+            origin,
+            local_shape,
+            dx,
+            box,
+        )
+
+    block_spec = PartitionSpec(*spec[1:4])
+    return shard_map(
+        block_fields,
+        mesh=mesh,
+        in_specs=(PartitionSpec(),) * 9,
+        out_specs=(block_spec,) * int(slot_moments.shape[-1]),
+    )(*centers, rate_fraction, slot_moments, cluster_radius, *axis_centers)
 
 
 def _cgols_cluster_source(

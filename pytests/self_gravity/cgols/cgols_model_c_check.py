@@ -15,6 +15,11 @@ random padded state at several times across the schedule, checking that
   - no other variable receives a source;
   - the wind-onset dt limit is finite while the source is on (+inf before).
 
+The "local ..." sets (CGOLS_CLUSTER_KERNEL=local, one small cube of cells per
+cluster instead of one pass over the grid per cluster) run the same checks
+and, in addition, compare every cell of the source and the dt limit with the
+full-grid kernel on the same clusters.
+
 The "smooth ..." sets (CGOLS_FEEDBACK=smooth, model C's N -> infinity limit)
 instead compare every cell's mass, momentum and energy source with an
 independent numpy evaluation of Sigma(R) h(z) and v_c(R), and check by
@@ -79,6 +84,35 @@ OPTION_SETS = {
     "cluster + union": {"CGOLS_CLUSTER_OVERLAP": "union"},
     "cholla + cluster": {"CGOLS_CLUSTER_PRESET": "cholla", "CGOLS_CLUSTER_MOMENTUM": "cluster", "CGOLS_CLUSTER_COROTATE": "1"},
     "cluster + power law": {"CGOLS_CLUSTER_MASS_FUNCTION": "power_law"},
+    "local (default)": {"CGOLS_CLUSTER_KERNEL": "local"},
+    "local cholla": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_PRESET": "cholla"},
+    "local m82": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_PRESET": "m82"},
+    "local scale": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_MOMENTUM": "scale"},
+    "local rest": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_MOMENTUM": "rest"},
+    "local static": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_COROTATE": "0"},
+    "local power law": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_CLUSTER_MASS_FUNCTION": "power_law"},
+    "local disk-wide": {
+        "CGOLS_CLUSTER_KERNEL": "local",
+        "CGOLS_CLUSTER_RMAX_PC": "4500",
+        "CGOLS_CLUSTER_RSCALE_PC": "1000",
+    },
+    "local 128 clusters": {"CGOLS_CLUSTER_KERNEL": "local", "CGOLS_NUM_CLUSTERS": "128"},
+    # Many heavily overlapping clusters. At CGOLS_DIM=64 (dx = 156 pc) the
+    # radius is kept at 119 pc: a sphere of R < 0.37 dx can fall between the
+    # cell centres and inject nothing (either kernel), and the fixed-volume
+    # radius of 300 clusters is 0.29 dx.
+    "local 300 clusters": {
+        "CGOLS_CLUSTER_KERNEL": "local",
+        "CGOLS_NUM_CLUSTERS": "300",
+        "CGOLS_CLUSTER_RADIUS_PC": "119",
+    },
+    # Budgets only: the full-grid reference of 1000 clusters takes ~15 min to
+    # compile on the CPU.
+    "local 1000 clusters": {
+        "CGOLS_CLUSTER_KERNEL": "local",
+        "CGOLS_NUM_CLUSTERS": "1000",
+        "CGOLS_CLUSTER_RADIUS_PC": "119",
+    },
     "smooth (default)": {"CGOLS_FEEDBACK": "smooth"},
     "smooth, static": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_COROTATE": "0"},
     "smooth, scale": {"CGOLS_FEEDBACK": "smooth", "CGOLS_CLUSTER_MOMENTUM": "scale"},
@@ -134,6 +168,18 @@ def child():
         config, padded=True, requirements=_helper_data_requirements(config)
     )
     wind_params = cgols.build_cgols_wind_params()
+    # The local-cube kernel is checked cell by cell against the full-grid one.
+    config_full_grid = None
+    if cgols.CLUSTERS and cgols.CLUSTER_KERNEL == "local" and cgols.NUM_CLUSTERS <= 300:
+        from astronomix._modules._cgols_wind.cgols_wind_options import (
+            CLUSTER_KERNEL_FULL_GRID,
+        )
+
+        config_full_grid = config._replace(
+            cgols_wind_config=config.cgols_wind_config._replace(
+                cluster_kernel=CLUSTER_KERNEL_FULL_GRID
+            )
+        )
     dx = config.grid_spacing
     g = config.num_ghost_cells
     padded = (rv.num_vars,) + tuple(n + 2 * g for n in shape[1:])
@@ -258,6 +304,36 @@ def child():
         )
         ok_limit = np.isinf(dt_limit) if edot == 0 else np.isfinite(dt_limit)
         worst = max(worst, rel_m, rel_e, dke if dke > 1e-5 else 0.0, other, 0.0 if ok_limit else 1.0)
+        if config_full_grid is not None:
+            # Same clusters through the full-grid kernel: every variable of
+            # the source relative to its peak, the set of sourced cells, and
+            # the dt limit.
+            reference = _cgols_wind_source(
+                wind_params, state, dt, t, config_full_grid, helper_data, rv
+            )
+            kernel_diff = 0.0
+            for index in range(rv.num_vars):
+                ref = np.asarray(reference[index], np.float64)
+                new = np.asarray(source[index], np.float64)
+                kernel_diff = max(
+                    kernel_diff, float(np.max(np.abs(new - ref))) / max(np.max(np.abs(ref)), 1e-300)
+                )
+            cells_differ = int(
+                np.sum((np.asarray(reference[rv.density_index]) != 0) != (np.asarray(source[rv.density_index]) != 0))
+            )
+            reference_limit = float(
+                cgols_wind_time_step_limit(
+                    wind_params, state, t, 0.9, 5 / 3, config_full_grid, helper_data, rv
+                )
+            )
+            limit_diff = (
+                abs(dt_limit / reference_limit - 1) if np.isfinite(reference_limit) else float(np.isfinite(dt_limit))
+            )
+            print(
+                f"    local vs full-grid kernel: max |d source| / peak = {kernel_diff:.1e}, "
+                f"cells sourced by only one {cells_differ}, |d dt limit| = {limit_diff:.1e}"
+            )
+            worst = max(worst, kernel_diff, limit_diff, float(cells_differ))
         print(
             f"  t = {t_myr:5.1f} Myr: |dM/(Mdot dt) - 1| = {rel_m:.1e}, "
             f"|dE/(Edot dt) - 1| = {rel_e:.1e}, max |dKE/KE| (rest: |dm|) = {dke:.1e}, "

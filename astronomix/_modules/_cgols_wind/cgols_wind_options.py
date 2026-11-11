@@ -10,6 +10,7 @@ and the overlap treatment of the cluster spheres, together with the static
 """
 
 # typing
+import math
 from typing import NamedTuple
 
 # jax
@@ -47,6 +48,41 @@ CLUSTER_MOMENTUM_REST = 1
 #: does. For clusters at rest this is CLUSTER_MOMENTUM_REST.
 CLUSTER_MOMENTUM_CLUSTER = 2
 
+# How the profile of the cluster spheres is evaluated.
+#: Every cluster's sphere weights are evaluated on the whole grid, one cluster
+#: after the other (unrolled). The cost and the compiled program grow in
+#: proportion to the number of clusters: about 1.5% of a hydro step per
+#: cluster.
+CLUSTER_KERNEL_FULL_GRID = 0
+#: Every cluster only touches a small cube of ``cluster_box_cells`` cells per
+#: axis around its centre; the cubes are merged and written into the grid
+#: once. The cost is independent of the grid and all but independent of the
+#: number of clusters. Same weights and shares as ``CLUSTER_KERNEL_FULL_GRID``;
+#: the two differ only by rounding (~1e-7 of the peak), in the per-cluster
+#: normalisation volume and in the order of the sum where three or more
+#: spheres overlap. Reproducible bit for bit from run to run.
+#: ``CLUSTER_OVERLAP_SUM`` only.
+CLUSTER_KERNEL_LOCAL_BOX = 1
+
+
+def cluster_box_cells(cluster_radius: float, grid_spacing: float) -> int:
+    """Cells per axis of the cube that holds one cluster sphere.
+
+    A cell has a non-zero edge weight if its centre is closer than
+    ``cluster_radius + grid_spacing / 2`` to the cluster centre, which along
+    one axis are at most ``ceil(2 R / dx) + 2`` cells starting at the first
+    cell centre above ``centre - R - dx / 2``. One more cell absorbs the
+    rounding of that first index.
+
+    Args:
+        cluster_radius: The radius of the injection spheres.
+        grid_spacing: The cell width, in the same unit.
+
+    Returns:
+        The value for ``CGOLSWindConfig.cluster_box_cells``.
+    """
+    return math.ceil(2.0 * cluster_radius / grid_spacing) + 3
+
 
 class CGOLSWindConfig(NamedTuple):
     """Static configuration of the CGOLS-style starburst feedback.
@@ -83,6 +119,16 @@ class CGOLSWindConfig(NamedTuple):
     #: disk: the ejecta move with ``smooth_disk.circular_velocity``). Ignored
     #: for the central sphere.
     cluster_momentum: int = CLUSTER_MOMENTUM_SCALE
+
+    #: How the cluster spheres are evaluated, ``CLUSTER_KERNEL_FULL_GRID`` (the
+    #: default) or ``CLUSTER_KERNEL_LOCAL_BOX``. ``CLUSTER_SPHERES`` only.
+    cluster_kernel: int = CLUSTER_KERNEL_FULL_GRID
+
+    #: Cells per axis of one cluster's cube for ``CLUSTER_KERNEL_LOCAL_BOX``,
+    #: from :func:`cluster_box_cells`. Static, because it is an array shape; a
+    #: value too small for ``cgols_wind_params.clusters.cluster_radius`` turns
+    #: the source into NaN instead of silently truncating the spheres.
+    cluster_box_cells: int = 0
 
 
 class CGOLSClusterParams(NamedTuple):
