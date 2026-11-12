@@ -115,6 +115,7 @@ def integrate(
     snapshots: Optional[SnapshotSpec] = None,
     progress: Optional[Callable] = None,
     monitor: Optional[Callable] = None,
+    monitor_interval: int = 1,
 ):
     """Run a time-integration loop.
 
@@ -132,6 +133,7 @@ def integrate(
         monitor: ``monitor(t, state)`` traced per-step hook (computes its own
             on-device reductions and offloads scalars via ``jax.debug.callback``
             internally), or ``None``.
+        monitor_interval: Call ``monitor`` only on every n-th step (static).
 
     Returns:
         ``(t, state, store, num_iterations)``.  ``store`` is the (possibly
@@ -184,7 +186,17 @@ def integrate(
             jax.debug.callback(progress, t, t_end)
 
         if monitor is not None:
-            monitor(t, state)
+            if monitor_interval <= 1:
+                monitor(t, state)
+            else:
+                # A real conditional, so the reductions and the host callback
+                # of the monitor only run on the steps that report.
+                jax.lax.cond(
+                    num_iterations % monitor_interval == 0,
+                    lambda operands: monitor(*operands),
+                    lambda operands: None,
+                    (t, state),
+                )
 
         if has_snapshots:
             return (t, state, snapshot_index, num_iterations, store, advanced)

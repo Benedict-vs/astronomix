@@ -1147,6 +1147,9 @@ DUAL_ENERGY = os.environ.get("CGOLS_DUAL_ENERGY", "1") == "1"
 # +30% (B) wall time. CGOLS_WENO_Z=0 restores JS. Forward runs only: the Pallas
 # adjoints use JS weights, so cgols_sensitivity.py forces it off.
 WENO_Z = os.environ.get("CGOLS_WENO_Z", "1") == "1"
+# Per-step [diag] line (min/max reductions + a host callback): every n-th step
+# only. 1 (default) reports every step, as every run so far.
+DIAG_EVERY = int(os.environ.get("CGOLS_DIAG_EVERY", "1"))
 # Step retry (upstream PositivityConfig.step_retry): a step that leaves a
 # non-finite value or a non-positive density / pressure is redone from the same
 # state at half the step size (up to 6 times). A safety net behind the wind
@@ -2298,6 +2301,10 @@ def build_config():
         # side of both callbacks), which keeps every rank's program identical.
         progress_bar=(not BENCH_STEPS),
         monitor_diagnostics=(not BENCH_STEPS),
+        # CGOLS_DIAG_EVERY=n: the [diag] line only on every n-th step (default
+        # 1 = every step). Conditional kwarg: the default config stays
+        # byte-identical.
+        **(dict(monitor_diagnostics_interval=DIAG_EVERY) if DIAG_EVERY != 1 else {}),
         # Outflow-only ("diode") boundaries on all six faces, as in the paper:
         # "transmissive boundaries with a 'diode' condition applied to the
         # velocities". A plain OPEN_BOUNDARY lets the static potential pull the

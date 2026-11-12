@@ -1358,6 +1358,7 @@ def _integrate_core(
             else None
         ),
         monitor=_diagnostic_monitor if config.monitor_diagnostics else None,
+        monitor_interval=config.monitor_diagnostics_interval,
     )
 
     # An adaptive loop also stops, instead of spinning forever, when a step can

@@ -622,6 +622,14 @@ class SimulationConfig(NamedTuple):
     #: only); use to localise in time which variable diverges first.
     monitor_diagnostics: bool = False
 
+    #: Evaluate the diagnostics of ``monitor_diagnostics`` only on every n-th
+    #: step (of the current loop; the count restarts with each ``TO_DISK``
+    #: segment). The monitor costs about ten full-grid reductions and a host
+    #: synchronisation per call; 1 (default) keeps the per-step line. With
+    #: n > 1 the printed mass change ``dM`` is the change since the previous
+    #: printed line, i.e. over n steps.
+    monitor_diagnostics_interval: int = 1
+
     #: The number of dimensions of the simulation.
     dimensionality: int = 1
 
