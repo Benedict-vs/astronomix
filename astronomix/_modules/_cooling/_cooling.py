@@ -34,6 +34,7 @@ from jaxtyping import Array, Float
 # jax
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 # neural networks
 import equinox as eqx
@@ -50,7 +51,12 @@ from astronomix._modules._cooling.cooling_options import (
     PIECEWISE_POWER_LAW,
     SIMPLE_POWER_LAW,
     SUBCYCLED_EXPLICIT_COOLING,
+    TABULATED_EXACT_COOLING,
     TOTAL_NUMBER_DENSITY,
+)
+from astronomix._modules._cooling._cooling_tabulated import (
+    build_tabulated_cooling,
+    update_temperature_tabulated,
 )
 from astronomix.option_classes.simulation_config import (
     FIELD_TYPE,
@@ -1719,6 +1725,21 @@ def update_pressure_by_cooling(
                 heating_log10_T_table=cooling_params.heating_log10_T_table,
                 heating_factor_table=cooling_params.heating_factor_table,
             )
+    elif cooling_config.cooling_method == TABULATED_EXACT_COOLING:
+        mu, mu_e, mu_H = get_effective_molecular_weights(
+            hydrogen_mass_fraction,
+            metal_mass_fraction,
+            mean_molecular_weight,
+        )
+        new_temperature = update_temperature_tabulated(
+            density,
+            temperature,
+            time_step,
+            gamma,
+            _volumetric_cooling_prefactor(cooling_curve_config, mu, mu_e, mu_H),
+            heating_rate,
+            cooling_params.tabulated_cooling,
+        )
     else:
         raise ValueError(f"Unknown cooling method: {cooling_config.cooling_method}")
 
@@ -1856,6 +1877,72 @@ def cooling_time_step_limit(
     )
 
     return cooling_params.max_thermal_energy_fraction * jnp.min(t_cool)
+
+
+def tabulated_cooling_from_curve(
+    cooling_curve_config: CoolingCurveConfig,
+    cooling_params,
+    psi_minimum: float,
+    psi_maximum: float,
+    num_psi: int = 512,
+    refinement: int = 2,
+):
+    """
+    Build ``CoolingParams.tabulated_cooling`` for ``TABULATED_EXACT_COOLING``
+    from a piecewise power-law cooling curve and the heating factor table.
+
+    The temperature nodes are the nodes of the cooling table, each bin split
+    into ``refinement`` (the integrator takes the net rate as linear in T
+    between two nodes). ``psi`` is the per-cell heating over density,
+    ``heating_rate_field / (prefactor * density)`` with the prefactor of
+    :func:`_volumetric_cooling_prefactor`; cells outside ``[psi_minimum,
+    psi_maximum]`` use the nearest row, so choose the range generously.
+
+    Args:
+        cooling_curve_config: The cooling-curve configuration
+            (``PIECEWISE_POWER_LAW``).
+        cooling_params: The ``CoolingParams`` (curve and heating tables).
+        psi_minimum: Lowest tabulated psi.
+        psi_maximum: Highest tabulated psi.
+        num_psi: The number of log-spaced psi rows.
+        refinement: Sub-bins per bin of the cooling table.
+
+    Returns:
+        The ``TabulatedCoolingParams``.
+    """
+    if cooling_curve_config.cooling_curve_type != PIECEWISE_POWER_LAW:
+        raise ValueError("tabulated_cooling_from_curve needs a piecewise power-law curve")
+    curve_params = cooling_params.cooling_curve_params
+    log10_T_table = np.asarray(curve_params.log10_T_table, dtype=np.float64)
+    num_nodes = (log10_T_table.shape[0] - 1) * refinement + 1
+    log10_nodes = np.linspace(log10_T_table[0], log10_T_table[-1], num_nodes)
+    dtype = np.asarray(curve_params.log10_T_table).dtype
+    # Keep the end nodes inside the table, where the curve is defined.
+    nodes = np.clip(
+        (10.0**log10_nodes).astype(dtype),
+        (10 ** curve_params.log10_T_table[0]),
+        (10 ** curve_params.log10_T_table[-1]),
+    )
+    cooling_rate_nodes = _cooling_rate(
+        jnp.asarray(nodes), None, cooling_curve_config, curve_params
+    )
+    if cooling_params.heating_factor_table.shape[0] > 0:
+        heating_factor_nodes = np.interp(
+            np.log10(nodes.astype(np.float64)),
+            np.asarray(cooling_params.heating_log10_T_table, dtype=np.float64),
+            np.asarray(cooling_params.heating_factor_table, dtype=np.float64),
+        )
+    else:
+        heating_factor_nodes = np.ones(num_nodes)
+    return build_tabulated_cooling(
+        nodes,
+        np.asarray(cooling_rate_nodes),
+        heating_factor_nodes,
+        psi_minimum,
+        psi_maximum,
+        num_psi=num_psi,
+        dtype=dtype,
+    )
 
 
 # Pallas backend (imported at the bottom: the Pallas module lazily imports the

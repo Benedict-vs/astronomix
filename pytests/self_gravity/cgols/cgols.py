@@ -397,11 +397,16 @@ from astronomix._modules._cooling.cooling_options import (
     FUV_ATTENUATION_SLAB,
     PIECEWISE_POWER_LAW,
     SUBCYCLED_EXPLICIT_COOLING,
+    TABULATED_EXACT_COOLING,
     TOTAL_NUMBER_DENSITY,
     CoolingConfig,
     CoolingCurveConfig,
     CoolingParams,
     FUVSourceParams,
+)
+from astronomix._modules._cooling._cooling import (
+    get_effective_molecular_weights,
+    tabulated_cooling_from_curve,
 )
 from astronomix.parallel import barrier
 from astronomix._spatial_operators._differencing import _interface_field_divergence
@@ -1101,6 +1106,19 @@ FUV_DISK = os.environ.get("CGOLS_FUV_DISK", "1") == "1"
 # per segment instead of every step (CoolingConfig.cache_fuv_geometry; one
 # extra scalar field of memory). Default off.
 FUV_CACHE = os.environ.get("CGOLS_FUV_CACHE", "0") == "1"
+# CGOLS_COOLING_METHOD: "subcycled" (default; Cholla's 1 % sub-cycles, the
+# production scheme) or "tabulated" (ki02gf12 only): exact integration of
+# cooling plus heating on precomputed tables (TABULATED_EXACT_COOLING,
+# astronomix/_modules/_cooling/_cooling_tabulated.py) - fixed cost per cell,
+# no sub-cycle count. CGOLS_COOLING_TAB_PSI rows in the heating-over-density
+# parameter, CGOLS_COOLING_TAB_REFINE sub-bins per bin of the cooling table.
+COOLING_METHOD = os.environ.get("CGOLS_COOLING_METHOD", "subcycled")
+if COOLING_METHOD not in ("subcycled", "tabulated"):
+    raise ValueError(f"CGOLS_COOLING_METHOD must be 'subcycled' or 'tabulated', got {COOLING_METHOD!r}")
+if COOLING_METHOD == "tabulated" and not KI02:
+    raise ValueError("CGOLS_COOLING_METHOD=tabulated needs the ki02gf12 curve")
+COOLING_TAB_PSI = int(os.environ.get("CGOLS_COOLING_TAB_PSI", "720"))
+COOLING_TAB_REFINE = int(os.environ.get("CGOLS_COOLING_TAB_REFINE", "2"))
 # CGOLS_COOLING_PALLAS=1: the sub-cycled ki02gf12 update as a fused Pallas
 # kernel (CoolingConfig.pallas_subcycling; rounding-level differences to the
 # native loop). Default off.
@@ -1547,6 +1565,37 @@ def build_fuv_source_params():
     )
 
 
+def _ki02_curve_config():
+    """The CoolingCurveConfig of the ki02gf12 curve."""
+    return CoolingCurveConfig(
+        cooling_curve_type=PIECEWISE_POWER_LAW,
+        density_convention=ELECTRON_HYDROGEN_DENSITY,
+        uniform_log_tables=COOLING_TABLE_LOOKUP == "direct",
+    )
+
+
+def _with_tabulated_cooling(cooling_params):
+    """Add the tables of CGOLS_COOLING_METHOD=tabulated to the ki02gf12 params.
+
+    The rows span psi = heating rate / (prefactor * density) for FUV fields
+    J / J_0 from 1e-4 (below the metagalactic 0.0024) to 1e5 and densities
+    from 1e-8 to 1e7 code units - far beyond what any run reaches.
+    """
+    mu, mu_e, mu_H = get_effective_molecular_weights(_KI02_X, _KI02_Z, 0.0)
+    prefactor = float(mu / (mu_e * mu_H))
+    heating_rate = float(cooling_params.heating_rate)
+    return cooling_params._replace(
+        tabulated_cooling=tabulated_cooling_from_curve(
+            _ki02_curve_config(),
+            cooling_params,
+            psi_minimum=heating_rate * 1e-4 / (prefactor * 1e7),
+            psi_maximum=heating_rate * 1e5 / (prefactor * 1e-8),
+            num_psi=COOLING_TAB_PSI,
+            refinement=COOLING_TAB_REFINE,
+        )
+    )
+
+
 def _cooling_params_kwargs():
     """The ``cooling_params=`` kwarg for SimulationParams, or {} when adiabatic.
 
@@ -1556,21 +1605,22 @@ def _cooling_params_kwargs():
     if not COOLING:
         return {}
     if KI02:
-        return dict(
-            cooling_params=CoolingParams(
-                hydrogen_mass_fraction=_KI02_X,
-                metal_mass_fraction=_KI02_Z,
-                floor_temperature=_KI02_SETUP.floor_temperature,
-                max_thermal_energy_fraction=COOLING_DT_FRACTION,
-                # Gamma_0 per H; the FUV field (or the uniform heat ratio)
-                # multiplies it.
-                heating_rate=_KI02_SETUP.heating_rate * (1.0 if FUV else HEAT_RATIO),
-                heating_log10_T_table=_KI02_SETUP.heating_log10_T_table,
-                heating_factor_table=_KI02_SETUP.heating_factor_table,
-                fuv_source_params=build_fuv_source_params() if FUV else FUVSourceParams(),
-                cooling_curve_params=_KI02_SETUP.cooling_curve_params,
-            )
+        cooling_params = CoolingParams(
+            hydrogen_mass_fraction=_KI02_X,
+            metal_mass_fraction=_KI02_Z,
+            floor_temperature=_KI02_SETUP.floor_temperature,
+            max_thermal_energy_fraction=COOLING_DT_FRACTION,
+            # Gamma_0 per H; the FUV field (or the uniform heat ratio)
+            # multiplies it.
+            heating_rate=_KI02_SETUP.heating_rate * (1.0 if FUV else HEAT_RATIO),
+            heating_log10_T_table=_KI02_SETUP.heating_log10_T_table,
+            heating_factor_table=_KI02_SETUP.heating_factor_table,
+            fuv_source_params=build_fuv_source_params() if FUV else FUVSourceParams(),
+            cooling_curve_params=_KI02_SETUP.cooling_curve_params,
         )
+        if COOLING_METHOD == "tabulated":
+            cooling_params = _with_tabulated_cooling(cooling_params)
+        return dict(cooling_params=cooling_params)
     return dict(
         cooling_params=CoolingParams(
             hydrogen_mass_fraction=0.76,
@@ -2400,18 +2450,18 @@ def build_config():
             dict(
                 cooling_config=CoolingConfig(
                     cooling=True,
-                    cooling_method=SUBCYCLED_EXPLICIT_COOLING,
+                    cooling_method=(
+                        TABULATED_EXACT_COOLING
+                        if COOLING_METHOD == "tabulated"
+                        else SUBCYCLED_EXPLICIT_COOLING
+                    ),
                     cooling_placement=COOLING_OPERATOR_SPLIT,
                     floor_mode=COOLING_FLOOR_CLIP,
                     max_subcycles=COOLING_SUBCYCLES,
                     max_fractional_temperature_change=0.01,
                     cooling_timestep_limit=COOLING_DT_LIMIT,
                     cooling_curve_config=(
-                        CoolingCurveConfig(
-                            cooling_curve_type=PIECEWISE_POWER_LAW,
-                            density_convention=ELECTRON_HYDROGEN_DENSITY,
-                            uniform_log_tables=COOLING_TABLE_LOOKUP == "direct",
-                        )
+                        _ki02_curve_config()
                         if KI02
                         else CoolingCurveConfig(
                             cooling_curve_type=CIE_PARABOLIC,

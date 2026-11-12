@@ -17,6 +17,9 @@ from jaxtyping import PyTree
 # jax
 import jax.numpy as jnp
 
+# astronomix containers
+from astronomix._modules._cooling._cooling_tabulated import TabulatedCoolingParams
+
 # Cooling-curve type tags (select which Lambda(T) model is used).
 SIMPLE_POWER_LAW = 1
 PIECEWISE_POWER_LAW = 2
@@ -29,6 +32,10 @@ CIE_PARABOLIC = 6
 EXPLICIT_COOLING = 1
 IMPLICIT_COOLING = 2
 SUBCYCLED_EXPLICIT_COOLING = 3
+#: Exact integration of cooling plus heating on precomputed tables
+#: (``_cooling_tabulated.py``): fixed cost per cell, no sub-cycles. Needs
+#: ``CoolingParams.tabulated_cooling`` (``tabulated_cooling_from_curve``).
+TABULATED_EXACT_COOLING = 4
 
 # Volumetric-density convention for the cooling rate n_a * n_b * Lambda(T).
 ELECTRON_HYDROGEN_DENSITY = 0  # n_e * n_H * Lambda, i.e. a mu / (mu_e mu_H) prefactor
@@ -448,3 +455,7 @@ class CoolingParams(NamedTuple):
     #: The parameters of the cooling curve selected by
     #: ``CoolingCurveConfig.cooling_curve_type``.
     cooling_curve_params: COOLING_CURVE_TYPE = SimplePowerLawParams()
+
+    #: Tables of ``TABULATED_EXACT_COOLING`` (placeholders unless that method
+    #: is used; build them with ``tabulated_cooling_from_curve``).
+    tabulated_cooling: TabulatedCoolingParams = TabulatedCoolingParams()

@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--shape", type=int, nargs=3, default=(32, 32, 64))
     parser.add_argument("--dt", type=float, default=7.5e-4)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--reference-subcycles", type=int, default=20000)
     arguments = parser.parse_args()
     shape = tuple(arguments.shape)
 
@@ -194,20 +195,36 @@ def main():
     result, seconds = operator(base._replace(cache_fuv_geometry=True), native_backend, cached)
     worst["cache"] = report("cached FUV geometry vs native", result, reference, seconds)
 
-    if hasattr(cooling_options, "TABULATED_EXACT_COOLING"):
-        converged, _ = operator(base._replace(max_subcycles=2048), native_backend)
-        report("native 32 sub-cycles vs 2048 sub-cycles", reference, converged)
-        result, seconds = operator(
-            base._replace(cooling_method=cooling_options.TABULATED_EXACT_COOLING),
-            native_backend,
-        )
-        worst["tabulated"] = report(
-            "tabulated exact integrator vs 2048 sub-cycles", result, converged, seconds
-        )
+    # Tabulated exact integrator, against the sub-cycled update converged in
+    # the sub-cycle size (0.1 % per sub-cycle instead of 1 %).
+    converged, _ = operator(
+        base._replace(
+            max_subcycles=arguments.reference_subcycles,
+            max_fractional_temperature_change=1e-3,
+        ),
+        native_backend,
+    )
+    report("native, 32 sub-cycles of 1 % vs converged", reference, converged)
+    tabulated_params = params._replace(
+        cooling_params=cg._with_tabulated_cooling(cooling_params)
+    )
+    tables = tabulated_params.cooling_params.tabulated_cooling
+    print(f"tabulated integrator: {tables.net_rate.shape[0]} psi rows x "
+          f"{tables.net_rate.shape[1]} temperature nodes")
+    result, seconds = operator(
+        base._replace(cooling_method=cooling_options.TABULATED_EXACT_COOLING),
+        native_backend,
+        tabulated_params,
+    )
+    worst["tabulated"] = report("tabulated exact integrator vs converged", result, converged, seconds)
+    relative = np.abs(np.asarray(result, np.float64) / np.asarray(converged, np.float64) - 1.0)
+    for quantile in (0.5, 0.9, 0.99, 0.999):
+        print(f"    {quantile:.1%} of cells within {np.quantile(relative, quantile):.2e}")
 
     assert worst["pallas"] < 1e-4, "Pallas kernel deviates from the native update"
     assert worst["cache"] < 1e-6, "cached FUV geometry deviates"
     assert worst["gradient"] < 1e-5, "gradient through the Pallas dispatch deviates"
+    assert np.quantile(relative, 0.99) < 2e-2, "tabulated integrator deviates"
 
 
 if __name__ == "__main__":
