@@ -1305,11 +1305,58 @@ def fuv_heating_factor(
     return luminosity_area * intensity + fuv_source_params.background
 
 
+#: Fixed trip counts of :func:`_exponential_integral_e1`: the power series
+#: for x <= 1 (term k is x^k / (k k!), below 1e-18 at k = 20) and the
+#: continued fraction for x > 1 (truncation error ~ exp(-4 sqrt(m x)), below
+#: 1e-15 at m = 80), both converged to float64 rounding.
+_E1_SERIES_TERMS = 20
+_E1_FRACTION_TERMS = 80
+
+
+def _exponential_integral_e1(x):
+    r"""The exponential integral E_1(x) for x > 0, with fixed trip counts.
+
+    ``jax.scipy.special.exp1`` evaluates a power series and a continued
+    fraction in ``lax.while_loop``\ s that run on every element of the batch
+    until the slowest one has converged, and it runs the continued fraction on
+    the x <= 1 elements too, where it needs ~1 / x iterations. Its cost
+    therefore depends on the data (the smallest x in the field): up to tens of
+    thousands of loop iterations per call, seconds per time step on a GPU.
+    This evaluates the same two expansions with a fixed number of terms, each
+    only inside its own range of x: branch-free, constant cost, and
+    reverse-mode differentiable.
+
+    Args:
+        x: The (positive) argument.
+
+    Returns:
+        E_1(x), to rounding error.
+    """
+    # x <= 1: E_1 = -gamma - ln x - sum_{k >= 1} (-x)^k / (k k!).
+    x_small = jnp.minimum(x, 1.0)
+    term = 1.0
+    series = 0.0
+    for k in range(1, _E1_SERIES_TERMS + 1):
+        term = term * (-x_small / k)
+        series = series + term / k
+    small = -jnp.euler_gamma - jnp.log(x_small) - series
+
+    # x > 1: E_1 = exp(-x) / (x + 1 - 1 / (x + 3 - 4 / (x + 5 - 9 / ...))),
+    # evaluated from the innermost term outwards.
+    x_large = jnp.maximum(x, 1.0)
+    fraction = x_large + (2 * _E1_FRACTION_TERMS + 1)
+    for k in range(_E1_FRACTION_TERMS, 0, -1):
+        fraction = x_large + (2 * k - 1) - k * k / fraction
+    large = jnp.exp(-x_large) / fraction
+
+    return jnp.where(x <= 1.0, small, large)
+
+
 def _slab_factor(tau):
     """min(1, (1 - E_2(tau / 2)) / tau), the slab mean intensity over the thin value."""
     tau = jnp.maximum(tau, 1e-6)
     half = 0.5 * tau
-    e2 = jnp.exp(-half) - half * jax.scipy.special.exp1(half)
+    e2 = jnp.exp(-half) - half * _exponential_integral_e1(half)
     return jnp.minimum((1.0 - e2) / tau, 1.0)
 
 
