@@ -853,6 +853,38 @@ at N=128 with identical L1 errors).
 
 ---
 
+### 4.8 Sub-cycled cooling with heating — opt-in (`CoolingConfig.pallas_subcycling`)
+
+**Status:** kernel in `astronomix/_modules/_cooling/_cooling_pallas.py`,
+generated from `update_temperature_subcycled` (`with_heating` branch,
+piecewise power-law curve with `uniform_log_tables`, heating factor table,
+3D). Off by default, like `pallas_ct`; `update_pressure_by_cooling` takes the
+run's `backend_config` (static) and dispatches through
+`_subcycled_cooling_pallas_supported`.
+
+Why: the native update carries four full fields through `max_subcycles`
+(+ 12 bisection) passes, ~46 rate evaluations per cell, while on the CGOLS
+model-B states only 0.4-0.9 % of the cells need more than one sub-cycle. The
+kernel is a pointwise leaf op (halo 0, inputs stacked into one `(4, nx, ny,
+nz)` array, table lookups as loads from whole-table refs) whose sub-cycle and
+bisection loops are `lax.while_loop`s that stop when no cell **of the block**
+has time left. The skipped iterations are exact no-ops of the native
+`fori_loop`, so the result is unchanged; on the B256 checkpoints at 47.5 / 55
+Myr a block does 3.1-3.2 rate evaluations on average instead of 46.
+
+Validation (CPU, `pallas_interpret`):
+`pytests/self_gravity/cgols/cgols_cooling_operator_check.py` — max relative
+pressure difference to the native update 3.9e-7 (synthetic state, 9 decades in
+density, 7.5 in temperature) and 5.4e-7 (64x64x128 sub-box of a B256
+checkpoint); `jax.grad` through the dispatch equals the native gradient (the
+tangent rule is the native function; every traced parameter is passed as an
+argument of the custom-JVP function, none is closed over).
+
+Not yet done: a Triton compile + timing on a GPU (the kernel uses `log`,
+`pow`, `floor`, a float-to-int cast, data-dependent table loads and
+non-`fori` `while_loop`s, all of which have Triton lowering rules but none of
+which the other kernels here exercise), and a multi-GPU run.
+
 ## 4.4 The x64 / Triton fix (was a real bug, now resolved)
 
 The MHD kernels used to bail out with

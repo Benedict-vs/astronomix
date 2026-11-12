@@ -92,6 +92,7 @@ def _apply_cooling(
         grid_spacing=config.grid_spacing,
         helper_data=helper_data,
         time=time,
+        backend_config=config.backend_config,
     )
 
 

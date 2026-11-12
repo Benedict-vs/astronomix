@@ -1470,6 +1470,7 @@ def fuv_attenuation_factor(
         "cooling_config",
         "registered_variables",
         "grid_spacing",
+        "backend_config",
     ),
 )
 def update_pressure_by_cooling(
@@ -1481,6 +1482,7 @@ def update_pressure_by_cooling(
     grid_spacing: float = 0.0,
     helper_data=None,
     time: float = 0.0,
+    backend_config=None,
 ) -> STATE_TYPE:
     """
     Apply cooling to the pressure of the primitive state for one time step.
@@ -1503,6 +1505,10 @@ def update_pressure_by_cooling(
             with ``CoolingConfig.fuv_point_source_heating``.
         time: The time at which the FUV sources are evaluated (the middle of
             the step), used only with ``fuv_point_source_heating``.
+        backend_config: The ``BackendConfig`` of the run (static). With the
+            Pallas backend and ``CoolingConfig.pallas_subcycling`` the
+            sub-cycled update runs as a fused kernel; ``None`` (default) keeps
+            the native update.
 
     Returns:
         The primitive state with the pressure updated by cooling.
@@ -1669,24 +1675,50 @@ def update_pressure_by_cooling(
             heating_factor_table=cooling_params.heating_factor_table,
         )
     elif cooling_config.cooling_method == SUBCYCLED_EXPLICIT_COOLING:
-        new_temperature = update_temperature_subcycled(
+        if _subcycled_cooling_pallas_supported(
             density,
-            temperature,
-            time_step,
-            hydrogen_mass_fraction,
-            metal_mass_fraction,
-            gamma,
-            cooling_curve_config,
-            cooling_params.cooling_curve_params,
-            cooling_params.floor_temperature,
-            cooling_config.max_subcycles,
-            cooling_config.max_fractional_temperature_change,
-            mean_molecular_weight,
-            with_heating=with_heating,
-            heating_rate=heating_rate,
-            heating_log10_T_table=cooling_params.heating_log10_T_table,
-            heating_factor_table=cooling_params.heating_factor_table,
-        )
+            cooling_config,
+            backend_config,
+            with_heating,
+            cooling_params.heating_factor_table,
+        ):
+            new_temperature = update_temperature_subcycled_pallas(
+                density,
+                temperature,
+                time_step,
+                hydrogen_mass_fraction,
+                metal_mass_fraction,
+                gamma,
+                cooling_curve_config,
+                cooling_params.cooling_curve_params,
+                cooling_params.floor_temperature,
+                cooling_config.max_subcycles,
+                cooling_config.max_fractional_temperature_change,
+                mean_molecular_weight,
+                heating_rate,
+                cooling_params.heating_log10_T_table,
+                cooling_params.heating_factor_table,
+                backend_config,
+            )
+        else:
+            new_temperature = update_temperature_subcycled(
+                density,
+                temperature,
+                time_step,
+                hydrogen_mass_fraction,
+                metal_mass_fraction,
+                gamma,
+                cooling_curve_config,
+                cooling_params.cooling_curve_params,
+                cooling_params.floor_temperature,
+                cooling_config.max_subcycles,
+                cooling_config.max_fractional_temperature_change,
+                mean_molecular_weight,
+                with_heating=with_heating,
+                heating_rate=heating_rate,
+                heating_log10_T_table=cooling_params.heating_log10_T_table,
+                heating_factor_table=cooling_params.heating_factor_table,
+            )
     else:
         raise ValueError(f"Unknown cooling method: {cooling_config.cooling_method}")
 
@@ -1824,3 +1856,11 @@ def cooling_time_step_limit(
     )
 
     return cooling_params.max_thermal_energy_fraction * jnp.min(t_cool)
+
+
+# Pallas backend (imported at the bottom: the Pallas module lazily imports the
+# native functions above).
+from astronomix._modules._cooling._cooling_pallas import (  # noqa: E402
+    _subcycled_cooling_pallas_supported,
+    update_temperature_subcycled_pallas,
+)

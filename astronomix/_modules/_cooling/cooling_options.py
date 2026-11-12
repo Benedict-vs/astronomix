@@ -253,6 +253,14 @@ class CoolingConfig(NamedTuple):
     #: evaluation.
     cache_fuv_geometry: bool = False
 
+    #: Run the sub-cycled update with heating as a fused Pallas kernel
+    #: (``_cooling_pallas.py``) when the backend is ``PALLAS``: the whole
+    #: update of a block of cells in registers, with the sub-cycle loop of a
+    #: block stopping once none of its cells has time left. Same result as
+    #: the native loop to rounding. Opt-in; needs the piecewise power-law
+    #: curve with ``uniform_log_tables`` and the heating factor table.
+    pallas_subcycling: bool = False
+
 
 #: No attenuation of the point-source FUV field.
 FUV_ATTENUATION_NONE = 0
