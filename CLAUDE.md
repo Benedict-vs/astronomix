@@ -107,3 +107,19 @@ Two mechanisms (see README FAQ): on-device snapshots via `return_snapshots`/`Sna
 - Reusable initial conditions live in `astronomix/test_setups/` (importable, e.g. `setup_sod_shock_tube`); test
   scripts compose these rather than re-deriving ICs.
 - Documentation site: https://astronomix-mhd.web.app/ (Firebase-hosted, config in `firebase.json`/`.firebaserc`).
+
+## Shared CPU server (JARVIS)
+
+CPU-only analysis and data storage for the CGOLS runs use the group's shared server JARVIS. Access details live
+outside the repo, in the user's Claude memory: `~/.claude/projects/-export-home-bschuber-astronomix/memory/jarvis-access.md`.
+Rules for every session that uses it:
+
+- At most 64 CPUs at a time, and only after the user has posted a note in the group's Slack channel #allgemein.
+  The machine is shared: check the load first, use `nice`, and cap threads and memory explicitly.
+- Run `ipcrm --all=shm -v` before and after any memory-intensive job.
+- Don't crash it: test small first.
+- Its disk has no external backup, so keep copies elsewhere.
+- It rate-limits new ssh connections: reuse one connection (one `ssh` running a whole script, or `tar | ssh`)
+  instead of many quick `ssh`/`scp` calls.
+- Clean up after every session: remove dead git worktrees and scratch files. As elsewhere, give the user the
+  bulk-delete commands instead of running them.
