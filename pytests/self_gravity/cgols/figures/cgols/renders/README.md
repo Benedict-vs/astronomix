@@ -10,7 +10,8 @@ arXiv:2002.10468, made with NVIDIA IndeX), produced with our own JAX ray marcher
 | `A2048_t35Myr_cgols4_2160x3840.png` | 4K hero of A-2048 at the end of the starburst |
 | `timeseries_C1024_A2048_cgols4.png` | overview of the eight stills |
 | `*_orbit360.mp4` | 360-frame camera orbits at 35 Myr (30 fps, 1080x1920) |
-| `C1024_timeorbit_1-75Myr_cgols4.mp4` | one camera orbit (1 deg/frame) while time runs 1.25 -> 75 Myr: 6 frames per checkpoint, neighbouring checkpoints cross-faded (`cgols_render_timeorbit.py`) |
+| `C1024_timeorbit_1-75Myr_cgols4.mp4` | first version: one camera orbit (1 deg/frame) while time runs 1.25 -> 75 Myr: 6 frames per checkpoint, neighbouring checkpoints cross-faded (`cgols_render_timeorbit.py`); the cross-fade ghosts moving gas (~1 kpc per checkpoint) |
+| `C1024_timeorbit_1-75Myr_60frames_3deg_{12,20}fps.mp4` | same time range, one frame per checkpoint (no blending, no repeats), camera turning 3 deg per frame (half an orbit); 12 fps (5 s) and 20 fps (3 s) |
 
 ## How they were made
 

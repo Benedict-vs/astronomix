@@ -81,7 +81,9 @@ def main():
     parser.add_argument("--out", required=True, help=".mp4; frames go to <out>_frames/")
     parser.add_argument("--steps", default=None, help="a-b (default: all extracted)")
     parser.add_argument("--frames-per-step", type=int, default=6)
-    parser.add_argument("--deg-per-frame", type=float, default=1.0)
+    parser.add_argument("--deg-per-frame", default="1.0",
+                        help="camera turn per frame [deg]; a comma list renders several variants in one pass "
+                             "(the per-checkpoint volume load dominates the cost), outputs <out>_d<deg>.mp4")
     parser.add_argument("--azim", type=float, default=30.0)
     parser.add_argument("--elev", type=float, default=16.0)
     parser.add_argument("--elev-swing", type=float, default=6.0)
@@ -111,9 +113,12 @@ def main():
                     glow=preset["glow"], light_strength=preset["light"], light_kappa_max=preset["light_kappa_max"],
                     light_rgb=tuple(float(v) for v in preset["light_rgb"].split(",")), chunk=args.chunk,
                     hot_fade=args.hot_fade, wind_pivot=pivot)
-    frame_dir = args.out[: -len(".mp4")] + "_frames"
-    os.makedirs(frame_dir, exist_ok=True)
-    n_frames = (len(steps) - 1) * args.frames_per_step + 1
+    degs = [float(v) for v in args.deg_per_frame.split(",")]
+    outs = {d: (args.out if len(degs) == 1 else args.out[: -len(".mp4")] + f"_d{d:g}.mp4") for d in degs}
+    frame_dirs = {d: outs[d][: -len(".mp4")] + "_frames" for d in degs}
+    for frame_dir in frame_dirs.values():
+        os.makedirs(frame_dir, exist_ok=True)
+    n_frames = (len(steps) - 1) * args.frames_per_step + 1  # frames_per_step 1: one frame per checkpoint, no blending
     window = {}  # step index -> Scene (sliding window of two)
 
     def scene(i):
@@ -125,24 +130,26 @@ def main():
 
     start = time.time()
     for f in range(n_frames):
-        path = os.path.join(frame_dir, f"frame_{f:05d}.png")
-        if os.path.exists(path):
+        todo = [d for d in degs if not os.path.exists(os.path.join(frame_dirs[d], f"frame_{f:05d}.png"))]
+        if not todo:
             continue
         pos = f / args.frames_per_step
         i, w = int(pos), pos - int(pos)
-        phase = np.radians(args.deg_per_frame * f)
-        view = dict(size=size, elev=args.elev + args.elev_swing * np.sin(phase), azim=args.azim + np.degrees(phase),
-                    dist=17.0, fov=50.0, seed=f)
-        hdr = jnp.asarray(scene(i).view(**view))
-        if w > 1e-6:
-            hdr = (1 - w) * hdr + w * jnp.asarray(scene(i + 1).view(**view))
-        rgb = np.asarray(grade_device(hdr))
         t_myr = (1 - w) * times[i] + w * times[min(i + 1, len(times) - 1)]
         label = args.label or scene(i).meta["tag"].lstrip("_")
-        R.annotate(rgb, f"{label}  t = {t_myr:.1f} Myr").save(path)
+        for d in todo:
+            phase = np.radians(d * f)
+            view = dict(size=size, elev=args.elev + args.elev_swing * np.sin(phase),
+                        azim=args.azim + np.degrees(phase), dist=17.0, fov=50.0, seed=f)
+            hdr = jnp.asarray(scene(i).view(**view))
+            if w > 1e-6:
+                hdr = (1 - w) * hdr + w * jnp.asarray(scene(i + 1).view(**view))
+            rgb = np.asarray(grade_device(hdr))
+            R.annotate(rgb, f"{label}  t = {t_myr:.1f} Myr").save(os.path.join(frame_dirs[d], f"frame_{f:05d}.png"))
         if f % 10 == 0:
             print(f"frame {f}/{n_frames}  t = {t_myr:.1f} Myr  ({time.time() - start:.0f} s)", flush=True)
-    R.encode_movie(frame_dir, args.out, args.fps)
+    for d in degs:
+        R.encode_movie(frame_dirs[d], outs[d], args.fps)
 
 
 if __name__ == "__main__":
