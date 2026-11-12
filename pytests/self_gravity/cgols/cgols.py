@@ -1097,6 +1097,10 @@ FUV_JEANS_TCAP = float(os.environ.get("CGOLS_FUV_JEANS_TCAP", "40"))
 # CGOLS_FUV_DISK=1 CGOLS_FUV_ATTENUATION=los; the earlier unattenuated point
 # source alone = CGOLS_FUV_DISK=0 CGOLS_FUV_ATTENUATION=none.
 FUV_DISK = os.environ.get("CGOLS_FUV_DISK", "1") == "1"
+# CGOLS_FUV_CACHE=1: evaluate the static line-of-sight attenuation factor once
+# per segment instead of every step (CoolingConfig.cache_fuv_geometry; one
+# extra scalar field of memory). Default off.
+FUV_CACHE = os.environ.get("CGOLS_FUV_CACHE", "0") == "1"
 FUV_KS_A = float(os.environ.get("CGOLS_FUV_KS_A", "2.5e-4"))
 FUV_KS_N = float(os.environ.get("CGOLS_FUV_KS_N", "1.4"))
 # Table lookup of the ki02gf12 curve and its heating factor: "search" (binary
@@ -2418,6 +2422,8 @@ def build_config():
                         "los": FUV_ATTENUATION_LINE_OF_SIGHT,
                     }[FUV_ATTENUATION],
                     fuv_disk_source=KI02 and FUV and FUV_DISK,
+                    # Conditional kwarg: the default config stays byte-identical.
+                    **(dict(cache_fuv_geometry=True) if FUV_CACHE else {}),
                 )
             )
             if COOLING

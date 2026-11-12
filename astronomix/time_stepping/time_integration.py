@@ -75,9 +75,15 @@ from astronomix._modules._iteration_level_updates import (
     _iteration_level_updates,
     _post_step_updates,
 )
-from astronomix._modules._cooling._cooling import cooling_time_step_limit
+from astronomix._modules._cooling._cooling import (
+    cooling_time_step_limit,
+    fuv_line_of_sight_factor,
+)
 from astronomix._modules._cgols_wind._cgols_wind import cgols_wind_time_step_limit
-from astronomix._modules._cooling.cooling_options import COOLING_OPERATOR_SPLIT
+from astronomix._modules._cooling.cooling_options import (
+    COOLING_OPERATOR_SPLIT,
+    FUV_ATTENUATION_LINE_OF_SIGHT,
+)
 from astronomix._fluid_equations._passive_scalars import _fill_scalar_ghost_cells
 from astronomix._modules._turbulent_forcing._turbulent_forcing import _init_ou_forcing_state
 from astronomix._modules._gravity._utils import _pad_external_potential
@@ -849,6 +855,30 @@ def _integrate_core(
                 config,
                 registered_variables,
                 params,
+            )
+        )
+
+    # The line-of-sight attenuation of the FUV point source depends only on
+    # the geometry; like the padded potential above, XLA does not hoist it out
+    # of the loop. Evaluate it once here (opt-in: one extra scalar field).
+    cooling_config = config.cooling_config
+    if (
+        cooling_config.cooling
+        and cooling_config.fuv_point_source_heating
+        and cooling_config.cache_fuv_geometry
+        and cooling_config.fuv_attenuation == FUV_ATTENUATION_LINE_OF_SIGHT
+    ):
+        fuv_source_params = step_params.cooling_params.fuv_source_params
+        step_params = step_params._replace(
+            cooling_params=step_params.cooling_params._replace(
+                fuv_source_params=fuv_source_params._replace(
+                    los_factor_cache=fuv_line_of_sight_factor(
+                        fuv_source_params,
+                        helper_data_pad.cell_centers_x,
+                        helper_data_pad.cell_centers_y,
+                        helper_data_pad.cell_centers_z,
+                    )
+                )
             )
         )
 

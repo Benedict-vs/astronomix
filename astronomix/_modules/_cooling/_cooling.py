@@ -1542,12 +1542,17 @@ def update_pressure_by_cooling(
         )
         column_spacing = helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0]
         if cooling_config.fuv_attenuation == FUV_ATTENUATION_LINE_OF_SIGHT:
-            attenuation = fuv_line_of_sight_factor(
-                fuv_params,
-                helper_data.cell_centers_x,
-                helper_data.cell_centers_y,
-                helper_data.cell_centers_z,
-            )
+            if fuv_params.los_factor_cache.ndim == density.ndim:
+                # Static geometry, evaluated once by the time integrator
+                # (CoolingConfig.cache_fuv_geometry).
+                attenuation = fuv_params.los_factor_cache
+            else:
+                attenuation = fuv_line_of_sight_factor(
+                    fuv_params,
+                    helper_data.cell_centers_x,
+                    helper_data.cell_centers_y,
+                    helper_data.cell_centers_z,
+                )
         elif cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
             attenuation = fuv_attenuation_factor(
                 density,

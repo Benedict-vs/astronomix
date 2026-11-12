@@ -244,6 +244,15 @@ class CoolingConfig(NamedTuple):
     #: the slab factor. Needs ``fuv_point_source_heating``.
     fuv_disk_source: bool = False
 
+    #: Evaluate the static part of the FUV field once per integration instead
+    #: of in every step: the line-of-sight attenuation factor
+    #: (``FUV_ATTENUATION_LINE_OF_SIGHT``; a square root, four table gathers
+    #: and an exponential per cell) depends only on the geometry. It is
+    #: stored in ``FUVSourceParams.los_factor_cache`` by the time integrator,
+    #: at the cost of one scalar field of memory. Same values as the per-step
+    #: evaluation.
+    cache_fuv_geometry: bool = False
+
 
 #: No attenuation of the point-source FUV field.
 FUV_ATTENUATION_NONE = 0
@@ -318,6 +327,11 @@ class FUVSourceParams(NamedTuple):
     #: density) before the slab attenuation, i.e. Sigma_SFR(Sigma) / Sigma_SFR,0.
     disk_sfr_coefficient: float = 0.0
     disk_sfr_index: float = 1.4
+
+    #: The line-of-sight attenuation factor on the (padded) grid, filled in by
+    #: the time integrator with ``CoolingConfig.cache_fuv_geometry``; empty
+    #: (the default) means it is evaluated in every step.
+    los_factor_cache: jnp.ndarray = jnp.zeros((0,))
 
 
 class CoolingParams(NamedTuple):
