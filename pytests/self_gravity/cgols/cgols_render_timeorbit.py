@@ -90,7 +90,11 @@ def main():
     parser.add_argument("--size", default="1080x1920")
     parser.add_argument("--step", type=float, default=0.6, help="ray step [cells]")
     parser.add_argument("--pivot", default="-2.6,-1.2", help="wind-shift pivot (log n lo,hi)")
-    parser.add_argument("--hot-fade", type=float, default=1.0)
+    parser.add_argument("--hot-fade", type=float, default=1.0, help="hot-gas opacity factor (early value if ramped)")
+    parser.add_argument("--hot-fade-late", type=float, default=None, help="hot-fade after the ramp (default: no ramp)")
+    parser.add_argument("--glow-late", type=float, default=None, help="blue-haze glow after the ramp")
+    parser.add_argument("--pivot-late", default=None, help="wind-shift pivot after the ramp (lo,hi)")
+    parser.add_argument("--ramp-myr", default="40,55", help="t0,t1 [Myr] of the early->late parameter ramp")
     parser.add_argument("--hold-before", type=float, default=40.0, help="fixed brightness before this time [Myr]")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--chunk", type=int, default=1 << 20)
@@ -121,11 +125,22 @@ def main():
     n_frames = (len(steps) - 1) * args.frames_per_step + 1  # frames_per_step 1: one frame per checkpoint, no blending
     window = {}  # step index -> Scene (sliding window of two)
 
+    t0, t1 = (float(v) for v in args.ramp_myr.split(","))
+
     def scene(i):
         if i not in window:
             for k in [k for k in window if k < i - 1]:
                 del window[k]
-            window[i] = R.Scene(os.path.join(args.root, str(steps[i])), auto=float(shifts[i]), auto_q=50, **scene_kw)
+            kw = dict(scene_kw)
+            frac = float(np.clip((times[i] - t0) / (t1 - t0), 0, 1))  # 0 before t0, 1 after t1
+            if args.hot_fade_late is not None:  # log-interpolated: a factor, not an offset
+                kw["hot_fade"] = float(10 ** ((1 - frac) * np.log10(args.hot_fade) + frac * np.log10(args.hot_fade_late)))
+            if args.glow_late is not None:
+                kw["glow"] = (1 - frac) * kw["glow"] + frac * args.glow_late
+            if args.pivot_late is not None:
+                late = [float(v) for v in args.pivot_late.split(",")]
+                kw["wind_pivot"] = tuple((1 - frac) * e + frac * l for e, l in zip(pivot, late))
+            window[i] = R.Scene(os.path.join(args.root, str(steps[i])), auto=float(shifts[i]), auto_q=50, **kw)
         return window[i]
 
     start = time.time()
