@@ -103,7 +103,8 @@ def parse_steps(spec, available):
         if "-" in part:
             rng, _, stride = part.partition("/")
             a, b = (int(v) for v in rng.split("-"))
-            steps += list(range(a, b + 1, int(stride or 1)))
+            step = int(stride or 1)
+            steps += list(range(a, b + 1, step) if a <= b else range(a, b - 1, -step))  # "59-41": descending
         else:
             steps.append(int(part))
     return [s for s in steps if s in available]

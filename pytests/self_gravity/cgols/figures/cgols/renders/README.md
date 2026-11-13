@@ -11,7 +11,7 @@ arXiv:2002.10468, made with NVIDIA IndeX), produced with our own JAX ray marcher
 | `timeseries_C1024_A2048_cgols4.png` | overview of the eight stills |
 | `*_orbit360.mp4` | 360-frame camera orbits at 35 Myr (30 fps, 1080x1920) |
 | `C1024_timeorbit_1-75Myr_cgols4.mp4` | first version: one camera orbit (1 deg/frame) while time runs 1.25 -> 75 Myr: 6 frames per checkpoint, neighbouring checkpoints cross-faded (`cgols_render_timeorbit.py`); the cross-fade ghosts moving gas (~1 kpc per checkpoint) |
-| `C1024_timeorbit_1-75Myr_60frames_3deg_{12,20}fps.mp4` | same time range, one frame per checkpoint (no blending, no repeats), camera turning 3 deg per frame (half an orbit); 12 fps (5 s) and 20 fps (3 s) |
+| `C1024_timeorbit_1-75Myr_60frames_3deg_elev28_{12,20}fps.mp4` | same time range, one frame per checkpoint (no blending, no repeats), camera at a fixed 28 deg elevation looking down (no up/down sway, so the centre stays visible) turning 3 deg per frame (half an orbit); 12 fps (5 s) and 20 fps (3 s) |
 
 ## How they were made
 

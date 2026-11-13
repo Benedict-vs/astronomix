@@ -6,8 +6,6 @@
 
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --exclusive
-#SBATCH --mem=0
 
 #SBATCH --output=cgols_render_extract_%j.out
 #SBATCH --error=cgols_render_extract_%j.err
@@ -21,6 +19,8 @@
 # EXTRACT_RUNS = space-separated <tag>:<factor>:<steps>, e.g.
 #
 #   cd ~/astronomix-ana/pytests/self_gravity/cgols
+#   (no node size is fixed here: pass e.g. --exclusive --mem=0 for a whole node, or
+#    --cpus-per-task=32 --mem=200G EXTRACT_WORKERS=24 for a smaller job that backfills sooner)
 #   sbatch --export=ALL,EXTRACT_RUNS="_A2048:2:28,60,16,40 _C1024:1:28,60,16,40" run_horeka_render_extract.sh
 #   sbatch --export=ALL,EXTRACT_RUNS="_A2048:2:1-60",EXTRACT_FIELDS=logn,logT run_horeka_render_extract.sh  # movie
 
