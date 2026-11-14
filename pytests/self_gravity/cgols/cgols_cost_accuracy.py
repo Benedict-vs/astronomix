@@ -35,6 +35,10 @@ means at each run's own snapshot cadence, frame slices and maps, emission profil
   disk and halo            disk mass and box mass at 75 Myr, shell-breakout time
   small-scale morphology   up-down asymmetry, small-scale density variance, cavity-rim roughness, slice power at
                            100-300 pc
+  mixed gas in 3D          mass and volume of the mixed gas (5.5 < log K < 6.8) in 1 < |z| < 4.5 kpc
+  mixing layer and clumps  log K = 6.8 isosurface area, mixed-layer thickness V/A, entrained gas (log K < 5.5):
+                           total mass, mass and number of clumps detached from the disk
+  (both from cgols_structure_3d caches data/studies/structure3d_v2<TAG>.npz, 2.5 Myr checkpoint cadence)
 
 Scale-by-scale convergence (cost_accuracy_spectra.png): the 30-45 Myr power spectrum of log n in the xz slice
 (0.5 < |z| < 4.5 kpc) of every base run divided by the same scheme at twice the resolution and by the 2048
@@ -82,7 +86,8 @@ NS = (128, 256, 512, 1024, 2048)
 SPEC_TOL = 0.2
 
 #: family -> [(key, label)]. Keys: synthesis METRICS, extra scalars (x:<key>), time-resolved (ts:<series>:a:b),
-#: histogram distance (tv:<window>), rim roughness (rim_20_35), slice power (pow_100_300)
+#: histogram distance (tv:<window>), rim roughness (rim_20_35), slice power (pow_100_300),
+#: 3D structure window means from cgols_structure_3d caches (s3:<scalar>:a:b, scalars of cgols_structure_3d_plots)
 FAMILIES = {
     "mass outflow 5 kpc": [
         ("out5_15_40", "outflow 15-40 Myr"), ("out5_40_50", "outflow 40-50 Myr"),
@@ -124,7 +129,18 @@ FAMILIES = {
         ("asym_50_75", "up-down asymmetry 50-75"), ("ssv256", "small-scale var. 80-300 pc"),
         ("ssv128", "small-scale var. 160-600 pc"), ("rim_20_35", "cavity-rim roughness 20-35"),
         ("pow_100_300", "slice power 100-300 pc")],
+    "mixed gas in 3D, 1-4.5 kpc": [
+        ("s3:mass_mixed:15:30", "mixed mass 15-30 Myr"), ("s3:mass_mixed:30:45", "mixed mass 30-45 Myr"),
+        ("s3:mass_mixed:45:75", "mixed mass 45-75 Myr"), ("s3:vol_mixed:15:30", "mixed volume 15-30 Myr"),
+        ("s3:vol_mixed:45:75", "mixed volume 45-75 Myr")],
+    "mixing layer and clumps in 3D": [
+        ("s3:area_wind:30:45", "mixing-layer area 30-45"), ("s3:area_wind:45:75", "mixing-layer area 45-75"),
+        ("s3:thickness:45:75", "mixing-layer thickness 45-75"), ("s3:mass_ent:45:75", "entrained mass 45-75"),
+        ("s3:mass_det:45:75", "detached-clump mass 45-75"), ("s3:n_det:45:75", "detached-clump number 45-75")],
 }
+#: structure3d cache tag per synthesis label where it differs from the label's frame tag (FV1024 = the
+#: bit-identical rerun A1024fvr, the original kept only 4 checkpoints)
+S3_TAG = {"FV1024": "_A1024fvr"}
 #: relative seed scatter borrowed from these synthesis frame metrics when nothing is measured
 BORROW_EARLY, BORROW_LATE = "out5_15_40", "out5_50_75"
 RIM_WINDOW = (20, 35)
@@ -139,6 +155,8 @@ def window_of(key):
     """(start, end) Myr of a key, for picking the borrowed scatter."""
     if key == "pow_100_300":
         return 30.0, 45.0
+    if key.startswith("s3:"):
+        return float(key.split(":")[2]), float(key.split(":")[3])
     parts = key.replace("x:", "").split("_")
     try:
         return float(parts[-2]), float(parts[-1])
@@ -201,6 +219,28 @@ def rim_values(runs):
     return out
 
 
+def structure_values(runs, key):
+    """{label: (window mean, time-sampling standard error)} of a structure3d scalar (s3:<name>:a:b)."""
+    import cgols_structure_3d_plots as s3p
+
+    _p, name, a, b = key.split(":")
+    out = {}
+    for label, spec in runs.items():
+        if spec[2] not in ("base", "ens"):
+            continue
+        tag = S3_TAG.get(label, spec[4])
+        recs, version = s3p.load(tag) if tag else (None, None)
+        if not recs:
+            continue
+        member = {"tag": tag, "recs": recs, "version": version}
+        sel = s3p.window_records(member, (float(a), float(b)))
+        if sel is None or (name in s3p.V2_ONLY and version != "v2"):
+            continue
+        y = np.array([s3p.SCALARS[name][1](r) for r in sel])
+        out[label] = (float(y.mean()), float(y.std(ddof=1) / np.sqrt(len(y))) if len(y) > 1 else None)
+    return out
+
+
 def band_power(ex):
     spec = ex.get("spectrum")
     if spec is None:
@@ -226,6 +266,8 @@ def collect():
                 continue
             if key == "rim_20_35":
                 values = rim_values(runs)
+            elif key.startswith("s3:"):
+                values = structure_values(runs, key)
             elif key == "pow_100_300":
                 values = {lab: band_power(e) for lab, e in ex.items()}
                 values = {k: v for k, v in values.items() if v}
@@ -481,6 +523,10 @@ def fig_grid(result):
     print(f"wrote {path}")
 
 
+#: families figure: y-axis top [%]; larger errors are drawn as up-arrows at FAM_YTOP
+FAM_YMAX, FAM_YTOP = 800.0, 600.0
+
+
 def fig_families(result, tols):
     fams = [f for f in FAMILIES if any(r["family"] == f for r in result.values())]
     ncol = 5
@@ -504,20 +550,26 @@ def fig_families(result, tols):
                 continue
             x, worst, med, ns = map(np.array, zip(*pts))
             color, marker, ls = styles[scheme]
+            # errors beyond the axis are drawn at its top edge as up-arrows
+            off_w, off_m = worst > FAM_YMAX, med > FAM_YMAX
+            worst, med = np.minimum(worst, FAM_YTOP), np.minimum(med, FAM_YTOP)
             ax.plot(x, worst, ls=ls, marker=marker, color=color, label=f"{scheme}: worst quantity")
             ax.plot(x, med, ls=ls, marker=marker, color=color, alpha=0.35, ms=4, label=f"{scheme}: median")
+            ax.plot(x[off_w], worst[off_w], ls="none", marker="^", ms=9, color=color)
+            ax.plot(x[off_m], med[off_m], ls="none", marker="^", ms=6, color=color, alpha=0.35)
             for xi, yi, n in zip(x, worst, ns):
-                ax.annotate(f"{int(n)}", (xi, yi), textcoords="offset points", xytext=(4, 4), fontsize=7, color=color)
+                ax.annotate(f"{int(n)}", (xi, yi), textcoords="offset points", xytext=(4, -10 if yi >= FAM_YTOP else 4),
+                            fontsize=7, color=color)
         u = max([r["u"] for r in rows] or [0.1])
         ax.axhspan(0.1, max(u, 0.1), color="0.85", zorder=0, label="reference uncertainty (max u)")
         if nund:
-            ax.text(0.02, 0.97, f"{nund} of {len(allrows)} quantities undecidable (u >= {tmax:g}%), not shown",
-                    transform=ax.transAxes, fontsize=7, va="top", color="0.3")
+            ax.text(0.98, 0.03, f"{nund} of {len(allrows)} quantities undecidable (u >= {tmax:g}%), not shown",
+                    transform=ax.transAxes, fontsize=7, va="bottom", ha="right", color="0.3")
         for cell in (("FD", REF_N), ("FV", REF_N)):
             ax.axvline(syn.GPU_HOURS[cell], color=styles[cell[0]][0], lw=0.8, ls=":")
         for tol in tols:
             ax.axhline(tol, color="0.4", lw=0.7, ls="-.")
-        ax.set(xscale="log", yscale="log", ylim=(0.3, 800))
+        ax.set(xscale="log", yscale="log", ylim=(0.3, FAM_YMAX))
         ax.set_title(family, fontsize=10)
         ax.grid(alpha=0.3, which="both")
     for ax in axes.flat[len(fams):]:
@@ -528,7 +580,8 @@ def fig_families(result, tols):
         ax.set_ylabel("|error| vs 2048 reference [%]")
     axes.flat[0].legend(fontsize=6.5, loc="lower left")
     fig.suptitle("CGOLS A: worst and median error per quantity family against cost; dotted verticals: cost of "
-                 "FD-2048 (blue) / FV-2048 (red); dash-dot: tolerances " + ", ".join(f"{t:g}%" for t in tols))
+                 "FD-2048 (blue) / FV-2048 (red); dash-dot: tolerances " + ", ".join(f"{t:g}%" for t in tols)
+                 + f"; up-arrows: error > {FAM_YMAX:g}%")
     fig.tight_layout()
     path = os.path.join(FIG_DIR, "cost_accuracy_families.png")
     fig.savefig(path, dpi=115)
