@@ -8,9 +8,10 @@ best runs disagree by that much, so no run can be judged more precisely). Error 
 quantity are distances instead (always >= 0, in percent): the time-resolved errors (mean |x(t) - R(t)| / mean |R(t)|
 over the window, R(t) the mean 2048 series; catches timing shifts that window means average out) and the phase
 structure (total-variation distance of the normalised (log n, log T) mass histogram above 1 kpc from the mean 2048
-histogram). A run reaches a tolerance tol "confidently" if |e| + u <= tol, "nominally" if only |e| <= tol. The 2048
-runs are part of the reference: their error is u by construction. A quantity with u >= tol cannot be decided at that
-tolerance; the family verdict at tol uses the decidable quantities and lists the others.
+histogram). A run reaches a tolerance tol "confidently" if |e| + u <= tol, "nominally" if only |e| <= tol, and in
+the family verdict only if every finer run of its scheme below 2048 reaches it too (no pass by a chance crossing).
+The 2048 runs are part of the reference: their error is u by construction. A quantity with u >= tol cannot be
+decided at that tolerance; the family verdict at tol uses the decidable quantities and lists the others.
 
 Noise sigma of a run: the scatter of the seed runs at its scheme and N where there are >= 2 (measured), else the
 largest relative scatter measured at <= N (extrapolated), else the relative scatter of a frame metric (borrowed, as
@@ -426,7 +427,9 @@ def analyse(runs, data, ex, scal):
 
 def cheapest(result, tol):
     """Per family: the cheapest run whose worst error is <= tol, confidently and nominally, over the quantities the
-    reference can decide at this tolerance (u < tol); the others are listed as undecidable."""
+    reference can decide at this tolerance (u < tol); the others are listed as undecidable. A run below REF_N only
+    counts if every finer run of its scheme below REF_N passes too: a coarse run whose value happens to swing through
+    the reference while finer runs are further off is not converged."""
     out = {}
     cells = sorted(syn.GPU_HOURS, key=syn.GPU_HOURS.get)
     for family in FAMILIES:
@@ -434,17 +437,21 @@ def cheapest(result, tol):
         if not allrows:
             continue
         rows = [r for r in allrows if r["u"] < tol]
-        conf = nom = None
+        passes = {}
         for cell in cells:
             have = [r for r in rows if cell in r["runs"]]
             if not rows or len(have) < len(rows):
                 continue
             worst = max(abs(r["runs"][cell]["err"]) for r in rows)
             worst_conf = max(abs(r["runs"][cell]["err"]) + r["u"] for r in rows)
-            if nom is None and worst <= tol:
-                nom = cell
-            if conf is None and worst_conf <= tol:
-                conf = cell
+            passes[cell] = (worst <= tol, worst_conf <= tol)
+
+        def ok(cell, i):
+            finer = [c for c in passes if c[0] == cell[0] and cell[1] < c[1] < REF_N]
+            return passes[cell][i] and all(passes[c][i] for c in finer)
+
+        nom = next((c for c in cells if c in passes and ok(c, 0)), None)
+        conf = next((c for c in cells if c in passes and ok(c, 1)), None)
         out[family] = {"confident": conf, "nominal": nom, "ref_u_max": max(r["u"] for r in allrows),
                        "limiting": max(allrows, key=lambda r: r["u"])["label"], "decided": len(rows),
                        "undecidable": [r["label"] for r in allrows if r["u"] >= tol]}
