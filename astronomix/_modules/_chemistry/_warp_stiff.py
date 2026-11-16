@@ -42,11 +42,16 @@ def _extend_translator(JF):
 
     def _broadcast_pair(self, a, b):
         (sa, ca), (sb, cb) = a, b
-        if len(ca) == len(cb) or len(ca) == 1 or len(cb) == 1:
-            na, nb = len(ca), len(cb)
+        na, nb = len(ca), len(cb)
+        if tuple(sa) == tuple(sb):
+            return sa, ca, cb
+        if na == 1 or nb == 1:
             if na == nb:
                 return (sa if len(sa) >= len(sb) else sb), ca, cb
             return (sb, ca * nb, cb) if na == 1 else (sa, ca, cb * na)
+        # different shapes, also when the element counts agree: (n, 1) against (n,) is an outer product, not an element-wise
+        # pair (2026-11-16: gradsolve 0.2.1 pairs equal counts element-wise, which gave a wrong Jacobian whenever a scalar
+        # function of the state multiplied a vector as long as the state)
         A = np.array(ca, dtype=object).reshape(sa); B = np.array(cb, dtype=object).reshape(sb)
         try:
             A2, B2 = np.broadcast_arrays(A, B)
@@ -121,13 +126,23 @@ def _extend_translator(JF):
 
     def _h_scatter(combine=None):
         def h(e, iv, p):
-            operand = e._as_obj_array(iv[0]); idx = _num_arr(iv[1]).astype(np.int64); upd = e._as_obj_array(iv[2])
-            base = jnp.full(operand.shape, -1, jnp.int32); tags = jnp.arange(upd.size, dtype=jnp.int32).reshape(upd.shape)
-            res = np.asarray(jax.lax.scatter(base, jnp.asarray(idx, jnp.int32), tags, p["dimension_numbers"], indices_are_sorted=p.get("indices_are_sorted", False),
-                                             unique_indices=p.get("unique_indices", False), mode=p.get("mode", None)))
-            of = operand.reshape(-1); uf = upd.reshape(-1); out = []
-            for k, tag in enumerate(res.reshape(-1)):
-                out.append(of[k] if tag < 0 else (uf[int(tag)] if combine is None else e._scalar_binop(combine, of[k], uf[int(tag)])))
+            operand = e._as_obj_array(iv[0]); idx = jnp.asarray(_num_arr(iv[1]).astype(np.int64), jnp.int32); upd = e._as_obj_array(iv[2])
+            of = operand.reshape(-1); uf = upd.reshape(-1)
+            kw = dict(indices_are_sorted=p.get("indices_are_sorted", False), mode=p.get("mode", None))
+            if combine is None:   # overwrite: one update per slot (the winner among repeated indices is whichever JAX picks)
+                base = jnp.full(operand.shape, -1, jnp.int32); tags = jnp.arange(upd.size, dtype=jnp.int32).reshape(upd.shape)
+                res = np.asarray(jax.lax.scatter(base, idx, tags, p["dimension_numbers"], unique_indices=p.get("unique_indices", False), **kw))
+                return (tuple(operand.shape), [of[k] if tag < 0 else uf[int(tag)] for k, tag in enumerate(res.reshape(-1))])
+            # accumulate: with repeated indices a slot receives several updates and all of them are combined, in the order of the
+            # updates (2026-11-16: a single tag scatter kept one update per slot and silently dropped the others)
+            marks = jnp.eye(upd.size, dtype=jnp.int32).reshape((upd.size,) + tuple(upd.shape))
+            hit = np.asarray(jax.vmap(lambda mark: jax.lax.scatter_add(jnp.zeros(operand.shape, jnp.int32), idx, mark, p["dimension_numbers"], unique_indices=False, **kw))(marks))
+            hit = hit.reshape(upd.size, -1); out = []
+            for k in range(of.size):
+                acc = of[k]
+                for j in np.flatnonzero(hit[:, k]):
+                    acc = e._scalar_binop(combine, acc, uf[int(j)])
+                out.append(acc)
             return (tuple(operand.shape), out)
         return h
 
