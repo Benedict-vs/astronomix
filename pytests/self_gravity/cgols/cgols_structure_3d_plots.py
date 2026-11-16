@@ -14,8 +14,8 @@ Quantities (both hemispheres summed, slab 1 < |z| < 4.5 kpc; entropy classes of 
                     converged scale l_c = smallest scale down to which the 3-bin-mean ratio to 2N stays within 20 %
                     (judged from 500 pc down, where the bins hold >= 300 modes, to 1/2 of the 2N Nyquist k)
 
-Ensembles: where seed members exist (FV-1024: base rerun + seeds 2, 3) the mean is shown and the member spread
-(std / mean) is printed and drawn as error bars. Window means only where every even checkpoint of the window exists.
+Ensembles: where seed members exist (FV-1024: base rerun + seeds 2, 3; FD-1024: base + seed 1) the mean is shown
+and the member spread (std / mean) is printed and drawn as error bars. Window means only where every even checkpoint of the window exists.
 
     python cgols_structure_3d_plots.py [--windows 15-30,30-45,45-75]
 
@@ -51,7 +51,7 @@ BOX_KPC = 10.0  # x extent of the A-series box (dx = BOX_KPC / N)
 
 #: (scheme, N) -> cache tags (several = seed ensemble)
 RUNS = {
-    ("FD", 128): ["_A128"], ("FD", 256): ["_A256"], ("FD", 512): ["_A512"], ("FD", 1024): ["_A1024"],
+    ("FD", 128): ["_A128"], ("FD", 256): ["_A256"], ("FD", 512): ["_A512"], ("FD", 1024): ["_A1024", "_A1024s1"],
     ("FD", 2048): ["_A2048"],
     ("FV", 128): ["_A128fv"], ("FV", 256): ["_A256fv"], ("FV", 512): ["_A512fvf32"],
     ("FV", 1024): ["_A1024fvr", "_A1024fvs2", "_A1024fvs3"], ("FV", 2048): ["_A2048fv"],
