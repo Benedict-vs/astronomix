@@ -54,6 +54,60 @@ from astronomix._modules._cooling._cooling import (
 )
 
 
+def make_vector_field(
+    reaction_network,
+    rate_modifier_a,
+    rate_modifier_b,
+    cosmic_ray_rate,
+    fuv_field,
+    visual_extinction,
+    thermochemistry,
+    adiabatic_index,
+    dust_to_gas_ratio,
+    hydrogen_molecule_formation_rate_coefficient,
+    hydrogen_index,
+    molecular_hydrogen_index,
+    electron_index,
+    atomic_oxygen_index,
+    ionized_hydrogen_index,
+    helium_index,
+    ionized_carbon_index,
+    co_cooling,
+    carbon_monoxide_index,
+    co_cooling_table,
+    co_cooling_bounds,
+):
+    """The per-cell chemistry right-hand side ``f(t, state, args)`` with its parameters closed over.
+
+    The same function that ``_advance_single_cell`` hands to diffrax (abundances clamped at zero, temperature
+    clipped to [3, 1e9] K before the network evaluates; with ``thermochemistry`` the state carries the temperature
+    as its last element). Exposed so that the fused Warp solver of ``_warp_stiff`` can translate it with CONCRETE
+    parameters at set-up time (2026-10-12).
+    """
+    def chemistry_derivative(time, abundances, temperature_kelvin):
+        abundances = jnp.maximum(abundances, 0.0)
+        temperature_kelvin = jnp.clip(temperature_kelvin, 3.0, 1.0e9)
+        return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field, visual_extinction,
+                                rate_modifier_a, rate_modifier_b)
+
+    if thermochemistry:
+        def vector_field(time, state, args):
+            abundances = state[:-1]
+            temperature_kelvin = state[-1]
+            abundance_derivative = chemistry_derivative(time, abundances, temperature_kelvin)
+            temperature_rate = temperature_derivative(
+                abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
+                hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
+                atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
+                carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
+            return jnp.concatenate([abundance_derivative, jnp.reshape(temperature_rate, (1,))])
+    else:
+        def vector_field(time, abundances, args):
+            # fixed temperature: not supported by the fused path (T would have to be a per-cell parameter)
+            raise NotImplementedError("make_vector_field needs thermochemistry=True")
+    return vector_field
+
+
 def _advance_single_cell(
     cell_abundances,
     cell_temperature_kelvin,
@@ -681,7 +735,33 @@ def update_chemistry(
     # independent, so this is numerically identical to the unchunked vmap and
     # only bounds peak memory.
     chunk_size = chemistry_config.reaction_chunk_size
-    if gated:
+    implicit_warp = (
+        chemistry_config.solver != EMULATOR
+        and chemistry_config.stiff_core_fn is not None
+        and chemistry_config.thermochemistry
+    )
+    if implicit_warp:
+        # Fused per-cell Rosenbrock23 Warp kernel in EVERY cell (one thread per
+        # cell with its own adaptive steps; ``_warp_stiff.py``) in place of the
+        # lockstep diffrax vmap: the implicit reference with the cost structure
+        # of a per-cell solver (2026-11-06). With the density gate the step is
+        # per cell, and a cell whose step is zero this call returns unchanged.
+        step_cells = (
+            time_step_seconds_per_cell.reshape(number_of_cells)
+            if gated
+            else jnp.full((number_of_cells,), time_step_seconds, dtype=species_per_cell.dtype)
+        )
+        splits = max(int(chemistry_config.chemistry_call_splits), 1)
+        reacted_per_cell = jnp.concatenate(
+            [species_per_cell, temperature_per_cell[:, None]], axis=1
+        )
+        for _ in range(splits):
+            proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits)
+            # like diffrax with throw=False: a cell that returned a non-finite
+            # state keeps its pre-step state
+            finite = jnp.all(jnp.isfinite(proposed), axis=1)
+            reacted_per_cell = jnp.where(finite[:, None], proposed, reacted_per_cell)
+    elif gated:
         splits = max(int(chemistry_config.chemistry_call_splits), 1)
         step_per_cell = time_step_seconds_per_cell.reshape(number_of_cells) / splits
 
@@ -733,10 +813,19 @@ def update_chemistry(
                 temperature_per_cell[core_index],
                 time_step_seconds_per_cell.reshape(number_of_cells)[core_index],
             )
-            core_batch = chunk_size if 0 < chunk_size < capacity else capacity
-            core_reacted = jax.lax.map(
-                lambda cell: react_core(cell[0], cell[1], cell[2]), core_cells, batch_size=core_batch
-            )
+            if chemistry_config.stiff_core_fn is not None and chemistry_config.thermochemistry:
+                # fused per-cell Rosenbrock23 Warp kernel (one thread per cell, own adaptive steps; _warp_stiff.py):
+                # state [capacity, n_species + 1] = abundances [cm^-3] with T [K] last, per-cell step length in s
+                core_state = jnp.concatenate([core_cells[0], core_cells[1][:, None]], axis=1)
+                core_reacted = chemistry_config.stiff_core_fn(core_state, core_cells[2])
+                # like diffrax with throw=False: a cell that returned a non-finite state keeps its emulator result
+                finite = jnp.all(jnp.isfinite(core_reacted), axis=1)
+                core_reacted = jnp.where(finite[:, None], core_reacted, reacted_per_cell[core_index])
+            else:
+                core_batch = chunk_size if 0 < chunk_size < capacity else capacity
+                core_reacted = jax.lax.map(
+                    lambda cell: react_core(cell[0], cell[1], cell[2]), core_cells, batch_size=core_batch
+                )
             reacted_per_cell = reacted_per_cell.at[core_index].set(core_reacted, mode="drop")
     elif 0 < chunk_size < number_of_cells:
         reacted_per_cell = jax.lax.map(

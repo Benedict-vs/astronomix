@@ -9,7 +9,7 @@ per-network physical parameters.
 """
 
 # typing
-from typing import NamedTuple, Tuple, Union
+from typing import Any, NamedTuple, Tuple, Union
 from types import NoneType
 from jaxtyping import PyTree
 
@@ -176,6 +176,12 @@ class ChemistryConfig(NamedTuple):
     # the density hydrogen in its species, i.e. species n_H ~ 0.3-1 cm^-3, below the
     # pool of every emulator; frozen, it never cools behind the collision shock.
     stiff_outside_domain: bool = False
+    # Stiff-core solver (2026-10-12): "diffrax" = the vmapped Kvaerno5 of _advance_single_cell; "warp" = the fused
+    # per-cell Rosenbrock23 Warp kernel of _warp_stiff.py, 9-13x faster on the cores at the same tolerance. The kernel
+    # closes over the concrete chemistry parameters, so it is built at set-up time (make_vector_field +
+    # build_fused_core_solver) and carried here as a static callable.
+    stiff_core_solver: str = "diffrax"
+    stiff_core_fn: Any = None
 
 
 class ChemistryParams(NamedTuple):

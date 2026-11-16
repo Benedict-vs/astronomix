@@ -21,7 +21,7 @@ finite volume approach of [Pang and Wu (2024)](https://arxiv.org/abs/2410.05173)
 - [x] backwards and forwards differentiable with adaptive timestepping
 - [x] turbulent driving, simple stellar wind, simple radiative cooling modules
 - [x] easily extensible, all code is open source
-- [x] **(this fork)** stiff astrochemistry + thermochemistry per cell via [carbox](https://github.com/lorenzobranca/carbox) reaction networks (Diffrax Kvaerno5, chunked, sharded), and a **neural chemistry emulator** that replaces the stiff solve with a trained dense network (~45x lower wall time at 160^3), see [Chemistry and the neural emulator](#chemistry-and-the-neural-chemistry-emulator-this-fork)
+- [x] **(this fork)** stiff astrochemistry + thermochemistry per cell via [carbox](https://github.com/lorenzobranca/carbox) reaction networks (Diffrax Kvaerno5, chunked, sharded, or a per-cell Rosenbrock23 Warp kernel built with [gradsolve](https://github.com/ECLIPSE-AI4Science/gradsolve)), and a **neural chemistry emulator** that replaces the stiff solve with a trained dense network (~45x lower wall time at 160^3), see [Chemistry and the neural emulator](#chemistry-and-the-neural-chemistry-emulator-this-fork)
 
 ## Contents
 
@@ -194,6 +194,51 @@ params = SimulationParams(..., chemistry_params=chemistry_params)
   thermochemistry. **Do not use it as a stabiliser**: it silently sets the thermal state of the
   whole cloud (dense gas parked at hundreds of K, dt-dependent). Set it to a large value
   (e.g. 10) once the CFL estimate is nan-safe (below), which is what made it unnecessary.
+
+### Per-cell implicit solver on the GPU (Warp kernel, via gradsolve)
+
+- `astronomix/_modules/_chemistry/_warp_stiff.py` is an alternative to the vmapped Diffrax
+  solve: an adaptive Rosenbrock23 integrator compiled as one
+  [NVIDIA Warp](https://github.com/NVIDIA/warp) kernel with **one GPU thread per cell**, so
+  every cell takes its own steps instead of the step count of the stiffest cell of its batch.
+  The right-hand side and its analytic Jacobian are translated from the JAX function by
+  [gradsolve](https://github.com/ECLIPSE-AI4Science/gradsolve) (jaxpr -> Warp), whose
+  Rosenbrock23 scheme and step controller the kernel uses; the module extends the translator
+  to the primitives of the carbox network and wraps the kernel with `warp.jax_kernel`, so
+  that it is an ordinary JAX primitive inside the jitted, sharded time step.
+- It needs `thermochemistry=True` and the optional packages `gradsolve` and `warp-lang`
+  (`pip install 'gradsolve[warp]'`; developed against gradsolve 0.2.1 and warp-lang 1.18).
+  The kernel closes over the concrete chemistry parameters, so it is built once at set-up
+  time and carried in the config:
+
+```python
+from astronomix._modules._chemistry._chemistry import make_vector_field
+from astronomix._modules._chemistry._warp_stiff import build_fused_core_solver
+
+cc, cp = chemistry_config, chemistry_params
+vector_field = make_vector_field(
+    cp.network, cp.rate_modifier_a, cp.rate_modifier_b, cp.cosmic_ray_rate, cp.fuv_field,
+    cp.visual_extinction, cc.thermochemistry, gamma,  # gamma: the adiabatic index of the run
+    cp.dust_to_gas_ratio, cp.hydrogen_molecule_formation_rate_coefficient,
+    cc.hydrogen_index, cc.molecular_hydrogen_index, cc.electron_index, cc.atomic_oxygen_index,
+    cc.ionized_hydrogen_index, cc.helium_index, cc.ionized_carbon_index, cc.co_cooling,
+    cc.carbon_monoxide_index, cp.co_cooling_table, cp.co_cooling_bounds,
+)
+solver = build_fused_core_solver(
+    vector_field, cc.number_of_chemical_species + 1,
+    rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
+)
+chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
+```
+
+- Without an emulator, `update_chemistry` then advances **every cell** with the kernel. With
+  the emulator and `stiff_core_capacity > 0`, the kernel solves the gathered dense cells and
+  the emulator the rest. A cell that returns a non-finite state keeps its previous one, as
+  with Diffrax and `throw=False`.
+- Measured on the 256^3 cloud collision (16 species + T, rtol 1e-6, atol 1e-12): a run with
+  the kernel in every cell reproduces the Kvaerno5 reference at 3.65 Myr to a relative L2
+  difference of 9e-6 in density, and one chemistry update of the whole grid takes 2.8-3.5 s
+  on one H200 against 118-122 s for the vmapped Kvaerno5.
 
 ### Multi-GPU (sharded) finite volume
 
