@@ -239,6 +239,10 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
   the kernel in every cell reproduces the Kvaerno5 reference at 3.65 Myr to a relative L2
   difference of 9e-6 in density, and one chemistry update of the whole grid takes 2.8-3.5 s
   on one H200 against 118-122 s for the vmapped Kvaerno5.
+- Tests: `pytest pytests/chemistry/test_warp_stiff_solver.py` (on the CPU, about a minute):
+  the kernel on the Robertson problem, the translated field and Jacobian of a small
+  carbox-like network against JAX, and `update_chemistry` with the kernel against the
+  vmapped Kvaerno5 on a carbox network (skipped when carbox is not installed).
 
 ### Multi-GPU (sharded) finite volume
 

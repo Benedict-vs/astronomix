@@ -1,0 +1,366 @@
+"""
+Tests for the per-cell implicit chemistry solver
+(``astronomix/_modules/_chemistry/_warp_stiff.py``): an adaptive Rosenbrock23
+integrator compiled as one NVIDIA Warp kernel with one thread per cell, built on
+gradsolve's jaxpr -> Warp translator.
+
+1. The kernel on the Robertson problem against Diffrax Kvaerno5: accuracy with a
+   per-cell step length, the linear invariant, a zero step, ``jax.jit`` and the
+   solver cache.
+2. The translator extension on a small temperature-dependent reaction network
+   written with the primitives of a carbox right-hand side (closed-over constant
+   arrays, gathers and scatter-adds with constant indices, a product over an
+   axis, a matrix product, ``where``, clipping): one linearly implicit step
+   against the same step from the JAX field and its ``jacfwd`` Jacobian, and the
+   full solve against Kvaerno5. The network repeats indices in its scatter-add
+   and has as many reactions as state variables on purpose: both were translated
+   wrongly before 2026-11-16 (one update kept per repeated index; a scalar times
+   a vector as long as the state paired element-wise in the Jacobian).
+3. The chemistry module on a carbox network: ``update_chemistry`` with the kernel
+   in every cell against ``update_chemistry`` with the vmapped Kvaerno5. Skipped
+   when carbox or its ``data/simple_latent_tgas.csv`` is not available; set
+   ASTRONOMIX_TEST_NETWORK_CSV to point at the file.
+
+The problems are tiny, so the file runs on the CPU unless a platform is chosen in
+the environment (Warp compiles the kernel for the CPU as well): it neither waits
+for nor lands on a shared GPU. Needs gradsolve, warp-lang and diffrax.
+"""
+
+import os
+
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+# ruff: noqa: E402
+
+import numpy as np
+import pytest
+
+pytest.importorskip("gradsolve")
+pytest.importorskip("warp")
+dx = pytest.importorskip("diffrax")
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+import jax.numpy as jnp
+
+from astronomix._modules._chemistry._warp_stiff import build_fused_core_solver
+
+RTOL = 1.0e-6
+ATOL = 1.0e-12
+
+
+def _reference(vector_field, initial_state, end_time, rtol=1.0e-10, atol=1.0e-14):
+    """Diffrax Kvaerno5 at a tight tolerance, one independent solve per cell."""
+
+    def one_cell(state, t_end):
+        solution = dx.diffeqsolve(
+            dx.ODETerm(vector_field),
+            dx.Kvaerno5(),
+            0.0,
+            t_end,
+            dt0=None,
+            y0=state,
+            stepsize_controller=dx.PIDController(rtol=rtol, atol=atol),
+            saveat=dx.SaveAt(t1=True),
+            max_steps=100_000,
+        )
+        return solution.ys[0]
+
+    return np.asarray(jax.jit(jax.vmap(one_cell))(initial_state, end_time))
+
+
+# ---------------------------------------------------------------------------
+# 1. Robertson
+# ---------------------------------------------------------------------------
+
+ROBERTSON_STEPS = np.array([0.0, 4.0e-2, 4.0e-1, 4.0, 4.0e1, 4.0e2, 4.0e3, 4.0e4])
+
+
+def _robertson(time, state, args):
+    """Robertson's three-species kinetics, rate constants 0.04, 3e7 and 1e4."""
+    slow = 0.04 * state[0]
+    fast = 3.0e7 * state[1] * state[1]
+    back = 1.0e4 * state[1] * state[2]
+    return jnp.stack([-slow + back, slow - fast - back, fast])
+
+
+@pytest.fixture(scope="module")
+def robertson():
+    """The solver, the initial states and the kernel's result, one cell per step length."""
+    solver = build_fused_core_solver(
+        _robertson, 3, rtol=RTOL, atol=ATOL, max_steps=4096, cache_key="pytest-robertson"
+    )
+    initial = jnp.tile(jnp.array([1.0, 0.0, 0.0]), (ROBERTSON_STEPS.size, 1))
+    steps = jnp.asarray(ROBERTSON_STEPS)
+    return solver, initial, steps, np.asarray(solver(initial, steps))
+
+
+def test_robertson_matches_kvaerno5(robertson):
+    _, initial, steps, result = robertson
+    reference = _reference(_robertson, initial[1:], steps[1:])
+    assert np.all(np.isfinite(result))
+    np.testing.assert_allclose(result[1:], reference, rtol=1.0e-4, atol=1.0e-10)
+
+
+def test_robertson_keeps_the_linear_invariant(robertson):
+    # a Rosenbrock scheme with the exact Jacobian conserves y1 + y2 + y3 to round-off
+    _, _, _, result = robertson
+    np.testing.assert_allclose(result.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-12)
+
+
+def test_zero_step_returns_the_state(robertson):
+    # update_chemistry relies on it under the density gate: a cell that is not due is untouched
+    _, initial, _, result = robertson
+    assert ROBERTSON_STEPS[0] == 0.0
+    np.testing.assert_array_equal(result[0], np.asarray(initial[0]))
+
+
+def test_solver_is_a_jax_primitive_under_jit(robertson):
+    solver, initial, steps, result = robertson
+    jitted = jax.jit(lambda state, step: 2.0 * solver(state, step))
+    np.testing.assert_array_equal(np.asarray(jitted(initial, steps)), 2.0 * result)
+
+
+def test_solver_cache(robertson):
+    solver = robertson[0]
+    again = build_fused_core_solver(
+        _robertson, 3, rtol=RTOL, atol=ATOL, max_steps=4096, cache_key="pytest-robertson"
+    )
+    assert again is solver
+
+
+# ---------------------------------------------------------------------------
+# 2. A reaction network written like a carbox right-hand side
+# ---------------------------------------------------------------------------
+
+# Five species and the temperature; index 5 of the padded abundances holds 1 (the
+# second "reactant" of a one-body reaction). Species 0, 1 and 2 are produced by
+# several reactions each (repeated scatter-add indices), and there are six
+# reactions for six state variables (rate vectors as long as the state).
+_REACTANTS = np.array([[0, 1], [2, 5], [2, 3], [4, 5], [0, 4], [1, 5]])
+_PRODUCT_SPECIES = np.array([2, 0, 1, 4, 3, 2, 1, 2, 0])
+_PRODUCT_REACTION = np.array([0, 1, 1, 2, 2, 3, 4, 4, 5])
+_LOSS = np.zeros((5, 6))
+for _reaction, (_first, _second) in enumerate(_REACTANTS):
+    for _species in (_first, _second):
+        if _species < 5:
+            _LOSS[_species, _reaction] += 1.0
+_PREFACTOR = np.array([1.0e-2, 1.0, 1.0e2, 5.0e-1, 1.0e3, 2.0e-3])
+_EXPONENT = np.array([0.5, 0.0, 0.0, 0.0, -0.7, 0.0])
+_BARRIER = np.array([0.0, 300.0, 0.0, 0.0, 0.0, 40.0])
+_COLD_SWITCH = np.array([False, False, False, True, False, False])
+
+
+def _network(time, state, args):
+    """Mass-action kinetics with Arrhenius rates and a heating/cooling balance."""
+    abundances = jnp.maximum(state[:-1], 0.0)
+    temperature = jnp.clip(state[-1], 3.0, 1.0e9)
+    coefficients = (
+        jnp.asarray(_PREFACTOR)
+        * (temperature / 300.0) ** jnp.asarray(_EXPONENT)
+        * jnp.exp(-jnp.asarray(_BARRIER) / temperature)
+    )
+    # one reaction is ten times slower in cold gas (a mask of constants and a comparison)
+    coefficients = coefficients * jnp.where(jnp.asarray(_COLD_SWITCH) & (temperature <= 100.0), 0.1, 1.0)
+    padded = jnp.concatenate([abundances, jnp.ones(1)])
+    rates = coefficients * jnp.prod(padded[jnp.asarray(_REACTANTS)], axis=1)
+    gain = jnp.zeros(5).at[jnp.asarray(_PRODUCT_SPECIES)].add(rates[jnp.asarray(_PRODUCT_REACTION)])
+    loss = jnp.asarray(_LOSS) @ rates
+    total = jnp.sum(abundances)
+    heating = 2.0e1 * total + 5.0e1 * rates[2]
+    cooling = 1.0e-1 * abundances[2] * temperature + 2.0e-3 * total * temperature
+    temperature_rate = (heating - cooling) / (1.5 * total)
+    return jnp.concatenate([gain - loss, jnp.reshape(temperature_rate, (1,))])
+
+
+def _network_states(cells, seed):
+    generator = np.random.default_rng(seed)
+    abundances = 10.0 ** generator.uniform(-3.0, 0.0, size=(cells, 5))
+    temperature = 10.0 ** generator.uniform(np.log10(20.0), np.log10(800.0), size=(cells, 1))
+    steps = 10.0 ** generator.uniform(-2.0, 2.0, size=cells)
+    return np.concatenate([abundances, temperature], axis=1), steps
+
+
+def test_translated_field_and_jacobian_match_jax():
+    # With one step allowed and the error control off, the kernel takes exactly one linearly
+    # implicit step, a hundredth of the interval long: y + h k2, with W = 1 - gamma h J,
+    # W k1 = f(y) and W (k2 - k1) = f(y + h k1 / 2) - k1. The same step from the JAX field and
+    # its jacfwd Jacobian must agree to round-off; an error in either translation shows here.
+    import gradsolve.warp._warp_rosenbrock as scheme
+
+    gamma = float(scheme._D_COEF)
+    step = 1.0e-2
+    initial, _ = _network_states(16, seed=11)
+    solver = build_fused_core_solver(
+        _network, 6, rtol=1.0e6, atol=1.0e6, max_steps=1, cache_key="pytest-network-one-step"
+    )
+    result = np.asarray(solver(jnp.asarray(initial), jnp.full(initial.shape[0], 100.0 * step)))
+
+    field = jax.jit(lambda state: _network(0.0, state, None))
+    jacobian = jax.jit(jax.jacfwd(lambda state: _network(0.0, state, None)))
+    expected = np.empty_like(initial)
+    for cell, state in enumerate(initial):
+        matrix = np.eye(6) - gamma * step * np.asarray(jacobian(jnp.asarray(state)))
+        k1 = np.linalg.solve(matrix, np.asarray(field(jnp.asarray(state))))
+        k2 = np.linalg.solve(matrix, np.asarray(field(jnp.asarray(state + 0.5 * step * k1))) - k1) + k1
+        expected[cell] = state + step * k2
+
+    increment = np.abs(expected - initial)
+    assert np.max(increment / np.abs(initial)) > 1.0e-3  # the step moves the state
+    np.testing.assert_allclose(result - initial, expected - initial, rtol=1.0e-9, atol=1.0e-12 * np.abs(initial).max())
+
+
+def test_carbox_like_network_matches_kvaerno5():
+    cells = 48
+    initial, steps = _network_states(cells, seed=7)
+    initial, steps = jnp.asarray(initial), jnp.asarray(steps)
+
+    solver = build_fused_core_solver(
+        _network, 6, rtol=RTOL, atol=ATOL, max_steps=4096, cache_key="pytest-network"
+    )
+    result = np.asarray(solver(initial, steps))
+    reference = _reference(_network, initial, steps)
+
+    assert np.all(np.isfinite(result))
+    assert np.all(result[:, :5] > -1.0e-12)
+    # the kernel runs at rtol 1e-6; its global error over these stiff solves reaches 1e-4
+    np.testing.assert_allclose(result, reference, rtol=1.0e-3, atol=1.0e-9)
+    # the kernel moved the state: the comparison is not between two copies of the input
+    assert np.max(np.abs(np.log10(reference[:, -1] / np.asarray(initial)[:, -1]))) > 0.1
+
+
+# ---------------------------------------------------------------------------
+# 3. update_chemistry on a carbox network: the kernel against the vmapped Kvaerno5
+# ---------------------------------------------------------------------------
+
+NUMBER_DENSITY_UNIT_CGS = 597.6
+TEMPERATURE_UNIT_KELVIN = 1.0e2
+TIME_UNIT_SECONDS = 3.1557e13
+NUM_CELLS = 24
+TIME_STEP = 2.0e-3  # 2000 yr, of the order of a hydrodynamic step of a cloud simulation
+# fraction of the hydrogen nuclei in each species; every other species starts at 1e-12
+INITIAL_FRACTIONS = {"H": 0.5, "H2": 0.25, "C+": 1.4e-4, "O": 3.2e-4, "H+": 1.0e-6, "E": 1.41e-4}
+
+
+def _network_file():
+    path = os.environ.get("ASTRONOMIX_TEST_NETWORK_CSV")
+    if path:
+        return path if os.path.exists(path) else None
+    try:
+        import carbox
+    except ImportError:
+        return None
+    path = os.path.join(os.path.dirname(os.path.dirname(carbox.__file__)), "data", "simple_latent_tgas.csv")
+    return path if os.path.exists(path) else None
+
+
+def _react(use_kernel, network_csv):
+    """One call of ``update_chemistry`` over a 1-D box of ``NUM_CELLS`` different cells."""
+    from astronomix import (
+        SimulationConfig,
+        SimulationParams,
+        construct_primitive_state,
+        finalize_config,
+        get_helper_data,
+        get_registered_variables,
+    )
+    from astronomix._modules._chemistry._chemistry import make_vector_field, update_chemistry
+    from astronomix.option_classes.simulation_config import FINITE_VOLUME, NATIVE_JAX
+    from astronomix.setup_helpers import build_chemistry_from_network_file
+
+    gamma = 5.0 / 3.0
+    chemistry_config, chemistry_params, species_names = build_chemistry_from_network_file(
+        network_csv,
+        "latent_tgas",
+        number_density_unit_cgs=NUMBER_DENSITY_UNIT_CGS,
+        temperature_unit_kelvin=TEMPERATURE_UNIT_KELVIN,
+        time_unit_seconds=TIME_UNIT_SECONDS,
+        cosmic_ray_rate=3.0e-17,
+        fuv_field=1.0e-4,
+        visual_extinction=2.0,
+        thermochemistry=True,
+        cooling_courant=10.0,
+        absolute_tolerance=ATOL,
+        relative_tolerance=RTOL,
+        max_steps=2048,
+    )
+    if use_kernel:
+        cc, cp = chemistry_config, chemistry_params
+        vector_field = make_vector_field(
+            cp.network, cp.rate_modifier_a, cp.rate_modifier_b, cp.cosmic_ray_rate, cp.fuv_field,
+            cp.visual_extinction, cc.thermochemistry, gamma, cp.dust_to_gas_ratio,
+            cp.hydrogen_molecule_formation_rate_coefficient, cc.hydrogen_index,
+            cc.molecular_hydrogen_index, cc.electron_index, cc.atomic_oxygen_index,
+            cc.ionized_hydrogen_index, cc.helium_index, cc.ionized_carbon_index, cc.co_cooling,
+            cc.carbon_monoxide_index, cp.co_cooling_table, cp.co_cooling_bounds,
+        )
+        solver = build_fused_core_solver(
+            vector_field, cc.number_of_chemical_species + 1,
+            rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
+            cache_key="pytest-carbox",
+        )
+        chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
+
+    config = SimulationConfig(
+        dimensionality=1,
+        solver_mode=FINITE_VOLUME,
+        backend=NATIVE_JAX,
+        box_size=1.0,
+        num_cells=NUM_CELLS,
+        progress_bar=False,
+        chemistry_config=chemistry_config,
+    )
+    params = SimulationParams(t_end=1.0, gamma=gamma, chemistry_params=chemistry_params)
+    registered_variables = get_registered_variables(config)
+    position = get_helper_data(config).geometric_centers
+
+    # density from ~0.2 to ~20 code units (100 to 10^4 cm^-3) and a pressure that makes the
+    # temperature differ from cell to cell, so every cell is a different stiff problem
+    density = 10.0 ** (-0.7 + 2.0 * position)
+    pressure = density * (0.3 + 1.5 * position)
+    state = construct_primitive_state(
+        config=config,
+        registered_variables=registered_variables,
+        density=density,
+        velocity_x=jnp.zeros_like(position),
+        gas_pressure=pressure,
+    )
+    start = registered_variables.chemistry_species_index
+    count = registered_variables.num_chemical_species
+    for index in range(count):
+        fraction = INITIAL_FRACTIONS.get(species_names[index], 1.0e-12)
+        state = state.at[start + index].set(fraction * density)
+
+    config = finalize_config(config, state.shape)
+    reacted = update_chemistry(state, registered_variables, config.chemistry_config, params, TIME_STEP)
+    species = slice(start, start + count)
+    pressure_index = registered_variables.pressure_index
+    return (
+        np.asarray(state[species]), np.asarray(reacted[species]),
+        np.asarray(state[pressure_index]), np.asarray(reacted[pressure_index]),
+        tuple(species_names),
+    )
+
+
+def test_update_chemistry_kernel_matches_kvaerno5():
+    network_csv = _network_file()
+    if network_csv is None:
+        pytest.skip("carbox network file not found (set ASTRONOMIX_TEST_NETWORK_CSV)")
+
+    initial, kvaerno5, initial_pressure, kvaerno5_pressure, names = _react(False, network_csv)
+    _, kernel, _, kernel_pressure, _ = _react(True, network_csv)
+
+    assert np.all(np.isfinite(kernel)) and np.all(np.isfinite(kernel_pressure))
+    # the step is long enough for the chemistry to act, so the agreement below is not trivial
+    assert np.max(np.abs(np.log10(kvaerno5[names.index("C+")] / initial[names.index("C+")]))) > 1.0e-2
+
+    # species that carry more than 1e-10 of the hydrogen: within 1e-3 dex of the reference solver
+    hydrogen = initial[names.index("H")] + 2.0 * initial[names.index("H2")]
+    relevant = kvaerno5 > 1.0e-10 * hydrogen
+    difference = np.abs(np.log10(np.maximum(kernel, 1.0e-300) / np.maximum(kvaerno5, 1.0e-300)))
+    assert np.max(difference[relevant]) < 1.0e-3, (
+        f"largest difference {np.max(difference[relevant]):.2e} dex"
+    )
+    np.testing.assert_allclose(kernel_pressure, kvaerno5_pressure, rtol=1.0e-3)
