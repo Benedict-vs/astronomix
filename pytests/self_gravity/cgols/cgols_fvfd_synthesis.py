@@ -72,6 +72,7 @@ ladder); and the GPU-hours per run. The ablations (HLLE, fp64, CFL 0.3, PPM) are
     # 2026-11-11: + FV-1024 seeds 2 and 3 (RUNS["FV1024s2"], ["FV1024s3"], HoreKa jobs 127474 / 127475): FV-1024
     # sigma_traj from 4 members.
     # 2026-11-16: + FD-1024 seed 1 (RUNS["FD1024s1"], HoreKa job 127497): FD-1024 sigma_traj measured (2 members).
+    # 2026-11-17: + FV-2048 seed 1 (RUNS["FV2048s1"], HoreKa job 127485): first measured sigma_traj at 2048 (FV).
     # 2026-11-09: + FD-2048 (RUNS["FD2048"], the A-2048 production run; frames, emission and 3D caches from the
     # A-2048 analysis). FD-FV rows, the FD 512 -> 1024 -> 2048 ladder and the slope fit now run to 2048. 3D
     # metrics now always include their own time-sampling error (also the early ones), and the mixed outflow at 1 kpc
@@ -174,6 +175,10 @@ RUNS = {
     # HoreKa job 112293 (32 H200, split (1, 8, 4, 1), code 2ce69fa): frames + emission; 3D cache
     # data/studies/convergence3d_v3_A2048fv.npz (31 checkpoints, every 2nd frame + 59, measured on HoreKa)
     "FV2048": ("FV", 2048, "base", "cgols_snapshots_A2048fv", "_A2048fv", "_A2048fv", f"{LOGS}/cgols_diag_A2048fv.log"),
+    # HoreKa job 127485 (32 H200, split (1, 8, 4, 1), code 494d1b5 + 150f50f): IC seed 1, 11.21 h; is the FD-2048 /
+    # FV-2048 gap noise or scheme? 3D cache from HoreKa job 134287 (31 checkpoints, --parts 8)
+    "FV2048s1": ("FV", 2048, "ens", "cgols_snapshots_A2048fvs1", "_A2048fvs1", "_A2048fvs1",
+                 f"{LOGS}/cgols_diag_A2048fvs1.log"),
     # HoreKa jobs 96655 + 96657 (32 H200, split (1, 8, 4, 1)); 60 frames (51.25 Myr missing), emission from the
     # frames, 3D cache from HoreKa job 123745 (all 60 checkpoints)
     "FD2048": ("FD", 2048, "base", "cgols_snapshots_A2048", "_A2048", "_A2048", f"{LOGS}/cgols_diag_A2048.log"),
