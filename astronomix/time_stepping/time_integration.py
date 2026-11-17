@@ -24,6 +24,7 @@ from typing import (
 from types import NoneType
 
 # jax
+import os
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec
@@ -135,10 +136,14 @@ class LoopState(NamedTuple):
         key: The PRNG key advanced by stochastic per-step modules (forcing, ...).
         forcing: The persistent OU forcing field ``f`` (shape (3, nx, ny, nz)),
             or ``None`` when OU forcing is inactive.
+        chemistry_clock: Hydro time accumulated since the last chemistry
+            reaction (chemistry sub-cycling, ``chemistry_step_target`` > 0), or
+            ``None`` when the chemistry reacts every step.
     """
     primitive_state: Any
     key: Any
     forcing: Any = None
+    chemistry_clock: Any = None
 
 
 def _raise_with_time_integration_hint(error: Exception, config: SimulationConfig):
@@ -779,11 +784,24 @@ def _build_initial_loop_state(primitive_state, config, params, restart_state=Non
     active) needs a persistent solenoidal field; otherwise the forcing slot
     stays ``None`` and costs nothing in the carry.
     """
+    clock0 = _initial_chemistry_clock(config)
     if restart_state is not None:
-        return LoopState(primitive_state, restart_state.key, restart_state.forcing)
+        return LoopState(primitive_state, restart_state.key, restart_state.forcing, clock0)
 
     key0, forcing0 = _seed_key_and_forcing(config, params)
-    return LoopState(primitive_state, key0, forcing0)
+    return LoopState(primitive_state, key0, forcing0, clock0)
+
+
+def _initial_chemistry_clock(config: SimulationConfig):
+    """Zero accumulated chemistry time when sub-cycling is on, else ``None``.
+
+    Every integration call (segment) starts with an empty clock and flushes it on
+    its last step, so a segment boundary is always a reaction time and the saved
+    states carry no pending chemistry.
+    """
+    if config.chemistry_config.chemistry and config.chemistry_config.chemistry_step_target > 0.0:
+        return jnp.asarray(0.0)
+    return None
 
 
 def _integrate_core(
@@ -1046,9 +1064,33 @@ def _integrate_core(
         if config.exact_end_time and not config.use_specific_snapshot_timepoints:
             dt = jnp.minimum(dt, params.t_end - time)
 
+        def chemistry_schedule(step_size):
+            """Chemistry sub-cycling (``chemistry_step_target`` > 0) for a hydro
+            step of ``step_size``: the time the chemistry reacts over in this
+            step (the hydro time accumulated since the last reaction once it
+            reaches the target or on the segment's last step, else 0) and the
+            clock carried to the next step. ``(None, None)`` when the chemistry
+            reacts every step. A function of the step size, so that a retried
+            step (``PositivityConfig.step_retry``) reacts over the step it
+            actually takes."""
+            chemistry_clock = state.chemistry_clock
+            if chemistry_clock is None:
+                return None, None
+            accumulated = chemistry_clock + step_size
+            # dt was clipped to t_end - time above, so time + dt lands on t_end
+            last_step = time + step_size >= params.t_end * (1.0 - 1e-12)
+            react_now = jnp.logical_or(
+                accumulated >= config.chemistry_config.chemistry_step_target, last_step
+            )
+            return (
+                jnp.where(react_now, accumulated, 0.0),
+                jnp.where(react_now, 0.0, accumulated),
+            )
+
         def advance(step_size):
             """The per-step modules and the evolve over ``step_size``, from the
             state, PRNG key and forcing at the start of the step."""
+            chemistry_dt, _ = chemistry_schedule(step_size)
             new_key, new_forcing, new_state = _iteration_level_updates(
                 primitive_state,
                 key,
@@ -1059,6 +1101,7 @@ def _integrate_core(
                 helper_data_pad,
                 registered_variables,
                 time + step_size,
+                chemistry_dt=chemistry_dt,
             )
             if config.solver_mode == FINITE_VOLUME:
                 new_state = _evolve_state_fv(
@@ -1128,6 +1171,87 @@ def _integrate_core(
         else:
             key, forcing, primitive_state = advance(dt)
 
+        # the chemistry time and clock of the step actually taken
+        chemistry_dt, chemistry_clock = chemistry_schedule(dt)
+
+        # nan-safe hydro backstop: reset any cell that went non-finite in the
+        # finite-volume evolve to a floored rest state, so a handful of
+        # pathological cells cannot spread NaNs across the grid and kill the
+        # coupled run. Two failure modes seed these cells: void/cloud interfaces
+        # under strong cooling, and — with MHD — the deep resampled voids where the
+        # seeded field over a floored density gives a huge Alfven speed. The reset
+        # must cover EVERY evolved field: a cell left with a non-finite magnetic
+        # component feeds a nan fast-magnetosonic wave speed into the next
+        # timestep estimate (nan dt -> "nan encountered in while"). Scoped to
+        # finite-volume thermochemistry, where the stiff cooling is active.
+        if (
+            config.solver_mode == FINITE_VOLUME
+            and config.chemistry_config.chemistry
+            and config.chemistry_config.thermochemistry
+        ):
+            cell_finite = jnp.all(jnp.isfinite(primitive_state), axis=0)
+            # Report how many cells the backstop repairs this step (only when it
+            # fires, so a clean run prints nothing). A steady trickle means a
+            # localised problem; a jump to the whole grid means a global one.
+            repaired_cells = jnp.sum(~cell_finite)
+            jax.lax.cond(
+                repaired_cells > 0,
+                lambda n: jax.debug.print("NANREPAIR bad_cells={n}", n=n),
+                lambda n: None,
+                repaired_cells,
+            )
+            species_start = registered_variables.chemistry_species_index
+            number_of_species = registered_variables.num_chemical_species
+            primitive_state = primitive_state.at[
+                registered_variables.density_index
+            ].set(
+                jnp.where(
+                    cell_finite,
+                    primitive_state[registered_variables.density_index],
+                    params.minimum_density,
+                )
+            )
+            primitive_state = primitive_state.at[
+                registered_variables.pressure_index
+            ].set(
+                jnp.where(
+                    cell_finite,
+                    primitive_state[registered_variables.pressure_index],
+                    params.minimum_pressure,
+                )
+            )
+            for velocity_component in (
+                registered_variables.velocity_index.x,
+                registered_variables.velocity_index.y,
+                registered_variables.velocity_index.z,
+            ):
+                primitive_state = primitive_state.at[velocity_component].set(
+                    jnp.where(cell_finite, primitive_state[velocity_component], 0.0)
+                )
+            primitive_state = primitive_state.at[
+                species_start : species_start + number_of_species
+            ].set(
+                jnp.where(
+                    cell_finite[None, ...],
+                    primitive_state[species_start : species_start + number_of_species],
+                    0.0,
+                )
+            )
+            # The magnetic field is an evolved field too: leaving it non-finite in
+            # a repaired void cell reintroduces the nan through the Alfven-speed
+            # term of the next CFL estimate. Reset the field to zero there.
+            if config.mhd:
+                for magnetic_component in (
+                    registered_variables.magnetic_index.x,
+                    registered_variables.magnetic_index.y,
+                    registered_variables.magnetic_index.z,
+                ):
+                    primitive_state = primitive_state.at[magnetic_component].set(
+                        jnp.where(
+                            cell_finite, primitive_state[magnetic_component], 0.0
+                        )
+                    )
+
         # AthenaPK floors the density in every stage's conversion to
         # primitives, so its time step and output see the floored state; the
         # per-step hard floor does the same at the end of the step.
@@ -1141,7 +1265,23 @@ def _integrate_core(
                 params.maximum_alfven_speed,
             )
 
-        return dt, LoopState(primitive_state, key, forcing)
+        if os.environ.get("ASTRONOMIX_STEP_DEBUG"):
+            # Per-step diagnostics for chasing blow-ups (host print; slow, debug only).
+            rho = primitive_state[registered_variables.density_index]
+            pressure = primitive_state[registered_variables.pressure_index]
+            speed = jnp.sqrt(
+                primitive_state[registered_variables.velocity_index.x] ** 2
+                + primitive_state[registered_variables.velocity_index.y] ** 2
+                + primitive_state[registered_variables.velocity_index.z] ** 2
+            )
+            jax.debug.print(
+                "STEPDBG t={t:.6f} dt={dt:.3e} chem_dt={c:.3e} rho[{rmin:.3e},{rmax:.3e}] "
+                "p[{pmin:.3e},{pmax:.3e}] vmax={v:.3e} nonfinite={nf}",
+                t=time + dt, dt=dt, c=(chemistry_dt if chemistry_dt is not None else dt),
+                rmin=jnp.min(rho), rmax=jnp.max(rho), pmin=jnp.min(pressure), pmax=jnp.max(pressure),
+                v=jnp.max(speed), nf=jnp.sum(~jnp.all(jnp.isfinite(primitive_state), axis=0)),
+            )
+        return dt, LoopState(primitive_state, key, forcing, chemistry_clock)
 
     def _record_snapshot(time, state, store, idx):
         """Record snapshot ``idx`` (the requested diagnostics)."""
@@ -1526,7 +1666,9 @@ def _run_segment(
     primitive_state = _prepare_padded_state(
         primitive_state, config, params, registered_variables
     )
-    initial_loop_state = LoopState(primitive_state, init_key, init_forcing)
+    initial_loop_state = LoopState(
+        primitive_state, init_key, init_forcing, _initial_chemistry_clock(config)
+    )
     t_final, loop_state, _, num_iterations = _integrate_core(
         config,
         params,

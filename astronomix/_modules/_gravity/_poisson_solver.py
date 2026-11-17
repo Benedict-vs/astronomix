@@ -41,6 +41,12 @@ from astronomix.option_classes.simulation_config import (
 # astronomix containers
 from astronomix.option_classes.simulation_config import SimulationConfig
 
+# astronomix sharding (the FFT is global and cannot be done per-slab)
+from astronomix._finite_volume._sharding import (
+    get_shard_axis_context,
+    all_gather_sharded_axis,
+    scatter_sharded_axis,
+)
 
 def _active_x_sharded_mesh():
     """The active ``(mesh, x_axis_name)`` when tracing under a multi-device
@@ -239,6 +245,16 @@ def _compute_gravitational_potential(
     if config.gravity_config.poisson_manual_open_boundaries:
         non_periodic_boundaries = True
 
+    # Under multi-GPU sharding the Poisson solve is a global FFT and cannot be
+    # done on a single device's slab; gather the density into a full replicated
+    # array, solve it (redundantly on every device), and take this device's slab
+    # of the potential back at the end. Outside a shard_map these are no-ops.
+    shard_context = get_shard_axis_context()
+    sharded_axis = None
+    if shard_context is not None:
+        sharded_axis = gas_density.ndim + shard_context.axis_from_end
+        gas_density = all_gather_sharded_axis(gas_density, sharded_axis)
+
     # The Jeans swindle: only a meaningful periodic solution exists once the
     # (unphysical) mean density is removed, so subtract it for periodic domains.
     if not non_periodic_boundaries:
@@ -303,6 +319,10 @@ def _compute_gravitational_potential(
         potential_k = greens_function * density_k
         gravitational_potential = jnp.real(ifftn(potential_k))
 
+        if sharded_axis is not None:
+            gravitational_potential = scatter_sharded_axis(
+                gravitational_potential, sharded_axis
+            )
         return gravitational_potential
 
     else:
@@ -370,5 +390,9 @@ def _compute_gravitational_potential(
         # (e) Extract the portion of the potential covering the original grid;
         #     the grid_spacing**dim factor accounts for the discrete convolution
         #     measure.
-        gravitational_potential = potential_ext[slices]
-        return gravitational_potential * grid_spacing**dimensionality
+        gravitational_potential = potential_ext[slices] * grid_spacing**dimensionality
+        if sharded_axis is not None:
+            gravitational_potential = scatter_sharded_axis(
+                gravitational_potential, sharded_axis
+            )
+        return gravitational_potential
