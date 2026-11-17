@@ -98,11 +98,17 @@ def make_vector_field(
             abundances = state[:-1]
             temperature_kelvin = state[-1]
             abundance_derivative = chemistry_derivative(time, abundances, temperature_kelvin)
-            temperature_rate = temperature_derivative(
-                abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
-                hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
-                atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
-                carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
+            if getattr(reaction_network, "own_thermochemistry", False):
+                # a network with its own heating and cooling (KROME networks)
+                temperature_rate = reaction_network.temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
+                )
+            else:
+                temperature_rate = temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
+                    hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
+                    atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
+                    carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
             return jnp.concatenate([abundance_derivative, jnp.reshape(temperature_rate, (1,))])
     else:
         def vector_field(time, abundances, args):
@@ -238,26 +244,32 @@ def _advance_single_cell(
                 abundances,
                 temperature_kelvin,
             )
-            temperature_rate = temperature_derivative(
-                abundances,
-                temperature_kelvin,
-                adiabatic_index,
-                cosmic_ray_rate,
-                fuv_field,
-                dust_to_gas_ratio,
-                hydrogen_molecule_formation_rate_coefficient,
-                hydrogen_index,
-                molecular_hydrogen_index,
-                electron_index,
-                atomic_oxygen_index,
-                ionized_hydrogen_index,
-                helium_index,
-                ionized_carbon_index,
-                co_cooling,
-                carbon_monoxide_index,
-                co_cooling_table,
-                co_cooling_bounds,
-            )
+            if getattr(reaction_network, "own_thermochemistry", False):
+                # a network with its own heating and cooling (KROME networks)
+                temperature_rate = reaction_network.temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
+                )
+            else:
+                temperature_rate = temperature_derivative(
+                    abundances,
+                    temperature_kelvin,
+                    adiabatic_index,
+                    cosmic_ray_rate,
+                    fuv_field,
+                    dust_to_gas_ratio,
+                    hydrogen_molecule_formation_rate_coefficient,
+                    hydrogen_index,
+                    molecular_hydrogen_index,
+                    electron_index,
+                    atomic_oxygen_index,
+                    ionized_hydrogen_index,
+                    helium_index,
+                    ionized_carbon_index,
+                    co_cooling,
+                    carbon_monoxide_index,
+                    co_cooling_table,
+                    co_cooling_bounds,
+                )
             return jnp.concatenate(
                 [abundance_derivative, jnp.reshape(temperature_rate, (1,))]
             )

@@ -107,6 +107,9 @@ def build_chemistry_from_network_file(
     krome_photo_rates: dict = None,
     krome_user_variables: dict = None,
     krome_h2_formation_on_dust=False,
+    krome_data_folder: str = None,
+    krome_metal_table: bool = True,
+    krome_metallicity: float = None,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
     """Assemble the chemistry containers from a network file.
 
@@ -120,7 +123,15 @@ def build_chemistry_from_network_file(
     photo-reactions by KROME reaction index (zero when not given),
     ``krome_user_variables`` the other ``@common`` variables of the file, and
     ``krome_h2_formation_on_dust`` adds the H2 formation on grains that KROME
-    takes from a build option (``True`` or a coefficient in cm^3/s).
+    takes from a build option (``True`` or a coefficient in cm^3/s). With
+    ``thermochemistry`` a KROME network is heated and cooled as in KROME
+    (``_krome_thermochemistry.py``), not by the terms of this module;
+    ``krome_data_folder`` is the ``data`` folder of a KROME installation, from
+    which the metal line data and the metal cooling table are read (without it
+    the metals cool through [C II] and [O I] only), ``krome_metal_table=False``
+    leaves the table out (the per-cell Warp kernel cannot look a table up; the
+    metals then do not cool above 1e4 K), and ``krome_metallicity`` is the metal
+    abundance relative to solar (default: that of the dust).
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -167,6 +178,9 @@ def build_chemistry_from_network_file(
             user_variables=krome_user_variables,
             dust_to_gas_relative=dust_to_gas_ratio / 1e-2,
             h2_formation_on_dust=krome_h2_formation_on_dust,
+            data_folder=krome_data_folder,
+            metal_table=krome_metal_table,
+            metallicity=krome_metallicity,
         )
     else:
         # carbox is an optional dependency; import locally so the package imports

@@ -9,12 +9,15 @@ variant of it), sets up a row of gas cells without hydrodynamics and advances th
 then prints both results and their difference. Run it from the repository root:
 
     python examples/chemistry_krome_network.py --network /path/to/krome/networks/react_galaxy_ism
-    python examples/chemistry_krome_network.py --network ... --thermochemistry   # evolve the temperature too; both solvers
+    python examples/chemistry_krome_network.py --network ... --thermochemistry --krome-data /path/to/krome/data
+                                                                                 # evolve the temperature too; both solvers
     python examples/chemistry_krome_network.py --network ... --thermochemistry --no-kernel
 
 The cells span ``n_H`` = 1 to 1e4 cm^-3 and start atomic, with carbon and silicon singly
 ionised. Without ``--thermochemistry`` the temperature is held at ``--temperature`` and only
 Kvaerno5 runs (the kernel of the module integrates the temperature with the species). The
+heating and cooling are KROME's; the metal lines and the metal cooling table are read from
+the data folder of a KROME installation (``--krome-data``). The
 photo-reactions of the file take their rates from ``krome_photo_rates`` (none here, i.e. no
 ionising radiation); the Habing field enters the recombination on dust.
 """
@@ -75,6 +78,8 @@ def build(arguments, use_kernel):
         relative_tolerance=arguments.rtol,
         max_steps=4096,
         krome_h2_formation_on_dust=not arguments.no_h2_on_dust,
+        krome_data_folder=arguments.krome_data,
+        krome_metal_table=not arguments.no_metal_table,
     )
 
     if use_kernel:
@@ -92,7 +97,7 @@ def build(arguments, use_kernel):
         solver = build_fused_core_solver(
             vector_field, cc.number_of_chemical_species + 1,
             rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
-            cache_key=("example-krome-network", arguments.network, arguments.thermochemistry),
+            cache_key=("example-krome-network", arguments.network, arguments.thermochemistry, arguments.krome_data, arguments.no_metal_table),
         )
         chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
 
@@ -175,12 +180,16 @@ def report(label, abundances, temperature, names, hydrogen_nuclei):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--network", required=True, help="network file in the KROME format")
+    parser.add_argument("--krome-data", default=None, help="the data folder of KROME: metal line data and metal cooling table "
+                        "for the thermochemistry (without it the metals cool through [C II] and [O I] only)")
     parser.add_argument("--cells", type=int, default=16)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--time-step", type=float, default=0.05, help="length of a step [Myr]")
     parser.add_argument("--temperature", type=float, default=50.0, help="initial (or held) temperature [K]; avoid the temperature limits of the fits (30, 100, 200 K, ...), where a rate jumps")
     parser.add_argument("--habing-field", type=float, default=1.7, help="Habing field of the recombination on dust")
     parser.add_argument("--thermochemistry", action="store_true", help="integrate the temperature with the species")
+    parser.add_argument("--no-metal-table", action="store_true", help="without the tabulated metal cooling above 1e4 K, "
+                        "which the Warp kernel cannot evaluate")
     parser.add_argument("--no-h2-on-dust", action="store_true", help="without the H2 formation on dust (Jura)")
     parser.add_argument("--rtol", type=float, default=1.0e-6)
     parser.add_argument("--atol", type=float, default=1.0e-12)
@@ -205,6 +214,10 @@ def main():
     if not arguments.thermochemistry:
         print("\nThe Warp kernel of the chemistry module integrates the temperature with the species: "
               "run with --thermochemistry to compare the two solvers.")
+        return
+    if arguments.krome_data and not arguments.no_metal_table:
+        print("\nThe Warp kernel cannot look up the tabulated metal cooling: run with --no-metal-table to compare the "
+              "two solvers (the metals then cool through their lines alone).")
         return
 
     kernel, kernel_temperature, _, _, first, elapsed = run(arguments, True)

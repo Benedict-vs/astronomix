@@ -31,6 +31,10 @@ Processes that KROME adds at build time are not in the network file. One of them
 is available here as an option, the formation of H2 on dust grains with the rate
 of Jura (1975) (KROME's ``-useH2dust=JURA``): ``3.5e-17 n(H) n_H D/D_sun`` H2
 molecules per cm^3 per second.
+
+The heating and cooling of a KROME network are KROME's too (see
+``_krome_thermochemistry.py``): the network carries its own temperature
+derivative, which the chemistry module uses in place of its default one.
 """
 
 # general
@@ -319,6 +323,9 @@ class KromeNetwork(eqx.Module):
     # The implicit stages of the Kvaerno5 solve use Newton instead of the chord
     # iteration, which stalls on the ionisation equilibrium of hot, dense gas.
     newton_root_finder = True
+    # The temperature derivative below replaces the default one of the chemistry
+    # module (heating and cooling as in KROME).
+    own_thermochemistry = True
 
     stoichiometry: jnp.ndarray  # [species, reactions], products minus reactants
     photo_rates: jnp.ndarray  # [photo-reactions], 1/s
@@ -327,7 +334,12 @@ class KromeNetwork(eqx.Module):
     h2_on_dust_coefficient: jnp.ndarray  # cm^3/s; 0 switches the H2 formation on dust off
     hydrogen_nuclei: jnp.ndarray  # [species], hydrogen atoms in every species
     h2_on_dust_change: jnp.ndarray  # [species], -2 for H and +1 for H2
+    metallicity: jnp.ndarray  # metal abundance relative to solar, the factor of the tabulated metal cooling
+    metal_table: tuple  # (log n_H, log T, log Lambda) of the metal cooling above 1e4 K, or ()
     species: Tuple[str, ...] = eqx.field(static=True)
+    metal_lines: tuple = eqx.field(static=True)  # (variables, upper limit, metals) of KROME's coolZ.dat, or ()
+    chemical_terms: tuple = eqx.field(static=True)  # (position, reactants, energy [eV], thermalised) of the chemical heating
+    ortho_para_ratio: float = eqx.field(static=True)
     single_precision_literals: bool = eqx.field(static=True)
     reactions: tuple = eqx.field(static=True)
     variables: tuple = eqx.field(static=True)
@@ -396,10 +408,73 @@ class KromeNetwork(eqx.Module):
         formation = self.h2_on_dust_coefficient * self.dust_to_gas * atomic_hydrogen * jnp.dot(self.hydrogen_nuclei, abundances)
         return derivative + self.h2_on_dust_change * formation
 
+    def heating_and_cooling_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
+        """The heating and cooling terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
+        from astronomix._modules._chemistry import _krome_thermochemistry as thermo
+        from astronomix._modules._chemistry._thermochemistry import _atomic_oxygen_cooling, _ionized_carbon_cooling
+
+        temperature = jnp.clip(temperature, 3.0, 1.0e9)
+        n = jnp.maximum(abundances, 0.0)
+        index = lambda name: self.species.index(name) if name in self.species else -1
+        density = lambda name: n[self.species.index(name)] if name in self.species else 0.0
+        electrons, hydrogen, molecular = density("E"), density("H"), density("H2")
+        nuclei = jnp.dot(self.hydrogen_nuclei, n)
+
+        terms = {
+            "cooling_h2": thermo.h2_line_cooling(n, temperature, index),
+            "cooling_atomic": thermo.atomic_cooling(
+                temperature, electrons, hydrogen, density("He"), density("H+"), density("He+"), density("He++")
+            ),
+            "cooling_compton": thermo.compton_cooling(temperature, electrons),
+        }
+        if self.metal_lines:
+            variables, upper_limit, metals = self.metal_lines
+            lines = thermo.metal_line_cooling(
+                temperature, density, [dict(metal) for metal in metals], variables, upper_limit,
+                _evaluate, _syntax_tree, self.ortho_para_ratio,
+            )
+            blend = thermo.metal_blend(temperature)
+            terms["cooling_metal_lines"] = (1.0 - blend) * lines
+            if self.metal_table:
+                terms["cooling_metal_table"] = blend * thermo.tabulated_metal_cooling(
+                    temperature, nuclei, self.metallicity, *self.metal_table
+                )
+        else:
+            # without KROME's data: the two fine-structure lines of the chemistry module
+            terms["cooling_metal_lines"] = _ionized_carbon_cooling(
+                n, temperature, index("C+"), index("E"), index("H"), index("H2")
+            ) + _atomic_oxygen_cooling(n, temperature, index("O"), index("H"), index("H2"))
+
+        fraction = thermo.thermalised_fraction(temperature, hydrogen, molecular, nuclei)
+        rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, 0.0, n)
+        chemical = self.h2_on_dust_coefficient * self.dust_to_gas * hydrogen * nuclei * (4.2 * fraction + 0.2)
+        for position, reactants, energy, thermalised in self.chemical_terms:
+            flux = rates[position] * energy * (fraction if thermalised else 1.0)
+            for i in reactants:
+                flux = flux * n[i]
+            chemical = chemical + flux
+        terms["heating_chemical"] = chemical * thermo.ELECTRON_VOLT_TO_ERG
+        terms["heating_photoelectric"] = thermo.photoelectric_heating(
+            temperature, electrons, hydrogen, nuclei, fuv_field, self.dust_to_gas
+        )
+        terms["heating_cosmic_rays"] = cosmic_ray_rate * (5.5e-12 * hydrogen + 2.5e-11 * molecular)
+        return terms
+
+    def temperature_derivative(self, abundances, temperature, adiabatic_index, cosmic_ray_rate, fuv_field):
+        """dT/dt [K/s] from the heating and cooling of KROME, at constant density."""
+        from astronomix._modules._chemistry._krome_thermochemistry import BOLTZMANN_ERG
+
+        terms = self.heating_and_cooling_terms(abundances, temperature, cosmic_ray_rate, fuv_field)
+        net = sum(value for name, value in terms.items() if name.startswith("heating")) - sum(
+            value for name, value in terms.items() if name.startswith("cooling")
+        )
+        particles = jnp.maximum(jnp.sum(jnp.maximum(abundances, 0.0)), 1e-30)
+        return (adiabatic_index - 1.0) * net / (BOLTZMANN_ERG * particles)
+
 
 def build_krome_network(
     path, photo_rates=None, user_variables=None, dust_to_gas_relative=1.0, h2_formation_on_dust=False,
-    single_precision_literals=False,
+    data_folder=None, metal_table=True, metallicity=None, ortho_para_ratio=3.0, single_precision_literals=False,
 ):
     """Build the right-hand side of a KROME network file.
 
@@ -416,6 +491,16 @@ def build_krome_network(
             rate of Jura (KROME's ``-useH2dust=JURA``); ``True`` for the
             coefficient 3.5e-17 cm^3/s, or the coefficient itself (it absorbs a
             clumping factor). It is not part of the network file.
+        data_folder: The ``data`` folder of a KROME installation. With it the
+            metals cool as in KROME: the lines of ``coolZ.dat`` below 1e4 K and
+            the table ``coolZ_CIE2012NOUV.dat`` above. Without it they cool
+            through the [C II] and [O I] lines of the chemistry module only.
+        metal_table: Read the table (default). The per-cell Warp kernel cannot
+            look a table up; with ``False`` the metals cool through their lines
+            alone, i.e. not above 1e4 K, and the kernel can be used.
+        metallicity: Metal abundance relative to solar, the factor of the
+            tabulated metal cooling (default: ``dust_to_gas_relative``).
+        ortho_para_ratio: Ortho-to-para ratio of H2 as a collider of the metal lines.
         single_precision_literals: Round the real constants written without a
             ``d`` exponent to single precision, as a Fortran compiler does (for
             comparisons with KROME to round-off; see ``_syntax_tree``).
@@ -459,6 +544,33 @@ def build_krome_network(
             raise ValueError(f"{path}: H2 formation on dust needs the species H and H2")
         change[species.index("H")], change[species.index("H2")] = -2.0, 1.0
 
+    # heating and cooling: metal coolants of KROME's data folder, reactions of the chemical heating
+    with_table, metal_lines, metal_table = bool(metal_table), (), ()
+    if data_folder is not None:
+        import os
+
+        from astronomix._modules._chemistry import _krome_thermochemistry as thermo
+
+        variables, upper_limit, metals = thermo.read_metal_lines(os.path.join(data_folder, thermo.METAL_LINES_FILE), _species_name)
+        kept = []
+        for metal in metals:
+            if metal["name"] not in species:
+                continue
+            if len(metal["levels"]) not in (2, 3):
+                raise NotImplementedError(f"{metal['name']}: {len(metal['levels'])}-level coolant (two and three levels are solved)")
+            kept.append(tuple((key, tuple(value) if isinstance(value, list) else value) for key, value in metal.items()))
+        metal_lines = (variables, upper_limit, tuple(kept))
+        if with_table:
+            metal_table = tuple(jnp.asarray(array) for array in thermo.read_cooling_table(os.path.join(data_folder, thermo.METAL_TABLE_FILE)))
+    from astronomix._modules._chemistry._krome_thermochemistry import CHEMICAL_HEATING
+
+    chemical_terms = []
+    for position, (_, reactants, products, _, _, _, _) in enumerate(reactions):
+        key = (tuple(sorted(species[i] for i in reactants)), tuple(sorted(species[i] for i in products)))
+        for wanted_reactants, wanted_products, energy, thermalised in CHEMICAL_HEATING:
+            if key == (tuple(sorted(wanted_reactants)), tuple(sorted(wanted_products))):
+                chemical_terms.append((position, reactants, energy, thermalised))
+
     network = KromeNetwork(
         stoichiometry=jnp.asarray(stoichiometry),
         photo_rates=jnp.asarray(photo),
@@ -467,7 +579,12 @@ def build_krome_network(
         h2_on_dust_coefficient=jnp.asarray(coefficient),
         hydrogen_nuclei=jnp.asarray([float(_elements_and_charge(name)[0].get("H", 0)) for name in species]),
         h2_on_dust_change=jnp.asarray(change),
+        metallicity=jnp.asarray(float(dust_to_gas_relative if metallicity is None else metallicity)),
+        metal_table=metal_table,
         species=species,
+        metal_lines=metal_lines,
+        chemical_terms=tuple(chemical_terms),
+        ortho_para_ratio=float(ortho_para_ratio),
         single_precision_literals=bool(single_precision_literals),
         reactions=reactions,
         variables=parsed["variables"],

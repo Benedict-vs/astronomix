@@ -9,9 +9,15 @@ Networks in the KROME format (``astronomix/_modules/_chemistry/_krome_network.py
    coefficients against the same formulas written in NumPy.
 3. The chemistry module on that network: ``update_chemistry`` with the vmapped
    Kvaerno5 against SciPy's Radau on the same right-hand side.
-4. Optionally a full KROME network file, when ASTRONOMIX_TEST_KROME_NETWORK
+4. The heating and cooling of a KROME network: the terms against the same
+   formulas written in NumPy, with metal line data and a cooling table written
+   here in KROME's formats, and the temperature equation through
+   ``update_chemistry``.
+5. Optionally a full KROME network file, when ASTRONOMIX_TEST_KROME_NETWORK
    points at one (for instance ``networks/react_galaxy_ism`` of KROME): it is
-   read, its reactions conserve nuclei and charge, and its rates are finite.
+   read, its reactions conserve nuclei and charge, and its rates are finite;
+   with ASTRONOMIX_TEST_KROME_DATA (KROME's ``data`` folder) its heating and
+   cooling are finite too.
 
 The file runs on the CPU unless a platform is chosen in the environment.
 """
@@ -290,7 +296,218 @@ def test_update_chemistry_matches_scipy(network_file):
 
 
 # ---------------------------------------------------------------------------
-# 4. A full KROME network file, when one is given
+# 4. Heating and cooling
+# ---------------------------------------------------------------------------
+
+# Two coolants in the format of KROME's coolZ.dat, written for this test: a
+# three-level atom and a two-level ion, with a rate that changes above 500 K.
+METAL_LINES = """# test coolants
+@var:T2 = Tgas*1d-2
+@TgasUpperLimit:1d4
+
+metal:C
+level 0: 0.e0, 1
+level 1: 24.e0, 3
+level 2: 63.e0, 5
+1 -> 0, 7.9d-8
+2 -> 1, 2.7d-7
+2 -> 0, 2.1d-14
+H, 1, 0, 1.6d-10*(T2)**(.14)
+H, 2, 0, 9.2d-11*(T2)**(.26)
+H, 2, 1, 2.9d-10*(T2)**(.26)
+e, 1, 0, 2.0d-7
+       if(Tgas > 5d2): 3.0d-7
+para/ortho: 1/3
+H2or, 2, 1, 2.9d-10
+H2pa, 2, 1, 2.7D-10
+endmetal
+
+metal:C+
+level 0: 0.e0, 2
+level 1: 91.2e0, 4
+1 -> 0, 2.4d-6
+e, 1, 0, 2.8d-7*(T2)**(-.5)
+H, 1, 0, 8d-10*(T2)**(.07)
+endmetal
+
+metal:Fe
+level 0: 0.e0, 9
+level 1: 598.43e0, 7
+level 2: 1012.9e0, 5
+level 3: 9968.2e0, 11
+1 -> 0, 2.5d-3
+endmetal
+"""
+
+
+@pytest.fixture(scope="module")
+def data_folder(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("krome_data")
+    (folder / "coolZ.dat").write_text(METAL_LINES)
+    density, temperature = np.linspace(-2.0, 4.0, 4), np.linspace(1.0, 8.0, 15)
+    rows = ["# test table: log10(nH) log10(Tgas) log10(Lambda)", f"   {len(density)}, {len(temperature)}"]
+    for x in density:
+        rows += [f"{x:.8e} {y:.8e} {-24.0 + 0.3 * y - 0.1 * x + 0.02 * x * y:.8e}" for y in temperature] + [""]
+    (folder / "coolZ_CIE2012NOUV.dat").write_text("\n".join(rows))
+    return str(folder)
+
+
+def _reference_thermochemistry(n, temperature, habing, cosmic_ray_rate, rates, dust_to_gas, formation):
+    """The terms of ``heating_and_cooling_terms`` in NumPy; ``n`` maps a species to its density."""
+    kb, ev = 1.380648e-16, 1.60217646e-12
+    e, H, H2, Hp, He, Hep = n["E"], n["H"], n["H2"], n["H+"], n["He"], n["He+"]
+    nuclei = H + Hp + 2 * H2 + 2 * n["H2+"]
+    T, t5 = temperature, temperature / 1e5
+    damp = 1.0 / (1.0 + np.sqrt(t5))
+    rec = np.sqrt(T) * (T / 1e3) ** (-0.2) / (1.0 + (T / 1e6) ** 0.7)
+    atomic = (
+        1.27e-21 * np.sqrt(T) * damp * np.exp(-1.578091e5 / T) * e * H + 9.38e-22 * np.sqrt(T) * damp * np.exp(-2.853354e5 / T) * e * He
+        + 4.95e-22 * np.sqrt(T) * damp * np.exp(-6.31515e5 / T) * e * Hep + 5.01e-27 * T ** (-0.1687) * damp * np.exp(-5.5338e4 / T) * e**2 * Hep
+        + 8.7e-27 * rec * e * Hp + 1.55e-26 * T**0.3647 * e * Hep
+        + 1.24e-13 * T ** (-1.5) * np.exp(-4.7e5 / T) * (1.0 + 0.3 * np.exp(-9.4e4 / T)) * e * Hep
+        + 7.5e-19 * damp * np.exp(-1.18348e5 / T) * e * H + 9.1e-27 * T ** (-0.1687) * damp * np.exp(-1.3179e4 / T) * e**2 * Hep
+        + 5.54e-17 * T ** (-0.397) * damp * np.exp(-4.73638e5 / T) * e * Hep
+    )
+    # metal lines: populations from the full rate matrix (not the closed forms of the module)
+    t2, active = T / 100.0, T < 1e4
+    def lines(total, energies, weights, radiative, collisional):
+        size = len(energies); matrix = np.zeros((size, size))
+        for (upper, lower), rate in collisional.items():
+            rate = rate if active else 0.0
+            matrix[lower, upper] += rate; matrix[upper, upper] -= rate
+            excitation = rate * weights[upper] / weights[lower] * np.exp(-(energies[upper] - energies[lower]) / T)
+            matrix[upper, lower] += excitation; matrix[lower, lower] -= excitation
+        for (upper, lower), coefficient in radiative.items():
+            matrix[lower, upper] += coefficient; matrix[upper, upper] -= coefficient
+        matrix[0, :] = 1.0
+        population = np.linalg.solve(matrix, np.eye(size)[0] * total)
+        return sum(population[upper] * coefficient * (energies[upper] - energies[lower]) for (upper, lower), coefficient in radiative.items())
+    carbon = lines(n["C"], [0.0, 24.0, 63.0], [1, 3, 5], {(1, 0): 7.9e-8, (2, 1): 2.7e-7, (2, 0): 2.1e-14},
+                   {(1, 0): 1.6e-10 * t2**0.14 * H + (3.0e-7 if T > 5e2 else 2.0e-7) * e, (2, 0): 9.2e-11 * t2**0.26 * H,
+                    (2, 1): 2.9e-10 * t2**0.26 * H + 2.9e-10 * H2 * 0.75 + 2.7e-10 * H2 * 0.25})
+    ion = lines(n["C+"], [0.0, 91.2], [2, 4], {(1, 0): 2.4e-6}, {(1, 0): 2.8e-7 * t2 ** (-0.5) * e + 8e-10 * t2**0.07 * H})
+    blend = 10.0 / (10.0 + np.exp(-10.0 * (np.log10(T) - 4.0)))
+    x, y = np.log10(nuclei), np.log10(T)
+    table = 10.0 ** (-24.0 + 0.3 * y - 0.1 * x + 0.02 * x * y) * nuclei**2 * dust_to_gas   # the test table is bilinear
+    psi = habing * np.sqrt(T) / e
+    efficiency = 4.9e-2 / (1.0 + 4e-3 * psi**0.73) + 3.7e-2 * (T * 1e-4) ** 0.7 / (1.0 + 2e-4 * psi)
+    photoelectric = (1.3e-24 * efficiency * habing * nuclei - 4.65e-30 * T**0.94 * psi ** (0.735 * T ** (-0.068)) * e * H) * dust_to_gas
+    critical = 1.0e6 * T ** (-0.5) / (1.6 * np.exp(-((4.0e2 / T) ** 2)) * H / nuclei + 1.4 * np.exp(-1.2e4 / (T + 1.2e3)) * H2 / nuclei)
+    fraction = 1.0 / (1.0 + critical / nuclei)
+    chemical = formation * dust_to_gas * H * nuclei * (4.2 * fraction + 0.2) + rates[6] * n["H2+"] * H * 1.83 * fraction   # reaction 6: H2+ + H -> H2 + H+
+    return {
+        "cooling_atomic": atomic, "cooling_compton": 5.65e-36 * (T - 2.73) * e, "cooling_metal_lines": (1.0 - blend) * (carbon + ion) * kb,
+        "cooling_metal_table": blend * table, "heating_photoelectric": photoelectric, "heating_chemical": chemical * ev,
+        "heating_cosmic_rays": cosmic_ray_rate * (5.5e-12 * H + 2.5e-11 * H2),
+    }
+
+
+@pytest.mark.parametrize("temperature", [30.0, 400.0, 3.0e3, 2.0e4, 3.0e6])
+def test_heating_and_cooling_terms(network_file, data_folder, temperature):
+    network, species = build_krome_network(
+        network_file, user_variables={"user_flux": 0.0}, h2_formation_on_dust=True, dust_to_gas_relative=0.5, data_folder=data_folder
+    )
+    assert [dict(metal)["name"] for metal in network.metal_lines[2]] == ["C", "C+"]  # Fe is not in the network
+    fractions = {"H": 0.7, "E": 2e-3, "H+": 1.8e-3, "He+": 1e-4, "He": 0.08, "H2": 0.14, "H2+": 1e-6, "C": 1e-4, "C+": 1e-4}
+    hydrogen_nuclei = 50.0
+    abundances = jnp.asarray([fractions[name] * hydrogen_nuclei for name in species])
+    terms = {name: float(value) for name, value in network.heating_and_cooling_terms(abundances, temperature, 3e-17, 1.7).items()}
+    rates = {reaction[0]: float(rate) for reaction, rate in zip(network.reactions, network.get_rates(temperature, 3e-17, 1.7, 0.0, abundances))}
+    reference = _reference_thermochemistry(
+        {name: fractions[name] * hydrogen_nuclei for name in species}, temperature, 1.7, 3e-17, rates, 0.5, 3.5e-17
+    )
+    for name, expected in reference.items():
+        assert terms[name] == pytest.approx(expected, rel=1e-9, abs=1e-60), name
+    assert terms["cooling_h2"] >= 0.0 and set(terms) == set(reference) | {"cooling_h2"}
+    # the temperature derivative is the net heating over the heat capacity of all particles
+    net = sum(v for k, v in terms.items() if k.startswith("heating")) - sum(v for k, v in terms.items() if k.startswith("cooling"))
+    expected = (5.0 / 3.0 - 1.0) * net / (1.380648e-16 * float(abundances.sum()))
+    assert float(network.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)) == pytest.approx(expected, rel=1e-12)
+
+
+def test_metals_without_krome_data(network_file):
+    """Without KROME's data folder the metals cool through the two lines of the chemistry module."""
+    network, species = build_krome_network(network_file, user_variables={"user_flux": 0.0})
+    assert network.metal_lines == () and network.metal_table == ()
+    terms = network.heating_and_cooling_terms(jnp.ones(len(species)), 100.0, 3e-17, 1.7)
+    assert "cooling_metal_table" not in terms and float(terms["cooling_metal_lines"]) > 0.0
+
+
+def test_update_chemistry_with_heating_and_cooling(network_file, data_folder):
+    """The temperature equation of a KROME network through the module, against SciPy on the same right-hand side."""
+    scipy_integrate = pytest.importorskip("scipy.integrate")
+    from astronomix import (
+        SimulationConfig,
+        SimulationParams,
+        construct_primitive_state,
+        finalize_config,
+        get_registered_variables,
+    )
+    from astronomix._modules._chemistry._chemistry import update_chemistry
+    from astronomix._modules._cooling._cooling import get_pressure_from_temperature, get_temperature_from_pressure
+    from astronomix.option_classes.simulation_config import FINITE_VOLUME, NATIVE_JAX
+    from astronomix.setup_helpers import build_chemistry_from_network_file
+
+    num_cells, time_step_seconds, gamma = 4, 1.0e12, 5.0 / 3.0
+    chemistry_config, chemistry_params, species = build_chemistry_from_network_file(
+        network_file, "krome",
+        number_density_unit_cgs=1.0, temperature_unit_kelvin=1.0, time_unit_seconds=time_step_seconds,
+        cosmic_ray_rate=3e-17, fuv_field=1.7, thermochemistry=True, cooling_courant=1e3, floor_temperature=3.0,
+        absolute_tolerance=1e-20, relative_tolerance=1e-8, max_steps=4096,
+        krome_user_variables={"user_flux": 0.0}, krome_h2_formation_on_dust=True, krome_data_folder=data_folder,
+    )
+    config = SimulationConfig(
+        dimensionality=1, solver_mode=FINITE_VOLUME, backend=NATIVE_JAX, box_size=1.0,
+        num_cells=num_cells, progress_bar=False, chemistry_config=chemistry_config,
+    )
+    params = SimulationParams(t_end=1.0, gamma=gamma, chemistry_params=chemistry_params)
+    registered_variables = get_registered_variables(config)
+    hydrogen_nuclei = jnp.logspace(0.0, 3.0, num_cells)
+    density = hydrogen_nuclei / chemistry_params.hydrogen_mass_fraction
+    start_temperature = jnp.asarray([80.0, 300.0, 2000.0, 9000.0])
+    X, Z = chemistry_params.hydrogen_mass_fraction, chemistry_params.metal_mass_fraction
+    state = construct_primitive_state(
+        config=config, registered_variables=registered_variables, density=density,
+        velocity_x=jnp.zeros(num_cells), gas_pressure=get_pressure_from_temperature(density, start_temperature, X, Z),
+    )
+    fractions = {"H": 0.99, "H+": 1e-3, "He": 0.08, "He+": 1e-5, "H2": 1e-4, "H2+": 1e-9, "C": 1e-5, "C+": 1.3e-4}
+    fractions["E"] = fractions["H+"] + fractions["He+"] + fractions["H2+"] + fractions["C+"]
+    start = registered_variables.chemistry_species_index
+    for index, name in enumerate(species):
+        state = state.at[start + index].set(fractions[name] * hydrogen_nuclei)
+    config = finalize_config(config, state.shape)
+    reacted = update_chemistry(state, registered_variables, config.chemistry_config, params, 1.0)
+    final_temperature = np.asarray(get_temperature_from_pressure(reacted[registered_variables.density_index], reacted[registered_variables.pressure_index], X, Z))
+    final_species = np.asarray(reacted)[start : start + len(species)]
+
+    network = chemistry_params.network
+    ones, zeros = jnp.ones(network.reactions_number), jnp.zeros(network.reactions_number)
+
+    def right_hand_side(y):
+        abundances, temperature = y[:-1], jnp.clip(y[-1], 3.0, 1e9)
+        return jnp.concatenate([
+            network(0.0, abundances, temperature, 3e-17, 1.7, 2.0, ones, zeros),
+            jnp.reshape(network.temperature_derivative(abundances, temperature, gamma, 3e-17, 1.7), (1,)),
+        ])
+
+    function, jacobian = jax.jit(right_hand_side), jax.jit(jax.jacfwd(right_hand_side))
+    initial = np.asarray(state)[start : start + len(species)]
+    for cell in range(num_cells):
+        y0 = np.concatenate([initial[:, cell], [float(start_temperature[cell])]])
+        solution = scipy_integrate.solve_ivp(
+            lambda t, y: np.asarray(function(jnp.asarray(y))), (0.0, time_step_seconds), y0, method="Radau",
+            jac=lambda t, y: np.asarray(jacobian(jnp.asarray(y))), rtol=1e-8, atol=1e-18,  # tighter, the rate jumps at the limits stall it
+        )
+        assert solution.success
+        assert final_temperature[cell] == pytest.approx(solution.y[-1, -1], rel=1e-4)
+        expected = solution.y[:-1, -1]
+        significant = expected > 1e-12 * float(hydrogen_nuclei[cell])
+        np.testing.assert_allclose(final_species[significant, cell], expected[significant], rtol=1e-4)
+    assert np.abs(final_temperature / np.asarray(start_temperature) - 1.0).max() > 0.05  # the temperature did evolve
+
+
+# ---------------------------------------------------------------------------
+# 5. A full KROME network file, when one is given
 # ---------------------------------------------------------------------------
 
 
@@ -307,3 +524,13 @@ def test_full_krome_network_file():
     slopes = jax.vmap(jax.jacfwd(lambda t: network.get_rates(t, 3e-17, 1.7, 0.0, abundances)))(temperatures)
     assert bool(jnp.isfinite(rates).all()) and bool(jnp.isfinite(slopes).all())
     assert int((rates < 0).sum()) == 0
+
+    data = os.environ.get("ASTRONOMIX_TEST_KROME_DATA")
+    if data and os.path.isdir(data):
+        network, species = build_krome_network(path, user_variables=users, h2_formation_on_dust="H2" in parsed["species"], data_folder=data)
+        state = jnp.asarray(10 ** np.random.default_rng(5).uniform(-6, 1, len(species)))
+        derivative = lambda t: network.temperature_derivative(state, t, 5.0 / 3.0, 3e-17, 1.7)
+        values, slopes = jax.vmap(derivative)(temperatures), jax.vmap(jax.grad(derivative))(temperatures)
+        assert bool(jnp.isfinite(values).all()) and bool(jnp.isfinite(slopes).all())
+        by_species = jax.vmap(jax.jacfwd(lambda y, t: network.temperature_derivative(y, t, 5.0 / 3.0, 3e-17, 1.7)), in_axes=(None, 0))(state, temperatures)
+        assert bool(jnp.isfinite(by_species).all())

@@ -279,6 +279,8 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
     fuv_field=1.7,                      # the Habing field of the recombination on dust
     krome_photo_rates={36: 1e-12},      # rates [1/s] of photo-reactions, by KROME reaction index
     krome_h2_formation_on_dust=True,    # Jura's rate; in KROME a build option, not in the file
+    thermochemistry=True,               # heating and cooling as in KROME
+    krome_data_folder="/path/to/krome/data",   # metal line data and metal cooling table
 )
 ```
 
@@ -293,21 +295,43 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   given; cross sections are not read, and no shielding is applied.
 - **Not in a network file.** What KROME adds from build options is not read from the file:
   of these, the H2 formation on dust (Jura) is available as `krome_h2_formation_on_dust`.
-  The heating and cooling are those of this module (previous sections), not KROME's.
+- **Heating and cooling.** With `thermochemistry=True` a KROME network is heated and cooled
+  as in KROME (`_krome_thermochemistry.py`), not by the terms of the section above. Cooling:
+  H and He (Cen 1992: collisional ionisation and excitation, recombination, bremsstrahlung),
+  the lines of the metals below 1e4 K from two- and three-level systems, the metal cooling
+  table of Shen et al. (2013) above, Compton cooling, and the H2 lines of this module.
+  Heating: the photoelectric effect on dust with the dust abundance relative to solar
+  (`dust_to_gas_ratio / 0.01`) and the density of hydrogen nuclei, the chemical term
+  (formation and collisional dissociation of H2), and cosmic rays (the formula of this
+  module; KROME takes it from the cosmic-ray reactions of the network). The metal line data
+  and the table are read from the `data` folder of a KROME installation
+  (`krome_data_folder`: `coolZ.dat`, `coolZ_CIE2012NOUV.dat`); without it the metals cool
+  through [C II] and [O I] only.
 - **Solvers.** The vmapped Kvaerno5 runs with a Newton iteration for these networks: the
   default chord iteration stalls on the ionisation equilibrium of hot, dense gas. The
-  per-cell Warp kernel works as for a carbox network (it needs `thermochemistry=True`).
+  per-cell Warp kernel needs `thermochemistry=True` and cannot look a table up: with it,
+  pass `krome_metal_table=False` (the metals then cool through their lines alone, i.e. not
+  above 1e4 K). On eight cells from 1 to 1e4 cm^-3 the kernel and Kvaerno5 then agree to
+  4e-5 dex in the abundances and 7e-6 in the temperature; the first build of the kernel for
+  this network takes several minutes on a CPU (it is cached afterwards).
 - **Checked against KROME itself**, with the Fortran that KROME generates for
   `react_galaxy_ism` with the metal reactions switched on (79 reactions, 16 species): the 66
   collisional and dust coefficients agree to 2e-10 at 30 temperatures from 5 K to 3e7 K when
   the constants are read as a Fortran compiler reads them (`single_precision_literals=True`;
   to 1.5e-5 with the default, since KROME's constants without a `d` exponent are single
   precision), and the abundances of five isothermal cells followed to 1e14 s with KROME's
-  own solver agree to 6e-8.
+  own solver agree to 6e-8. Heating and cooling: for four compositions (cold neutral,
+  diffuse, molecular, ionised) at 81 temperatures from 10 K to 1e8 K, the atomic, metal line,
+  metal table and Compton cooling and the chemical and photoelectric heating agree with
+  KROME's terms to 4e-6 or better, the total cooling to 7e-6; the temperatures at which
+  heating balances cooling agree to 1.3% (86.3 against 86.4 K, 564 against 557 K, 50.3
+  against 50.4 K, 23.4 against 23.4 K), the difference being the cosmic-ray heating.
 - `examples/chemistry_krome_network.py --network <file>` runs a network file through both
-  solvers; `pytests/chemistry/test_krome_network.py` tests the reader on a small network
-  written in the test, and a full file when `ASTRONOMIX_TEST_KROME_NETWORK` points at one.
-  No KROME network file is shipped here (KROME is GPL-3).
+  solvers (`--thermochemistry --krome-data <folder>` for the heating and cooling);
+  `pytests/chemistry/test_krome_network.py` tests the reader and the heating and cooling on
+  a small network and small data files written in the test, and a full file when
+  `ASTRONOMIX_TEST_KROME_NETWORK` (and `ASTRONOMIX_TEST_KROME_DATA`) point at one.
+  No KROME network or data file is shipped here (KROME is GPL-3).
 
 ### Per-cell implicit solver on the GPU (Warp kernel, via gradsolve)
 
