@@ -22,7 +22,7 @@ as surrogate / solver-in-the-loop training.
 - [x] spherically symmetric simulations such that mass and energy are conserved based on the scheme of [Crittenden and Balachandar (2018)](https://doi.org/10.1007/s00193-017-0784-y)
 - [x] Pallas (Triton) GPU kernels for the finite difference and the VL2 finite volume schemes, multi-GPU via `shard_map` halo exchange
 - [x] easily extensible, all code is open source
-- [x] **(this fork)** stiff astrochemistry + thermochemistry per cell via [carbox](https://github.com/lorenzobranca/carbox) reaction networks (Diffrax Kvaerno5, chunked, sharded, or a per-cell Rosenbrock23 Warp kernel built with [gradsolve](https://github.com/ECLIPSE-AI4Science/gradsolve)), and a **neural chemistry emulator** that replaces the stiff solve with a trained dense network (~45x lower wall time at 160^3), see [Chemistry and the neural emulator](#chemistry-and-the-neural-chemistry-emulator-this-fork)
+- [x] **(this fork)** stiff astrochemistry + thermochemistry per cell via [carbox](https://github.com/GijsVermarien/carbox) reaction networks (Diffrax Kvaerno5, chunked, sharded, or a per-cell Rosenbrock23 Warp kernel built with [gradsolve](https://github.com/ECLIPSE-AI4Science/gradsolve)), and a **neural chemistry emulator** that replaces the stiff solve with a trained dense network (~45x lower wall time at 160^3), see [Chemistry and the neural emulator](#chemistry-and-the-neural-chemistry-emulator-this-fork)
 
 ## Contents
 
@@ -174,9 +174,37 @@ It was developed for a molecular-cloud-collision ground truth with MHD + self-gr
 stiff chemistry; the design notes and every measured number live in that project's
 `CONTEXT.md`.
 
+### Chemistry quick start (carbox + gradsolve + the network)
+
+Everything the chemistry needs is pinned from this repository: our carbox version as the git
+submodule `external/carbox`, which also holds the network file, and gradsolve, Warp and JAX in
+`requirements-chemistry.txt`. With Python 3.12:
+
+```bash
+git clone -b feature/multi-gpu-sharding https://github.com/lorenzobranca/astronomix.git
+cd astronomix
+git submodule update --init          # fetches external/carbox
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-chemistry.txt -e . -e external/carbox
+# NVIDIA GPU (CUDA 12), in addition: pip install "jax[cuda12]==0.10.2"
+
+python examples/chemistry_cells.py
+python -m pytest pytests/chemistry/test_warp_stiff_solver.py
+```
+
+- **Start with `examples/chemistry_cells.py`.** It loads the network, sets up a row of cells
+  from `n_H` = 10 to 1e4 cm^-3 without any hydrodynamics, advances them with the vmapped
+  Kvaerno5 and with the per-cell Warp kernel that gradsolve generates from the same right-hand
+  side, and prints both results and their difference. It takes about a minute on a CPU; the
+  script is the same on a GPU.
+- **The network file** is `external/carbox/data/simple_latent_tgas.csv`.
+- Do not clone with `--recurse-submodules`: carbox has a submodule of its own (uclchem, not
+  needed here) that is fetched over SSH and fails without a GitHub SSH key.
+- Use the pinned carbox, not carbox `main`: see the next but one section for why.
+
 ### Stiff chemistry and thermochemistry
 
-- A [carbox](https://github.com/lorenzobranca/carbox) reaction network is registered as a
+- A [carbox](https://github.com/GijsVermarien/carbox) reaction network is registered as a
   contiguous block of species number densities in the state array
   (`ChemistryConfig`/`ChemistryParams` in `astronomix/_modules/_chemistry/`).
 - Every hydro step, `update_chemistry` advances each cell with Diffrax `Kvaerno5` (vmapped,
@@ -204,6 +232,45 @@ params = SimulationParams(..., chemistry_params=chemistry_params)
   thermochemistry. **Do not use it as a stabiliser**: it silently sets the thermal state of the
   whole cloud (dense gas parked at hundreds of K, dt-dependent). Set it to a large value
   (e.g. 10) once the CFL estimate is nan-safe (below), which is what made it unnecessary.
+
+### carbox: what it provides, which version, where the network is
+
+The reaction network comes from [carbox](https://github.com/GijsVermarien/carbox)
+(`GijsVermarien/carbox`). It is not a dependency of `astronomix` itself: only the setup helper
+imports it, so `import astronomix` works without it.
+
+- **What is coupled.** `build_chemistry_from_network_file` parses a network CSV with
+  `carbox.parsers.parse_chemical_network`, builds a `carbox.network.Network` and stores its
+  right-hand side (a `JNetwork`) in `ChemistryParams`. `update_chemistry` calls it as
+  `network(t, n, T, cosmic_ray_rate, fuv_field, A_V, rate_modifier_a, rate_modifier_b)` with
+  number densities in cm^-3. carbox supplies the reaction rates; the heating and cooling terms
+  are astronomix's own (`astronomix/_modules/_chemistry/_thermochemistry.py`).
+- **Version.** The module is written against carbox commit
+  [`1578667`](https://github.com/GijsVermarien/carbox/commit/1578667aec5aaa1b039b448eaf761689470334e7)
+  (branch `fix/vectorized-rate-order`, carbox 0.2.0), pinned in this repository as the git
+  submodule `external/carbox`. This is our own carbox version: it is kept as a branch of the
+  carbox repository and is not part of carbox `main`. It carries two corrections the 16-species
+  network needs:
+  the vectorised rates are put back into the column order of the incidence matrix (the network
+  file interleaves mechanisms, and without this the rates of rows 9-21 of its 25 land on other
+  reactions), and the `latent_tgas` parser builds H2 formation on grains as an `H2FormReaction`
+  instead of a cosmic-ray reaction. carbox `main` (`745079d`, July 2026) does not work with this
+  module: its network takes fractional abundances and a density, has no rate-modifier
+  arguments, and its `latent_tgas` parser still maps `H2Form` to a cosmic-ray reaction.
+- **Install.** See the quick start above (`pip install -e external/carbox`).
+- **gradsolve.** The per-cell kernel of the next section is generated by
+  [gradsolve](https://github.com/ECLIPSE-AI4Science/gradsolve) 0.2.1, pinned by commit in
+  `requirements-chemistry.txt`. carbox has a branch with the same kernel built in
+  (`feature/fused-warp-solver`, `carbox.fused`), but that branch is based on carbox `main` and
+  so builds no H2 formation on grains from this network file; it is not the version to use
+  with this network.
+- **Network.** `external/carbox/data/simple_latent_tgas.csv` (format `"latent_tgas"`): 16
+  species (C, C+, CO, CO+, e-, H, H+, H2, H2O, H2O+, H3O+, HCO+, O, O+, OH, OH+) and 25 rate
+  terms (two-body reactions, cosmic-ray and FUV processes, H2 formation on grains). The file
+  sits outside the carbox Python package, so installing carbox from its URL with `pip` does
+  not ship it; the submodule or a clone does.
+- **Licences.** carbox is GPL-3.0-or-later and astronomix is MIT, which is why carbox is
+  referenced as a submodule and not copied into this repository.
 
 ### Per-cell implicit solver on the GPU (Warp kernel, via gradsolve)
 
@@ -252,7 +319,8 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
 - Tests: `pytest pytests/chemistry/test_warp_stiff_solver.py` (on the CPU, about a minute):
   the kernel on the Robertson problem, the translated field and Jacobian of a small
   carbox-like network against JAX, and `update_chemistry` with the kernel against the
-  vmapped Kvaerno5 on a carbox network (skipped when carbox is not installed).
+  vmapped Kvaerno5 on the carbox network of `external/carbox` (skipped when carbox is not
+  installed or the network file is not found).
 
 ### Multi-GPU (sharded) finite volume
 
