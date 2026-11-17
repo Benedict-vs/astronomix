@@ -191,6 +191,8 @@ python -m pytest pytests/chemistry/test_warp_stiff_solver.py
 - Do not clone with `--recurse-submodules`: carbox has a submodule of its own (uclchem, not
   needed here) that is fetched over SSH and fails without a GitHub SSH key.
 - Use the pinned carbox, not carbox `main`: see the next but one section for why.
+- The same steps as a plain text hand-out, with the expected output, the parameters of our
+  runs and common problems: [`CHEMISTRY_SETUP_INSTRUCTIONS.txt`](CHEMISTRY_SETUP_INSTRUCTIONS.txt).
 
 ### Stiff chemistry and thermochemistry
 
