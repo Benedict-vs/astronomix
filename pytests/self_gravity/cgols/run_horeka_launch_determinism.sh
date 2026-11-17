@@ -40,10 +40,28 @@
 #   t4  4 processes, --xla_gpu_autotune_level=0
 #   a1  1 process, default flags, autotune results dumped per launch
 #
+# Result (job 134433): 8 default launches on 4 processes gave 5 different final
+# states; with each of the three options every launch was bit-identical (22 of
+# 22, one common state). The autotune dump shows why: XLA times two code
+# generators for every fusion that holds a reduction (NATIVE_EMITTER and
+# BLOCK_LEVEL_EMITTER) and keeps the faster, and two launches chose differently
+# for 2 of 20; the two add in a different order.
+#
+# Second set of groups (DETL_GROUPS=ad4:at4:ld4:lt4:lo4:bench), the models that
+# job 134305 tested with one pair only, and the cost of the options:
+#
+#   ad4, at4       model A (central injection): default, autotuning off
+#   ld4, lt4, lo4  model C with the local-box kernel: default, autotuning off,
+#                  deterministic ops
+#   bench          512^3 on 4 processes, fixed steps, s/step after compilation:
+#                  full-grid kernel (16 clusters) and local-box kernel (1000
+#                  clusters), default against the two options
+#
 # Dev queue: 1 node, 4 x H100, at most 1 h. Run from a code COPY that no queued
 # job imports:
 #
 #   cd ~/astronomix-c1024n1000/pytests/self_gravity/cgols && sbatch run_horeka_launch_determinism.sh
+#   ... && sbatch --export=ALL,DETL_GROUPS=ad4:at4:ld4:lt4:lo4:bench run_horeka_launch_determinism.sh
 #
 # Everything lands in cgols_logs/detl_<jobid>/ (summary.txt = the answer,
 # rewritten after every launch so a timeout still leaves one).
@@ -69,10 +87,20 @@ cd "$CGOLS_DIR" || exit 1
 OUT=cgols_logs/detl_${SLURM_JOB_ID}
 mkdir -p "$OUT"
 export CGOLS_IC_MODE=insitu CGOLS_RESTART_FROM="" CGOLS_EMISSION_FRAMES=0
-export CGOLS_FEEDBACK=clusters CGOLS_CLUSTER_KERNEL=full
-export CGOLS_DIM=256 CGOLS_END_FRACTION=0.08 CGOLS_NUM_SNAPSHOTS=5 CGOLS_CHECKPOINT_EVERY=1 CGOLS_CHECKPOINT_KEEP=0
+# One checkpoint per frame (every 1.2 Myr), all kept: checkpoint 4 = 4.8 Myr.
+V256="CGOLS_DIM=256 CGOLS_END_FRACTION=0.08 CGOLS_NUM_SNAPSHOTS=5 CGOLS_CHECKPOINT_EVERY=1 CGOLS_CHECKPOINT_KEEP=0"
+C="CGOLS_FEEDBACK=clusters CGOLS_CLUSTER_KERNEL=full"
+L="CGOLS_FEEDBACK=clusters CGOLS_CLUSTER_KERNEL=local"
+A="CGOLS_FEEDBACK=central"
 LIMIT="${DETL_STEP_LIMIT:-4m}"
+BENCH_LIMIT="${DETL_BENCH_LIMIT:-6m}"
+BENCH_STEPS="${DETL_BENCH_STEPS:-100}"
+# dt = t_end / steps = 1e-3 code (below the initial CFL step at 512, 2.3e-3);
+# t_end(75 Myr) = 7.670 code. The clusters exist from t = 0, so the kernel runs.
+BENCH_FRACTION=$(awk -v n="$BENCH_STEPS" 'BEGIN{printf "%.6g", 1e-3 * n / 7.670}')
+B512="CGOLS_DIM=512 CGOLS_BENCH_STEPS=$BENCH_STEPS CGOLS_END_FRACTION=$BENCH_FRACTION CGOLS_CLUSTER_START_MYR=0 CGOLS_CHECKPOINT_EVERY=0 CGOLS_RUN_TAG=_det_bench"
 GROUPS_WANTED="${DETL_GROUPS:-d4 o4 d1 o1 f4 t4 a1}"
+GROUPS_WANTED="${GROUPS_WANTED//:/ }"
 BASE_XLA="${XLA_FLAGS:-}"
 echo "XLA_FLAGS of every launch: $BASE_XLA (+ the group's option)"
 want(){ case " $GROUPS_WANTED " in *" $1 "*) return 0 ;; esac; return 1; }
@@ -99,6 +127,24 @@ run(){   # $1 name (tag _det_<name>), $2 tasks, $3 extra XLA option(s), rest = e
   return "$rc"
 }
 
+bench(){   # $1 name, $2 extra XLA option(s), rest = env assignments
+  local name=$1 xla=$2; shift 2
+  echo "=== $(date +%T) $name: bench, $BENCH_STEPS steps${xla:+, $xla}"
+  # shellcheck disable=SC2086
+  env $B512 "$@" "$S4" "XLA_FLAGS=$BASE_XLA${xla:+ $xla}" timeout "$BENCH_LIMIT" srun --nodes=1 --ntasks=4 --gpu-bind=none \
+      --kill-on-bad-exit=1 python cgols.py > "$OUT/$name.log" 2>&1
+  local rc=$? elapsed mem sps=-
+  echo "rc=$rc" >> "$OUT/$name.log"
+  elapsed=$(grep -m1 'Time elapsed' "$OUT/$name.log" | sed -n 's/.*elapsed: \([0-9.]*\) seconds.*/\1/p')
+  mem=$(grep -m1 -A3 'Compiled memory usage PER DEVICE' "$OUT/$name.log" | sed -n 's/.*Total size: \([0-9.]*\).*/\1/p')
+  [ -n "$elapsed" ] && sps=$(awk -v e="$elapsed" -v n="$BENCH_STEPS" 'BEGIN{printf "%.4f", e / n}')
+  printf "%-7s %-4s %-8s %-13s %-34s %s\n" "$name" "$rc" "$sps" "${mem:--}" \
+      "$(grep -m1 'Model-C clusters' "$OUT/$name.log" | sed -n 's/.*): \([0-9]* x R = [0-9.]* pc\).*kernel \([a-z]*\).*/\1, \2/p')" \
+      "${xla:-default}" >> "$OUT/bench.txt"
+  echo "    rc=$rc  $sps s/step"
+  summary
+}
+
 # Size of the difference between two final states (the tool of job 134305).
 cat > "$OUT/compare.py" <<'EOF'
 import os
@@ -123,8 +169,9 @@ EOF
 
 summary(){
   {
-    echo "== detl_${SLURM_JOB_ID}: launch-to-launch bit-identity, $SLURM_JOB_NODELIST ($SLURM_JOB_PARTITION), 256^3 model C (full-grid kernel)"
-    echo "   b4 / b1: base runs to 6 Myr. Every other launch resumes the base at 4.8 Myr and runs to 6 Myr (feedback from 5 Myr)."
+    echo "== detl_${SLURM_JOB_ID}: launch-to-launch bit-identity, $SLURM_JOB_NODELIST ($SLURM_JOB_PARTITION), 256^3"
+    echo "   b4 / b1 (model C, full-grid kernel), bl4 (local-box kernel), ba4 (model A): base runs to 6 Myr."
+    echo "   Every other launch resumes its base at 4.8 Myr and runs to 6 Myr (feedback from 5 Myr)."
     echo
     [ -f "$OUT/groups.txt" ] && cat "$OUT/groups.txt" && echo
     echo "== per group: launches that finished, distinct 3D final states, distinct [diag] mass sequences"
@@ -141,16 +188,24 @@ summary(){
     cat "$OUT/runs.txt" 2>/dev/null
     echo
     [ -f "$OUT/compare.txt" ] && cat "$OUT/compare.txt"
+    if [ -f "$OUT/bench.txt" ]; then
+      echo
+      echo "== bench: 512^3 on 4 processes, $BENCH_STEPS fixed steps, s/step after compilation"
+      printf "%-7s %-4s %-8s %-13s %-34s %s\n" run rc s/step compiled_MiB kernel option
+      cat "$OUT/bench.txt"
+    fi
   } > "$OUT/summary.txt"
 }
 
-group(){   # $1 name, $2 tasks, $3 launches, $4 extra XLA option(s), $5 note
-  local g=$1 tasks=$2 n=$3 xla=$4 note=$5 k base=b1 split=$S1
-  [ "$tasks" = 4 ] && base=b4 && split=$S4
-  [ -d "$(ckpt $base)" ] || { echo "$g: no checkpoints of $base, skipped"; return; }
+group(){   # $1 name, $2 base run, $3 tasks, $4 launches, $5 extra XLA option(s), $6 note, rest = the model's env
+  local g=$1 base=$2 tasks=$3 n=$4 xla=$5 note=$6 k split=$S1
+  shift 6
+  [ "$tasks" = 4 ] && split=$S4
+  [ -d "$(ckpt "$base")" ] || { echo "$g: no checkpoints of $base, skipped"; return; }
   printf "%-4s %s\n" "$g" "$note" >> "$OUT/groups.txt"
   for k in $(seq 1 "$n"); do
-    run "${g}_$k" "$tasks" "$xla" "$split" "CGOLS_RESTART_FROM=$(ckpt $base)" CGOLS_RESTART_STEP=4
+    # shellcheck disable=SC2086
+    run "${g}_$k" "$tasks" "$xla" $V256 "$@" "$split" "CGOLS_RESTART_FROM=$(ckpt "$base")" CGOLS_RESTART_STEP=4
     # An option the compiler rejects fails every launch: stop after the first.
     if [ $? -ne 0 ] && [ "$k" = 1 ]; then
       echo "    first launch of $g failed: $(grep -v -e sharding_propagation -e '^rc=' "$OUT/${g}_1.log" | tail -1 | cut -c1-300)"
@@ -171,16 +226,44 @@ group(){   # $1 name, $2 tasks, $3 launches, $4 extra XLA option(s), $5 note
 }
 
 DET="--xla_gpu_deterministic_ops=true"
-if want d4 || want o4 || want f4 || want t4; then run b4 4 "" "$S4"; fi
-want d4 && group d4 4 "${DETL_N_D4:-8}" "" "4 processes, default flags"
-want o4 && group o4 4 "${DETL_N_O4:-10}" "$DET" "4 processes, $DET"
-if want d1 || want o1 || want a1; then run b1 1 "" "$S1"; fi
-want d1 && group d1 1 "${DETL_N_D1:-4}" "" "1 process, default flags"
-want o1 && group o1 1 "${DETL_N_O1:-4}" "$DET" "1 process, $DET"
-want f4 && group f4 4 "${DETL_N_F4:-6}" "--xla_gpu_experimental_enable_fusion_autotuner=false" \
-    "4 processes, --xla_gpu_experimental_enable_fusion_autotuner=false"
-want t4 && group t4 4 "${DETL_N_T4:-6}" "--xla_gpu_autotune_level=0" "4 processes, --xla_gpu_autotune_level=0"
-want a1 && group a1 1 "${DETL_N_A1:-2}" "--xla_gpu_dump_autotune_results_to=$CGOLS_DIR/$OUT/@NAME@.autotune.txt" \
-    "1 process, default flags, autotune results dumped to <launch>.autotune.txt"
+NOTUNE="--xla_gpu_autotune_level=0"
+# shellcheck disable=SC2086
+{
+# --- model C, full-grid kernel (job 134433) ---
+if want d4 || want o4 || want f4 || want t4; then run b4 4 "" $V256 $C "$S4"; fi
+want d4 && group d4 b4 4 "${DETL_N_D4:-8}" "" "model C full-grid kernel, 4 processes, default flags" $C
+want o4 && group o4 b4 4 "${DETL_N_O4:-10}" "$DET" "model C full-grid kernel, 4 processes, $DET" $C
+if want d1 || want o1 || want a1; then run b1 1 "" $V256 $C "$S1"; fi
+want d1 && group d1 b1 1 "${DETL_N_D1:-4}" "" "model C full-grid kernel, 1 process, default flags" $C
+want o1 && group o1 b1 1 "${DETL_N_O1:-4}" "$DET" "model C full-grid kernel, 1 process, $DET" $C
+want f4 && group f4 b4 4 "${DETL_N_F4:-6}" "--xla_gpu_experimental_enable_fusion_autotuner=false" \
+    "model C full-grid kernel, 4 processes, --xla_gpu_experimental_enable_fusion_autotuner=false" $C
+want t4 && group t4 b4 4 "${DETL_N_T4:-6}" "$NOTUNE" "model C full-grid kernel, 4 processes, $NOTUNE" $C
+want a1 && group a1 b1 1 "${DETL_N_A1:-2}" "--xla_gpu_dump_autotune_results_to=$CGOLS_DIR/$OUT/@NAME@.autotune.txt" \
+    "model C full-grid kernel, 1 process, default flags, autotune results dumped to <launch>.autotune.txt" $C
+# --- model A ---
+if want ad4 || want at4; then run ba4 4 "" $V256 $A "$S4"; fi
+want ad4 && group ad4 ba4 4 "${DETL_N_AD4:-6}" "" "model A, 4 processes, default flags" $A
+want at4 && group at4 ba4 4 "${DETL_N_AT4:-4}" "$NOTUNE" "model A, 4 processes, $NOTUNE" $A
+# --- model C, local-box kernel ---
+if want ld4 || want lt4 || want lo4; then run bl4 4 "" $V256 $L "$S4"; fi
+want ld4 && group ld4 bl4 4 "${DETL_N_LD4:-6}" "" "model C local-box kernel, 4 processes, default flags" $L
+want lt4 && group lt4 bl4 4 "${DETL_N_LT4:-4}" "$NOTUNE" "model C local-box kernel, 4 processes, $NOTUNE" $L
+want lo4 && group lo4 bl4 4 "${DETL_N_LO4:-3}" "$DET" "model C local-box kernel, 4 processes, $DET" $L
+# --- speed: default against the options ---
+if want bench; then
+  bench bf_d1 "" $C
+  bench bf_t1 "$NOTUNE" $C
+  bench bf_o1 "$DET" $C
+  bench bl_d1 "" $L CGOLS_NUM_CLUSTERS=1000
+  bench bl_t1 "$NOTUNE" $L CGOLS_NUM_CLUSTERS=1000
+  bench bl_o1 "$DET" $L CGOLS_NUM_CLUSTERS=1000
+  bench bf_d2 "" $C
+  bench bf_t2 "$NOTUNE" $C
+  bench bf_o2 "$DET" $C
+  bench bl_d2 "" $L CGOLS_NUM_CLUSTERS=1000
+  bench bf_d3 "" $C
+fi
+}
 summary
 cat "$OUT/summary.txt"
