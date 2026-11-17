@@ -19,6 +19,7 @@ from jaxtyping import Array, Float
 # jax
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec
 
 # astronomix constants
 from astronomix.option_classes.simulation_config import (
@@ -36,7 +37,12 @@ from astronomix.variable_registry.registered_variables import RegisteredVariable
 
 # astronomix functions
 from astronomix._modules._chemistry._chemistry import update_chemistry
-from astronomix._pallas_helpers import _current_pallas_mesh
+from astronomix._pallas_helpers import (
+    _current_pallas_mesh,
+    _resolve_state_pspec,
+    pallas_mesh_context,
+    shard_map,
+)
 from astronomix._finite_volume._sharding import (
     run_in_shard_map,
     get_active_fv_sharding,
@@ -335,20 +341,17 @@ def _iteration_level_updates(
     # Astrochemistry. The species advect with the flow (handled by the solver);
     # here they are reacted per cell. Finite-volume only for now.
     if config.chemistry_config.chemistry and config.solver_mode == FINITE_VOLUME:
-        # Merge note (cgols-chemistry): the fork runs the reaction inside its own
+        # Multi-GPU (cgols-chemistry): the fork runs the reaction inside its own
         # finite-volume shard_map (``fv_sharding_context``), which this branch
-        # does not activate; the multi-GPU path here is the mesh context of
-        # ``_pallas_helpers``. The reaction is not wired to that mesh yet, so a
-        # multi-device run is refused rather than sent through the SPMD
-        # partitioner (which gathers the whole grid to one device and, per the
-        # fork's notes, confuses diffrax's closure conversion).
+        # does not activate. The multi-GPU path here is the mesh context of
+        # ``_pallas_helpers`` (set by ``time_integration`` when it is given a
+        # sharding), so on a multi-device mesh the reaction runs in a shard_map
+        # over that mesh: each device reacts the cells of its own block. Without
+        # it the vmapped stiff solve would go through the SPMD partitioner (an
+        # all-gather of the grid to one device), and the Warp kernel, an opaque
+        # call, could not be partitioned at all.
         active_mesh = _current_pallas_mesh()
-        if active_mesh is not None and active_mesh.devices.size > 1:
-            raise NotImplementedError(
-                "chemistry on a multi-device mesh is not wired up on this branch "
-                "yet: run on one device, or wrap update_chemistry in a shard_map "
-                "over the mesh of pallas_mesh_context first."
-            )
+        multi_device = active_mesh is not None and active_mesh.devices.size > 1
         # The per-cell reaction is embarrassingly parallel (no stencil). Under
         # multi-GPU sharding run it inside a shard_map so each device reacts only
         # its local slab: this avoids gathering the whole grid to one device (an
@@ -361,6 +364,44 @@ def _iteration_level_updates(
         fv_sharding = get_active_fv_sharding()
 
         def _react(state, dt_react, accumulated=None):
+            if multi_device:
+                # Only what ``update_chemistry`` reads is passed (replicated):
+                # the other fields of ``params`` can be sharded arrays (an
+                # external potential), which a replicated spec would gather.
+                accumulated_args = () if accumulated is None else (accumulated,)
+
+                def react_block(
+                    local_state, dt_local, gamma_local, chemistry_params_local, *accumulated_local
+                ):
+                    params_local = SimulationParams(
+                        gamma=gamma_local, chemistry_params=chemistry_params_local
+                    )
+                    # no mesh inside the block: it is one device's local array
+                    with pallas_mesh_context(None):
+                        return update_chemistry(
+                            local_state,
+                            registered_variables,
+                            config.chemistry_config,
+                            params_local,
+                            dt_local,
+                            *accumulated_local,
+                        )
+
+                state_spec = _resolve_state_pspec(state, active_mesh)
+                replicated = PartitionSpec()
+                return shard_map(
+                    react_block,
+                    mesh=active_mesh,
+                    in_specs=(state_spec,) + (replicated,) * (3 + len(accumulated_args)),
+                    out_specs=state_spec,
+                    check_rep=False,
+                )(
+                    state,
+                    dt_react,
+                    jnp.asarray(params.gamma),
+                    params.chemistry_params,
+                    *accumulated_args,
+                )
             if fv_sharding is not None:
                 # dt and params are passed as replicated shard_map arguments (not
                 # closed over: explicit-mesh mode forbids capturing sharded inputs).
