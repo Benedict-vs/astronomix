@@ -104,8 +104,23 @@ def build_chemistry_from_network_file(
     cooling_courant: float = 0.1,
     co_cooling: bool = False,
     co_cooling_table_path: str = DEFAULT_CO_COOLING_TABLE_PATH,
+    krome_photo_rates: dict = None,
+    krome_user_variables: dict = None,
+    krome_h2_formation_on_dust=False,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
-    """Assemble the chemistry containers from a carbox network file.
+    """Assemble the chemistry containers from a network file.
+
+    The file is a carbox network (``network_format`` names the carbox parser,
+    e.g. ``"latent_tgas"``) or a network in the KROME format
+    (``network_format="krome"``, read by
+    ``astronomix._modules._chemistry._krome_network`` without carbox). For a
+    KROME network ``cosmic_ray_rate`` is KROME's ``user_crate``, ``fuv_field``
+    its Habing field and ``dust_to_gas_ratio / 0.01`` its dust-to-gas ratio
+    relative to solar; ``krome_photo_rates`` gives the rates [1/s] of the
+    photo-reactions by KROME reaction index (zero when not given),
+    ``krome_user_variables`` the other ``@common`` variables of the file, and
+    ``krome_h2_formation_on_dust`` adds the H2 formation on grains that KROME
+    takes from a build option (``True`` or a coefficient in cm^3/s).
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -141,23 +156,36 @@ def build_chemistry_from_network_file(
         into the matching state slots.
     """
 
-    # carbox is an optional dependency; import locally so the package imports
-    # without it when chemistry is unused.
-    from carbox.network import Network
-    from carbox.parsers import parse_chemical_network
+    if network_format == "krome":
+        # A KROME network is read by astronomix itself; its right-hand side is
+        # called like a carbox network.
+        from astronomix._modules._chemistry._krome_network import build_krome_network
 
-    # A dense stoichiometry matrix keeps the per-cell right-hand side a plain
-    # matmul, which vmaps cleanly across the grid (the default sparse BCOO does
-    # not).
-    parsed_network = parse_chemical_network(network_csv_path, network_format)
-    dense_network = Network(
-        parsed_network.species,
-        parsed_network.reactions,
-        use_sparse=False,
-    )
-    reaction_network = dense_network.get_ode()
+        reaction_network, species_names = build_krome_network(
+            network_csv_path,
+            photo_rates=krome_photo_rates,
+            user_variables=krome_user_variables,
+            dust_to_gas_relative=dust_to_gas_ratio / 1e-2,
+            h2_formation_on_dust=krome_h2_formation_on_dust,
+        )
+    else:
+        # carbox is an optional dependency; import locally so the package imports
+        # without it when chemistry is unused.
+        from carbox.network import Network
+        from carbox.parsers import parse_chemical_network
 
-    species_names = tuple(species.name for species in dense_network.species)
+        # A dense stoichiometry matrix keeps the per-cell right-hand side a plain
+        # matmul, which vmaps cleanly across the grid (the default sparse BCOO does
+        # not).
+        parsed_network = parse_chemical_network(network_csv_path, network_format)
+        dense_network = Network(
+            parsed_network.species,
+            parsed_network.reactions,
+            use_sparse=False,
+        )
+        reaction_network = dense_network.get_ode()
+        species_names = tuple(species.name for species in dense_network.species)
+
     number_of_species = len(species_names)
     number_of_reactions = reaction_network.reactions_number
 

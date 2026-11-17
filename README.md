@@ -264,6 +264,51 @@ imports it, so `import astronomix` works without it.
 - **Licences.** carbox is GPL-3.0-or-later and astronomix is MIT, which is why carbox is
   referenced as a submodule and not copied into this repository.
 
+### Networks in the KROME format
+
+`build_chemistry_from_network_file(path, "krome", ...)` reads a network written for
+[KROME](https://bitbucket.org/tgrassi/krome) (for instance its `networks/react_galaxy_ism`)
+and integrates it with the same solvers and the same thermochemistry as a carbox network.
+carbox is not needed for it; the reader is `astronomix/_modules/_chemistry/_krome_network.py`.
+
+```python
+chemistry_config, chemistry_params, species_names = build_chemistry_from_network_file(
+    "/path/to/krome/networks/react_galaxy_ism", "krome",
+    number_density_unit_cgs=..., temperature_unit_kelvin=..., time_unit_seconds=...,
+    cosmic_ray_rate=3e-17,              # KROME's user_crate
+    fuv_field=1.7,                      # the Habing field of the recombination on dust
+    krome_photo_rates={36: 1e-12},      # rates [1/s] of photo-reactions, by KROME reaction index
+    krome_h2_formation_on_dust=True,    # Jura's rate; in KROME a build option, not in the file
+)
+```
+
+- **What is read.** Reaction lines under the default layout or a `@format:` line; temperature
+  limits (`NONE`, `.LE.5.5e3`, `>5.5e3`, a bare number), outside which a coefficient is zero;
+  `@var:` and `@common:`; rate coefficients as Fortran expressions of `Tgas` and KROME's
+  shortcuts (`Te`, `lnTe`, `invT`, `T32`, ...); recombination on dust of H+, He+, C+, O+ and
+  Si+ and the Lyman-Werner rate `H2_solomonLW`. Every reaction is checked for the
+  conservation of nuclei and charge, and anything else in the file raises an error.
+- **Photo-reactions.** KROME integrates cross sections over a radiation spectrum set at run
+  time. Here each photo-reaction takes its rate from `krome_photo_rates` and is off when not
+  given; cross sections are not read, and no shielding is applied.
+- **Not in a network file.** What KROME adds from build options is not read from the file:
+  of these, the H2 formation on dust (Jura) is available as `krome_h2_formation_on_dust`.
+  The heating and cooling are those of this module (previous sections), not KROME's.
+- **Solvers.** The vmapped Kvaerno5 runs with a Newton iteration for these networks: the
+  default chord iteration stalls on the ionisation equilibrium of hot, dense gas. The
+  per-cell Warp kernel works as for a carbox network (it needs `thermochemistry=True`).
+- **Checked against KROME itself**, with the Fortran that KROME generates for
+  `react_galaxy_ism` with the metal reactions switched on (79 reactions, 16 species): the 66
+  collisional and dust coefficients agree to 2e-10 at 30 temperatures from 5 K to 3e7 K when
+  the constants are read as a Fortran compiler reads them (`single_precision_literals=True`;
+  to 1.5e-5 with the default, since KROME's constants without a `d` exponent are single
+  precision), and the abundances of five isothermal cells followed to 1e14 s with KROME's
+  own solver agree to 6e-8.
+- `examples/chemistry_krome_network.py --network <file>` runs a network file through both
+  solvers; `pytests/chemistry/test_krome_network.py` tests the reader on a small network
+  written in the test, and a full file when `ASTRONOMIX_TEST_KROME_NETWORK` points at one.
+  No KROME network file is shipped here (KROME is GPL-3).
+
 ### Per-cell implicit solver on the GPU (Warp kernel, via gradsolve)
 
 - `astronomix/_modules/_chemistry/_warp_stiff.py` is an alternative to the vmapped Diffrax
