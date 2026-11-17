@@ -252,8 +252,17 @@ def _network_file():
         import carbox
     except ImportError:
         return None
-    path = os.path.join(os.path.dirname(os.path.dirname(carbox.__file__)), "data", "simple_latent_tgas.csv")
-    return path if os.path.exists(path) else None
+    # carbox keeps the network outside its Python package: next to it in a clone or an editable
+    # install, else in the pinned submodule of this repository (external/carbox).
+    repository_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates = (
+        os.path.join(os.path.dirname(os.path.dirname(carbox.__file__)), "data", "simple_latent_tgas.csv"),
+        os.path.join(repository_root, "external", "carbox", "data", "simple_latent_tgas.csv"),
+    )
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def _react(use_kernel, network_csv):
