@@ -171,8 +171,9 @@ submodule `external/carbox`, which also holds the network file, and gradsolve, W
 `requirements-chemistry.txt`. With Python 3.12:
 
 ```bash
-git clone --recurse-submodules -b feature/multi-gpu-sharding https://github.com/lorenzobranca/astronomix.git
+git clone -b feature/multi-gpu-sharding https://github.com/lorenzobranca/astronomix.git
 cd astronomix
+git submodule update --init          # fetches external/carbox
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-chemistry.txt -e . -e external/carbox
 # NVIDIA GPU (CUDA 12), in addition: pip install "jax[cuda12]==0.10.2"
@@ -187,7 +188,8 @@ python -m pytest pytests/chemistry/test_warp_stiff_solver.py
   side, and prints both results and their difference. It takes about a minute on a CPU; the
   script is the same on a GPU.
 - **The network file** is `external/carbox/data/simple_latent_tgas.csv`.
-- In a clone made without `--recurse-submodules`: `git submodule update --init`.
+- Do not clone with `--recurse-submodules`: carbox has a submodule of its own (uclchem, not
+  needed here) that is fetched over SSH and fails without a GitHub SSH key.
 - Use the pinned carbox, not carbox `main`: see the next but one section for why.
 
 ### Stiff chemistry and thermochemistry
