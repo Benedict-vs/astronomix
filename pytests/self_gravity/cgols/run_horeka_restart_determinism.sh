@@ -30,6 +30,14 @@
 #              -> the cluster model against the solver
 #   l4a, l4r3  model C with the local-box kernel, 4 processes, resumed at 6 Myr
 #
+# Result (job 134305): the restart is exact. All four 4-process resumed runs
+# were bit-identical to their uninterrupted run. What differed was the launch:
+# c4b against c4a from 6 Myr on, c1r3 against c1a. The cause and the fix are in
+# run_horeka_launch_determinism.sh; _site_env.sh now sets
+# --xla_gpu_autotune_level=0, with which two launches no longer differ. To see
+# the difference again, submit with
+# --export=ALL,XLA_FLAGS=--xla_gpu_autotune_level=4 (XLA's default).
+#
 # Dev queue: 1 node, 4 x H100, at most 1 h. Run from a code COPY that no queued
 # job imports:
 #

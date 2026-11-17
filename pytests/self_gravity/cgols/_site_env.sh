@@ -154,6 +154,26 @@ case " ${XLA_FLAGS:-} " in
     *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_shard_autotuning=false" ;;
 esac
 
+# The same compiled program in every launch. With autotuning on, XLA times two
+# code generators for every fusion that holds a reduction and keeps the faster
+# one, anew in every launch and on every rank. The two add in a different
+# order, so a sum over the grid comes out 1 ulp different from launch to
+# launch. The full-grid cluster kernel of model C feeds such a sum back into
+# the gas, so two launches of the same run parted at rounding level: 8 launches
+# gave 5 final states (run_horeka_launch_determinism.sh, job 134433). Level 0
+# skips that choice and always takes the first generator. The other things it
+# switches off, the cuBLAS and cuDNN autotuning, have nothing to act on here:
+# the autotuner's own list for this program holds reductions only. Measured
+# (jobs 134433, 134545): every launch bit-identical; model A and the local-box
+# kernel unchanged bit for bit; the full-grid kernel differs from a default
+# launch as two default launches differ from each other; at most 1 % per step
+# at 512^3, same compiled memory. A caller that sets the level itself keeps
+# it (XLA's default is --xla_gpu_autotune_level=4).
+case " ${XLA_FLAGS:-} " in
+    *xla_gpu_autotune_level*) ;;
+    *) export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0" ;;
+esac
+
 
 cgols_preflight() {
     # Version banner. Every job's .out then documents exactly which jax, orbax,
@@ -203,6 +223,7 @@ PY
     else
         echo "ptxas:     NOT FOUND (neither on PATH nor in site-packages/nvidia)"
     fi
+    echo "XLA_FLAGS: ${XLA_FLAGS:-<unset>}"
     echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
     nvidia-smi -L 2>/dev/null || echo "nvidia-smi: unavailable"
     echo "=== end preflight ==="

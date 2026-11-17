@@ -77,6 +77,8 @@
 # launches took 204 s instead of 26 s (lo4), and the 512^3 run with 1000
 # clusters timed out (a default run takes 55 s).
 #
+# Consequence: _site_env.sh now sets --xla_gpu_autotune_level=0 for every run.
+#
 # Dev queue: 1 node, 4 x H100, at most 1 h. Run from a code COPY that no queued
 # job imports:
 #
@@ -121,7 +123,10 @@ BENCH_FRACTION=$(awk -v n="$BENCH_STEPS" 'BEGIN{printf "%.6g", 1e-3 * n / 7.670}
 B512="CGOLS_DIM=512 CGOLS_BENCH_STEPS=$BENCH_STEPS CGOLS_END_FRACTION=$BENCH_FRACTION CGOLS_CLUSTER_START_MYR=0 CGOLS_CHECKPOINT_EVERY=0 CGOLS_RUN_TAG=_det_bench"
 GROUPS_WANTED="${DETL_GROUPS:-d4 o4 d1 o1 f4 t4 a1}"
 GROUPS_WANTED="${GROUPS_WANTED//:/ }"
-BASE_XLA="${XLA_FLAGS:-}"
+# _site_env.sh switches the autotuning off (since 2026-11-18, after this job's
+# result). The groups here set it themselves, so take it out of the base again:
+# "default flags" below means XLA's own default, level 4.
+BASE_XLA="$(echo "${XLA_FLAGS:-}" | sed 's/ *--xla_gpu_autotune_level=[0-9]*//')"
 echo "XLA_FLAGS of every launch: $BASE_XLA (+ the group's option)"
 want(){ case " $GROUPS_WANTED " in *" $1 "*) return 0 ;; esac; return 1; }
 ckpt(){ echo "$CGOLS_DIR/data/cgols_checkpoints_det_$1"; }
