@@ -20,11 +20,12 @@
 # 4-process pairs. What differs is the LAUNCH. The total mass in the [diag]
 # line, a sum over the whole grid, came out 1 ulp different in about a third
 # of the steps between two launches whose states were bit-identical, in a way
-# fixed per launch. Model A and the local-box cluster kernel never feed a
-# grid-wide sum back into the gas, so their states stayed bit-identical. The
-# full-grid cluster kernel normalises every cluster by a grid-wide sum
-# (jnp.sum(_sphere_weights(slot)) in _cgols_wind.py), so there the launches
-# part as soon as the feedback is on, and the difference then grows.
+# fixed per launch. The full-grid cluster kernel normalises every cluster by
+# a grid-wide sum (jnp.sum(_sphere_weights(slot)) in _cgols_wind.py), so there
+# the launches part as soon as the feedback is on, and the difference then
+# grows. The local-box kernel sums each cluster over its own small cube, and
+# model A divides by the sum over one fixed sphere; their states stayed
+# bit-identical in that job (one pair each).
 #
 # This job measures how often that happens and tries the XLA options that
 # should remove it. A base run (256^3, model C, full-grid kernel) goes to
@@ -56,6 +57,25 @@
 #   bench          512^3 on 4 processes, fixed steps, s/step after compilation:
 #                  full-grid kernel (16 clusters) and local-box kernel (1000
 #                  clusters), default against the two options
+#
+# Result (job 134545): model A and the local-box kernel do not need an option.
+# 6 default launches each gave one final state, the one of the base run, while
+# the printed [diag] mass still came in 4 (model A) and 5 (local box)
+# different sequences. With --xla_gpu_autotune_level=0 the printed mass is
+# identical as well (4 of 4 each). Speed at 512^3, 4 x H100, s/step:
+#
+#   full-grid kernel, 16 clusters    default 0.3610 0.3604 0.3601
+#                                    autotuning off 0.3602 0.3639
+#                                    deterministic ops 0.3654 0.3620
+#   local-box kernel, 1000 clusters  default 0.3566 0.3554
+#                                    autotuning off 0.3585
+#                                    deterministic ops: not finished in 6 min
+#
+# Compiled memory is the same with every option (12149 and 12953 MiB per GPU).
+# So --xla_gpu_autotune_level=0 costs at most 1 %. Do NOT use
+# --xla_gpu_deterministic_ops=true with the local-box kernel: its 256^3
+# launches took 204 s instead of 26 s (lo4), and the 512^3 run with 1000
+# clusters timed out (a default run takes 55 s).
 #
 # Dev queue: 1 node, 4 x H100, at most 1 h. Run from a code COPY that no queued
 # job imports:
