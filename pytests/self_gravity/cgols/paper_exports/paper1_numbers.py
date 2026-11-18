@@ -429,7 +429,7 @@ def figures():
                   "Galactic absorption (N_H = 4e20 cm^-2), against the Strickland et al. (2004) M82 fits")  # fmt: skip
     entries = [
         ("slices_A2048", FIGURES / "paper" / "paper_slices_A2048.png", "cgols_paper_slices.py",
-         "A-2048 density and temperature x-z slices at 10, 25, 50, 60 Myr (layout of CGOLS I Fig. 6); 200 dpi",
+         "A-2048 density and temperature x-z slices at 10, 25, 50, 60 Myr (layout of CGOLS I Fig. 6), 300 dpi",
          ["A-2048"]),
         ("outflow_A_ladder", FIGURES / "comparisons" / "a_series_outflow_128_2048.png", "cgols_model_c_compare.py",
          "Net outflow of model A through |z| = 1, 5, 8 kpc and cumulative mass through 5 kpc, 128^3-2048^3",
