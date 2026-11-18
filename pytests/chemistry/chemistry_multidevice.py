@@ -17,8 +17,8 @@ Two comparisons, each for the chosen solver:
 With ``--krome-network`` the network is one in the KROME format (read by
 astronomix, with KROME's heating and cooling; ``--krome-data`` is the ``data``
 folder of a KROME installation) and the gas is warm (8000 K, 0.3 to 30 hydrogen
-nuclei per cm^3), where its cooling acts within a few steps. Its tabulated metal
-cooling needs the vmapped Kvaerno5; with ``--kernel`` the table is left out.
+nuclei per cm^3), where its cooling acts within a few steps, with the tabulated
+metal cooling in both solvers.
 
 Run it from the repository root (needs carbox, diffrax, and for ``--kernel``
 gradsolve and warp-lang, see ``requirements-chemistry.txt``)::
@@ -34,7 +34,9 @@ in the pressure) and to 4e-7 dex / 3e-7 with the vmapped Kvaerno5 on 2 devices
 (the tolerance of the solver is 1e-6). On 2026-11-18, the KROME network
 react_galaxy_ism_plus with the vmapped Kvaerno5 on 2 emulated devices and 8^3
 cells: 4e-9 dex and 2e-13 in the pressure after one step, 1.5e-10 dex after the
-short run. Not yet run on GPUs.
+short run; the same network with the Warp kernel (``--kernel``, the metal table
+handed to the kernel as an array): 9e-16 dex and 6e-16 after one step, 2e-10 dex
+after the short run. Not yet run on GPUs.
 """
 
 import argparse
@@ -134,7 +136,7 @@ if KROME:
             max_steps=2048,
             krome_h2_formation_on_dust=True,
             krome_data_folder=arguments.krome_data,
-            krome_metal_table=not arguments.kernel,  # the kernel cannot look a table up
+            krome_metal_table=True,
             krome_photo_bins=(
                 None if arguments.krome_data is None else photo_spectrum("draine", 5.0, 13.6, 10)
             ),
