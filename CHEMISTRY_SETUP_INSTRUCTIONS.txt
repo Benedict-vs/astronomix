@@ -129,10 +129,10 @@ network file, and the "data" folder of a KROME installation
 
 This evolves 16 cells (n_H from 1 to 1e4 cm^-3) for 1 Myr under the
 interstellar radiation field, once with Kvaerno5 and once with the per-cell
-gradsolve kernel, and prints both results and their difference (a few 1e-5
-dex in the abundances). The first build of the kernel for this network takes
-about ten minutes on a CPU; it is cached afterwards. Add "--no-kernel" to
-skip it.
+gradsolve kernel, and prints both results and their difference (of the order
+of 1e-4 dex in the abundances and 1e-5 in the temperature, the tolerance of
+the solvers). The first build of the kernel for this network takes about ten
+minutes on a CPU; it is cached afterwards. Add "--no-kernel" to skip it.
 
   without --no-metal-table    the metals also cool above 1e4 K (KROME's table);
                               only Kvaerno5 runs, the kernel cannot use a table
