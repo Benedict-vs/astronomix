@@ -3,7 +3,7 @@ Outflow rates through spherical shells, from the full 3D CGOLS checkpoints.
 
 The plane fluxes of cgols_convergence_3d.py integrate rho v_z over a flat
 x-y plane at |z| = H. This script measures the radial fluxes the way CGOLS IV
-(Schneider et al. 2020, Sec. 5.2) does: for every radial bin [r, r + DR) it
+(Schneider et al. 2020, Sec. 4.3; 0.25 kpc bins in a 30 degree bicone there) does: for every radial bin [r, r + DR) it
 sums over the cells in the bin and divides by the bin width,
 
     Mdot(r) = sum(m v_r) / DR,   v_r = (x v_x + y v_y + z v_z) / r,
