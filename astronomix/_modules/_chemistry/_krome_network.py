@@ -6,7 +6,7 @@ rate coefficients are Fortran expressions of the gas temperature. This module
 reads such a file and builds its right-hand side as a JAX function with the call
 signature of a carbox network, so that the chemistry module integrates it with
 the same implicit solvers (the vmapped Diffrax Kvaerno5 and the per-cell Warp
-kernel) and the same thermochemistry.
+kernel), doing with it what KROME does.
 
 What is read (the subset needed by ``react_galaxy_ism`` and its variants):
 
@@ -19,18 +19,36 @@ What is read (the subset needed by ``react_galaxy_ism`` and its variants):
   H+, He+, C+, O+ and Si+ (Weingartner & Draine 2001) and the Lyman-Werner
   photodissociation of H2 from a flux (``H2_solomonLW``);
 * photo-reactions (``@photo_start`` ... ``@photo_stop``). KROME obtains their
-  rates by integrating cross sections over a radiation spectrum set at run
-  time; here every photo-reaction takes its rate [1/s] from ``photo_rates``
-  (zero by default, i.e. no ionising radiation), and the cross sections are not
-  read.
+  rates by integrating cross sections over a radiation spectrum given in energy
+  bins; so does this module when ``photo_bins`` is given (``_krome_photo.py``),
+  and the Habing flux of the dust terms is then that of the spectrum. Without
+  bins every photo-reaction takes its rate [1/s] from ``photo_rates`` (zero by
+  default, i.e. no ionising radiation);
+* the cosmic-ray block (``@CR_start`` ... ``@CR_stop``), whose reactions heat
+  the gas as in KROME;
+* ``@reactionModifier_start`` ... ``@reactionModifier_stop``: statements
+  ``k(i) = ...`` applied to the coefficients after they are all computed, and
+  the shielding functions ``shield_dust(n,Tgas,gamma)`` and
+  ``krome_fshield(n,Tgas)`` in a rate expression or a ``@var``.
 
-A rate coefficient is zero outside its temperature limits, as in KROME. Any other
-directive of the format raises an error instead of being skipped.
+A rate coefficient is zero outside its temperature limits, as in KROME. A line
+whose number of fields does not match the layout in force is skipped with a
+warning, as KROME does, and the reactions are numbered in the order in which
+they are read (KROME's reaction index); any other directive of the format raises
+an error instead of being skipped.
 
-Processes that KROME adds at build time are not in the network file. One of them
-is available here as an option, the formation of H2 on dust grains with the rate
-of Jura (1975) (KROME's ``-useH2dust=JURA``): ``3.5e-17 n(H) n_H D/D_sun`` H2
-molecules per cm^3 per second.
+What KROME takes from its build options is not in the network file; here these
+are arguments of :func:`build_krome_network`:
+
+* ``-useDustH2const``: the formation of H2 on dust grains with the rate of Jura
+  (1975), ``3.5e-17 n(H) n_H D/D_sun`` H2 molecules per cm^3 per second;
+* ``-shieldHabingDust``: the Habing flux attenuated by dust,
+  ``exp(-1.33e-21 D/D_sun N_H)``;
+* ``-shielding=DB96 | WG11 | R14``: the H2 self-shielding that
+  ``krome_fshield`` returns;
+* ``-columnDensityMethod=DEFAULT | JEANS``: how a number density becomes the
+  column density of the two shielding terms;
+* ``-photoBins``: the binned spectrum.
 
 The heating and cooling of a KROME network are KROME's too (see
 ``_krome_thermochemistry.py``): the network carries its own temperature
@@ -40,6 +58,7 @@ derivative, which the chemistry module uses in place of its default one.
 # general
 import ast
 import re
+import warnings
 from functools import lru_cache
 from typing import Tuple
 
@@ -60,7 +79,33 @@ DEFAULT_FORMAT = ("idx", "r", "r", "r", "p", "p", "p", "p", "tmin", "tmax", "rat
 # two-letter element symbols restored from KROME's upper-case species names
 TWO_LETTER_ELEMENTS = ("He", "Si", "Mg", "Fe", "Na", "Ne", "Cl", "Ar", "Ca", "Al", "Li")
 NO_LIMIT = ("", "N", "NONE", "N/A", "NO")
-IGNORED_DIRECTIVES = ("@notab_start", "@notab_stop", "@notabnext", "@cr_start", "@cr_stop")
+IGNORED_DIRECTIVES = ("@notab_start", "@notab_stop", "@notabnext")
+
+# KROME's constants (krome_constants.f90, kromeobj.py) for the column densities,
+# the self-shielding and the cosmic-ray heating
+BOLTZMANN_ERG = 1.380648e-16
+GRAVITY = 6.674e-8
+PI = 3.14159265359
+ELECTRON_MASS = 9.10938188e-28
+PROTON_MASS = 1.67262158e-24
+NEUTRON_MASS = 1.6725e-24
+# protons and neutrons of the elements in KROME's species masses
+NUCLEONS = {
+    "H": (1, 0), "D": (1, 1), "He": (2, 2), "Li": (3, 4), "Be": (4, 5), "B": (5, 6), "C": (6, 6), "N": (7, 7), "O": (8, 8),
+    "F": (9, 10), "Ne": (10, 10), "Na": (11, 12), "Mg": (12, 12), "Al": (13, 14), "Si": (14, 14), "P": (15, 16),
+    "S": (16, 16), "Cl": (17, 18), "Ar": (18, 22), "Ti": (22, 26), "Fe": (26, 29),
+}
+SHIELDINGS = ("DB96", "WG11", "R14")
+COLUMN_DENSITY_METHODS = ("DEFAULT", "JEANS")
+# Cosmic-ray heating (KROME's heat_CR): energy per ionisation of H and He [eV],
+# of any other cosmic-ray reaction, and the fit of the energy per ionisation of
+# H2 as a function of its number density (Glassgold et al. 2012 and
+# arXiv:1502.03380), linear in log10 n(H2) below 1e5 cm^-3 and constant above 1e10.
+COSMIC_RAY_ELECTRON_VOLT_TO_ERG = 1.60217662e-12
+COSMIC_RAY_HEAT_ATOMIC = 4.3
+COSMIC_RAY_HEAT_OTHER = 20.0
+COSMIC_RAY_HEAT_H2_POLYNOMIAL = (9.1462198642562, -0.443120145068494, 0.601271617560071, -0.0710284101055109, 0.00242079494592405)
+COSMIC_RAY_HEAT_H2_LINEAR = (1.4510849135088, 7.23277032061136)
 
 # Weingartner & Draine (2001), Table 2: recombination of an ion on dust grains,
 # alpha = 1e-14 C0 / (1 + C1 psi^C2 (1 + C3 T^C4 psi^(-C5 - C6 ln T))) cm^3/s,
@@ -97,6 +142,18 @@ def _elements_and_charge(name):
     return counts, charge
 
 
+def _species_mass(name):
+    """Mass of a species [g] as KROME computes it: protons, neutrons and electrons of its atoms."""
+    counts, charge = _elements_and_charge(name)
+    mass = -charge * ELECTRON_MASS
+    for element, count in counts.items():
+        if element not in NUCLEONS:
+            raise NotImplementedError(f"species {name}: the mass of the element {element} is not tabulated")
+        protons, neutrons = NUCLEONS[element]
+        mass += count * (protons * (ELECTRON_MASS + PROTON_MASS) + neutrons * NEUTRON_MASS)
+    return mass
+
+
 def _fortran_number(text):
     return float(text.strip().lower().replace("d", "e"))
 
@@ -120,10 +177,19 @@ def parse_krome_network(path):
         electron as ``E``), ``reactions`` (one tuple per reaction: KROME index,
         reactant indices, product indices, lower limit, upper limit, rate
         expression, photo slot or -1), ``variables`` (the ``@var`` definitions
-        in file order) and ``commons`` (the ``@common`` user variables).
+        in file order), ``commons`` (the ``@common`` user variables),
+        ``photo`` (for every photo-reaction its position, the two limits as
+        written, i.e. energies in eV or None, and the cross section as
+        written), ``cosmic_ray`` (the positions of the reactions of the
+        cosmic-ray block), ``modifiers`` (the statements of the
+        ``@reactionModifier`` blocks) and ``skipped`` (the lines left out).
+
+    The KROME index of a reaction is its position among the reactions read,
+    starting from one, as in KROME (the first column of the file is not used).
     """
     species, reactions, variables, commons = [], [], [], []
-    layout, photo, photo_count = DEFAULT_FORMAT, False, 0
+    photo_reactions, cosmic_ray, modifiers, skipped = [], [], [], []
+    layout, photo, photo_count, cosmic_rays, modifier_block, unordered = DEFAULT_FORMAT, False, 0, False, False, False
 
     def index(token):
         name = _species_name(token)
@@ -131,12 +197,22 @@ def parse_krome_network(path):
             species.append(name)
         return species.index(name)
 
-    for number, raw in enumerate(open(path), start=1):
+    with open(path) as file:
+        lines = file.readlines()
+    for number, raw in enumerate(lines, start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         lowered = line.lower()
-        if lowered.startswith("@var:"):
+        if lowered.startswith(("@reactionmodifier_stop", "@reactionmodifier_end")):
+            modifier_block = False
+        elif modifier_block:
+            if "@" in line:
+                raise ValueError(f"{path}:{number}: a directive inside a @reactionModifier block")
+            modifiers.append(line)
+        elif lowered.startswith(("@reactionmodifier_start", "@reactionmodifier_begin")):
+            modifier_block = True
+        elif lowered.startswith("@var:"):
             name, expression = line[5:].split("=", 1)
             variables.append((name.strip().lower(), expression.strip()))
         elif lowered.startswith("@common:"):
@@ -147,18 +223,27 @@ def parse_krome_network(path):
             photo = True
         elif lowered.startswith("@photo_stop"):
             photo = False
+        elif lowered.startswith(("@cr_start", "@cr_begin")):
+            cosmic_rays = True
+        elif lowered.startswith(("@cr_stop", "@cr_end")):
+            cosmic_rays = False
         elif lowered.startswith(IGNORED_DIRECTIVES):
-            continue  # tabulation hints and cosmic-ray block markers: no effect on the rates
+            continue  # tabulation hints: no effect on the rates
         elif line.startswith("@"):
             raise NotImplementedError(f"{path}:{number}: KROME directive not supported: {line.split(':')[0]}")
         else:
             fields = [field.strip() for field in line.split(",", len(layout) - 1)]
+            fields[-1] = fields[-1].rsplit("!", 1)[0].rsplit("#", 1)[0].strip()  # a comment after the rate
             if len(fields) != len(layout):
-                raise ValueError(
-                    f"{path}:{number}: the line '{line[:60]}' has {len(fields)} fields, the format in force "
-                    f"({','.join(layout)}) has {len(layout)}. KROME skips such a reaction with a warning; "
-                    "a @format line is probably missing or commented out above it."
+                # KROME prints "WARNING: wrong format for reaction" and goes on without the line
+                warnings.warn(
+                    f"{path}:{number}: wrong format for reaction {len(reactions) + 1}, line skipped as in KROME: "
+                    f"'{line[:60]}' has {len(fields)} fields, the format in force ({','.join(layout)}) has "
+                    f"{len(layout)}. A @format line is probably missing or commented out above it.",
+                    stacklevel=2,
                 )
+                skipped.append((number, line))
+                continue
             entry = {"r": [], "p": [], "tmin": "NONE", "tmax": "NONE"}
             for key, value in zip(layout, fields):
                 if key in ("r", "p"):
@@ -171,12 +256,29 @@ def parse_krome_network(path):
             slot = -1
             if photo:
                 slot, photo_count = photo_count, photo_count + 1
+                photo_reactions.append((
+                    len(reactions),
+                    None if entry["tmin"].upper() in NO_LIMIT else entry["tmin"],
+                    None if entry["tmax"].upper() in NO_LIMIT else entry["tmax"],
+                    entry["rate"],
+                ))
+            if cosmic_rays:
+                cosmic_ray.append(len(reactions))
+            if "idx" in entry and entry["idx"].lstrip("+-").isdigit() and int(entry["idx"]) != len(reactions) + 1:
+                unordered = True
             reactions.append((
-                int(entry["idx"]), tuple(entry["r"]), tuple(entry["p"]),
+                len(reactions) + 1, tuple(entry["r"]), tuple(entry["p"]),
                 None if photo else _temperature_limit(entry["tmin"], "GE"),
                 None if photo else _temperature_limit(entry["tmax"], "LT"),
                 entry["rate"], slot,
             ))
+    if unordered:
+        # KROME: "WARNING: index in <file> are not sequential!"
+        warnings.warn(
+            f"{path}: the indices in the first column are not sequential; as in KROME the reactions are numbered "
+            "in the order in which they are read.",
+            stacklevel=2,
+        )
 
     # every reaction must conserve the nuclei and the charge (photons carry neither)
     for krome_index, reactants, products, _, _, _, _ in reactions:
@@ -191,7 +293,11 @@ def parse_krome_network(path):
             names = " + ".join(species[i] for i in reactants) + " -> " + " + ".join(species[i] for i in products)
             raise ValueError(f"{path}: reaction {krome_index} ({names}) does not conserve {[k for k, v in totals.items() if v]}")
 
-    return {"species": tuple(species), "reactions": tuple(reactions), "variables": tuple(variables), "commons": tuple(commons)}
+    return {
+        "species": tuple(species), "reactions": tuple(reactions), "variables": tuple(variables), "commons": tuple(commons),
+        "photo": tuple(photo_reactions), "cosmic_ray": tuple(cosmic_ray), "modifiers": tuple(modifiers),
+        "skipped": tuple(skipped),
+    }
 
 
 # -------------------------------------------------------------
@@ -310,8 +416,10 @@ class KromeNetwork(eqx.Module):
     ``network(time, abundances, temperature, cosmic_ray_rate, fuv_field,
     visual_extinction, rate_modifier_a, rate_modifier_b)`` returns the time
     derivative of the number densities [cm^-3 s^-1]. ``cosmic_ray_rate`` is
-    KROME's ``user_crate`` and ``fuv_field`` its Habing field ``GHabing`` (it
-    enters the recombination on dust); the visual extinction is not used.
+    KROME's ``user_crate`` and ``fuv_field`` its unattenuated Habing flux
+    ``GHabing_thin`` (it enters the recombination and the photoelectric heating
+    on dust); with photo bins the Habing flux is that of the binned spectrum and
+    ``fuv_field`` is not used. The visual extinction is not used.
     """
 
     # The rates are products of the number densities and guarded fits, finite for
@@ -329,6 +437,9 @@ class KromeNetwork(eqx.Module):
 
     stoichiometry: jnp.ndarray  # [species, reactions], products minus reactants
     photo_rates: jnp.ndarray  # [photo-reactions], 1/s
+    photo_heats: jnp.ndarray  # [photo-reactions], heating per reaction [erg/s]
+    bins_habing_field: jnp.ndarray  # Habing flux of the binned spectrum
+    masses: jnp.ndarray  # [species], g
     user_values: jnp.ndarray  # values of the @common variables other than user_crate
     dust_to_gas: jnp.ndarray  # dust-to-gas ratio relative to solar (KROME's dust2gas_ratio)
     h2_on_dust_coefficient: jnp.ndarray  # cm^3/s; 0 switches the H2 formation on dust off
@@ -345,20 +456,116 @@ class KromeNetwork(eqx.Module):
     variables: tuple = eqx.field(static=True)
     user_names: Tuple[str, ...] = eqx.field(static=True)
     reactions_number: int = eqx.field(static=True)
+    modifiers: tuple = eqx.field(static=True)  # (position, expression) of the @reactionModifier statements
+    cosmic_ray_terms: tuple = eqx.field(static=True)  # (position, reactant, kind) of the cosmic-ray reactions
+    photo_reactants: tuple = eqx.field(static=True)  # reactant of every photo-reaction
+    has_photo_bins: bool = eqx.field(static=True)
+    shielding: str = eqx.field(static=True)  # "", "DB96", "WG11" or "R14": what krome_fshield returns
+    shield_habing_dust: bool = eqx.field(static=True)
+    column_density_method: str = eqx.field(static=True)
+    cooling_floor_temperature: float = eqx.field(static=True)
+
+    def _single(self, value):
+        # a real constant that KROME's Fortran writes without a ``d`` exponent
+        return float(np.float32(value)) if self.single_precision_literals else float(value)
+
+    def _density(self, abundances, name):
+        return abundances[self.species.index(name)] if name in self.species else 0.0
+
+    def jeans_length(self, abundances, temperature):
+        """Jeans length [cm] (KROME's ``get_jeans_length``)."""
+        mass_density = jnp.maximum(jnp.dot(self.masses, abundances), 1e-40)
+        mean_weight = mass_density / jnp.maximum(jnp.sum(abundances), 1e-40) / PROTON_MASS
+        return jnp.sqrt(PI * BOLTZMANN_ERG * temperature / mass_density / PROTON_MASS / GRAVITY / mean_weight)
+
+    def column_density(self, density, abundances, temperature):
+        """Column density [cm^-2] of a species of number density ``density`` (KROME's ``num2col``).
+
+        ``DEFAULT``: ``1.87e21 (n / 1e3 cm^-3)^(2/3)``; ``JEANS``: half a Jeans length.
+        """
+        density = jnp.maximum(density, 1e-40)
+        if self.column_density_method == "JEANS":
+            return 0.5 * density * self.jeans_length(abundances, temperature)
+        exponent = float(np.float32(2.0) / np.float32(3.0)) if self.single_precision_literals else 2.0 / 3.0
+        return 1.87e21 * (density * 1e-3) ** exponent
+
+    def dust_shielding(self, abundances, temperature, gamma):
+        """Attenuation by dust, ``exp(-2e-21 gamma D/D_sun N_H)`` (KROME's ``shield_dust``)."""
+        column = 0.0
+        for name, atoms in (("H", 1.0), ("H+", 1.0), ("H2", 2.0)):
+            if name in self.species:
+                column = column + atoms * self.column_density(self._density(abundances, name), abundances, temperature)
+        return jnp.exp(-2e-21 * self.dust_to_gas * gamma * column)
+
+    def h2_self_shielding(self, abundances, temperature):
+        """Self-shielding factor of H2 (KROME's ``krome_fshield``), one without the ``shielding`` option."""
+        if not self.shielding:
+            return 1.0
+        column = 2.0 * self.column_density(jnp.maximum(1e-40, self._density(abundances, "H2")), abundances, temperature)
+        hydrogen_mass = PROTON_MASS + ELECTRON_MASS
+        if self.shielding == "DB96":  # Draine & Bertoldi (1996)
+            return jnp.minimum(1.0, (column * 1e-14) ** (-0.75))
+        if self.shielding == "WG11":  # Wolcott-Green et al. (2011)
+            x = column * 2e-15
+            b5 = (BOLTZMANN_ERG * temperature / hydrogen_mass) ** 0.5 * 1e-5
+            return 0.965 / (1.0 + x / b5) ** 1.1 + 0.035 / (1.0 + x) ** 0.5 * jnp.exp(-8.5e-4 * (1.0 + x) ** 0.5)
+        # Richings et al. (2014), temperature dependent; as in KROME every
+        # temperature from 3000 K on takes the fit of the 3000-4000 K range
+        one = self._single
+        b5 = (BOLTZMANN_ERG * temperature / hydrogen_mass + (7.1 * 1e5) ** 2) ** 0.5 * 1e-5
+        if self.single_precision_literals:
+            inverse = float(np.float32(1.0) / np.float32(1.3))
+        else:
+            inverse = 1.0 / 1.3
+        omega = 0.013 * (1.0 + (temperature / 2.7e3) ** one(1.3)) ** inverse * jnp.exp(-((temperature / 3.9e3) ** one(14.6)))
+        cold = temperature < 3e3
+        warm_temperature = jnp.maximum(temperature, 3e3)  # the warm fit is evaluated where it applies
+        alpha = jnp.where(cold, one(1.4), (warm_temperature / 4.5e3) ** one(-0.8))
+        critical = jnp.where(cold, 1.3 * (1.0 + (temperature / 6e2) ** one(0.8)), (warm_temperature / 4.76e3) ** one(-3.8))
+        x = column * 1e-14 / critical
+        return (1.0 - omega) / (1.0 + x / b5) ** alpha * jnp.exp(-5e-7 * (1.0 + x)) + omega / jnp.sqrt(1.0 + x) * jnp.exp(
+            -8.5e-4 * jnp.sqrt(1.0 + x)
+        )
+
+    def habing_field(self, abundances, temperature, fuv_field):
+        """The Habing flux of the dust terms: that of the photo bins or ``fuv_field``, attenuated by dust on request."""
+        field = self.bins_habing_field if self.has_photo_bins else fuv_field
+        if self.shield_habing_dust:
+            field = field * self.dust_shielding(abundances, temperature, 0.665)
+        return field
 
     def get_rates(self, temperature, cosmic_ray_rate, fuv_field, visual_extinction, abundances):
         """Rate coefficients of every reaction, in the order of the file (cm^3/s or 1/s)."""
         temperature = jnp.clip(temperature, MINIMUM_TEMPERATURE_KELVIN, MAXIMUM_TEMPERATURE_KELVIN)
         electron_density = abundances[self.species.index("E")] if "E" in self.species else 0.0
+        habing_field = self.habing_field(abundances, temperature, fuv_field)
         functions = {
             "exp": jnp.exp, "dexp": jnp.exp, "log": jnp.log, "dlog": jnp.log, "log10": jnp.log10, "dlog10": jnp.log10,
             "sqrt": jnp.sqrt, "dsqrt": jnp.sqrt, "abs": jnp.abs, "max": jnp.maximum, "min": jnp.minimum,
             "h2_solomonlw": lambda flux: 1.38e9 * flux * ELECTRON_VOLT_TO_ERG,
         }
+        # KROME's shielding functions. The cell is the one of this call whatever the
+        # arguments, so every factor is computed once and shared by the expressions
+        # that use it.
+        shielding_factors = {}
+
+        def shield_dust(n, t, gamma):
+            if not isinstance(gamma, (int, float)):  # an exponent that is itself computed
+                return self.dust_shielding(abundances, temperature, gamma)
+            if float(gamma) not in shielding_factors:
+                shielding_factors[float(gamma)] = self.dust_shielding(abundances, temperature, gamma)
+            return shielding_factors[float(gamma)]
+
+        def krome_fshield(n, t):
+            if "self" not in shielding_factors:
+                shielding_factors["self"] = self.h2_self_shielding(abundances, temperature)
+            return shielding_factors["self"]
+
+        functions["shield_dust"], functions["krome_fshield"] = shield_dust, krome_fshield
         for ion in DUST_RECOMBINATION:
             functions[f"{ion}_recombination_on_dust"] = (
                 lambda n, t, ion=ion: _dust_recombination(
-                    ion, electron_density, t, fuv_field, self.dust_to_gas, self.single_precision_literals
+                    ion, electron_density, t, habing_field, self.dust_to_gas, self.single_precision_literals
                 )
             )
         functions["o_recombination_on_dust"] = lambda n, t: 0.25 * functions["h_recombination_on_dust"](n, t)
@@ -391,6 +598,13 @@ class KromeNetwork(eqx.Module):
                 if limit is not None:
                     value = jnp.where(compare[limit[0]](temperature, limit[1]), value, 0.0)
             rates.append(value * jnp.ones_like(temperature))
+        if self.modifiers:
+            # statements ``k(i) = ...`` of the @reactionModifier blocks, in file order
+            functions["k"] = lambda index: rates[int(index) - 1]
+            names = names_at(None, None)
+            for position, expression in self.modifiers:
+                value = _evaluate(_syntax_tree(expression, self.single_precision_literals), names, functions)
+                rates[position] = value * jnp.ones_like(temperature)
         return jnp.stack(rates)
 
     def __call__(self, time, abundances, temperature, cosmic_ray_rate, fuv_field, visual_extinction, rate_modifier_a, rate_modifier_b):
@@ -408,20 +622,22 @@ class KromeNetwork(eqx.Module):
         formation = self.h2_on_dust_coefficient * self.dust_to_gas * atomic_hydrogen * jnp.dot(self.hydrogen_nuclei, abundances)
         return derivative + self.h2_on_dust_change * formation
 
-    def heating_and_cooling_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
-        """The heating and cooling terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
+    def cooling_terms(self, abundances, temperature):
+        """The cooling terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
         from astronomix._modules._chemistry import _krome_thermochemistry as thermo
         from astronomix._modules._chemistry._thermochemistry import _atomic_oxygen_cooling, _ionized_carbon_cooling
 
-        temperature = jnp.clip(temperature, 3.0, 1.0e9)
+        temperature = jnp.clip(temperature, MINIMUM_TEMPERATURE_KELVIN, MAXIMUM_TEMPERATURE_KELVIN)
         n = jnp.maximum(abundances, 0.0)
         index = lambda name: self.species.index(name) if name in self.species else -1
         density = lambda name: n[self.species.index(name)] if name in self.species else 0.0
-        electrons, hydrogen, molecular = density("E"), density("H"), density("H2")
+        electrons, hydrogen = density("E"), density("H")
         nuclei = jnp.dot(self.hydrogen_nuclei, n)
 
         terms = {
-            "cooling_h2": thermo.h2_line_cooling(n, temperature, index),
+            "cooling_h2": thermo.krome_h2_line_cooling(
+                temperature, density("H2"), hydrogen, density("H+"), electrons, density("He"), self.single_precision_literals
+            ),
             "cooling_atomic": thermo.atomic_cooling(
                 temperature, electrons, hydrogen, density("He"), density("H+"), density("He+"), density("He++")
             ),
@@ -444,6 +660,18 @@ class KromeNetwork(eqx.Module):
             terms["cooling_metal_lines"] = _ionized_carbon_cooling(
                 n, temperature, index("C+"), index("E"), index("H"), index("H2")
             ) + _atomic_oxygen_cooling(n, temperature, index("O"), index("H"), index("H2"))
+        return terms
+
+    def heating_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
+        """The heating terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
+        from astronomix._modules._chemistry import _krome_thermochemistry as thermo
+
+        temperature = jnp.clip(temperature, MINIMUM_TEMPERATURE_KELVIN, MAXIMUM_TEMPERATURE_KELVIN)
+        n = jnp.maximum(abundances, 0.0)
+        density = lambda name: n[self.species.index(name)] if name in self.species else 0.0
+        electrons, hydrogen, molecular = density("E"), density("H"), density("H2")
+        nuclei = jnp.dot(self.hydrogen_nuclei, n)
+        terms = {}
 
         fraction = thermo.thermalised_fraction(temperature, hydrogen, molecular, nuclei)
         rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, 0.0, n)
@@ -455,33 +683,59 @@ class KromeNetwork(eqx.Module):
             chemical = chemical + flux
         terms["heating_chemical"] = chemical * thermo.ELECTRON_VOLT_TO_ERG
         terms["heating_photoelectric"] = thermo.photoelectric_heating(
-            temperature, electrons, hydrogen, nuclei, fuv_field, self.dust_to_gas
+            temperature, electrons, hydrogen, nuclei, self.habing_field(n, temperature, fuv_field), self.dust_to_gas
         )
-        terms["heating_cosmic_rays"] = cosmic_ray_rate * (5.5e-12 * hydrogen + 2.5e-11 * molecular)
+        # cosmic rays: every reaction of the cosmic-ray block deposits an energy per event
+        cosmic_rays = 0.0
+        for position, reactant, kind in self.cosmic_ray_terms:
+            if kind == "H2":
+                energy = thermo.cosmic_ray_heat_per_h2_ionisation(
+                    molecular, COSMIC_RAY_HEAT_H2_POLYNOMIAL, COSMIC_RAY_HEAT_H2_LINEAR
+                )
+            else:
+                energy = COSMIC_RAY_HEAT_ATOMIC if kind == "atomic" else COSMIC_RAY_HEAT_OTHER
+            cosmic_rays = cosmic_rays + rates[position] * n[reactant] * energy
+        terms["heating_cosmic_rays"] = cosmic_rays * COSMIC_RAY_ELECTRON_VOLT_TO_ERG
+        # photo-reactions: the energy of the photons above the threshold
+        photo = 0.0
+        for slot, reactant in enumerate(self.photo_reactants):
+            photo = photo + self.photo_heats[slot] * n[reactant]
+        terms["heating_photo"] = photo
+        return terms
+
+    def heating_and_cooling_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
+        """The heating and cooling terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
+        terms = self.cooling_terms(abundances, temperature)
+        terms.update(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field))
         return terms
 
     def temperature_derivative(self, abundances, temperature, adiabatic_index, cosmic_ray_rate, fuv_field):
-        """dT/dt [K/s] from the heating and cooling of KROME, at constant density."""
-        from astronomix._modules._chemistry._krome_thermochemistry import BOLTZMANN_ERG
+        """dT/dt [K/s] from the heating and cooling of KROME, at constant density.
 
-        terms = self.heating_and_cooling_terms(abundances, temperature, cosmic_ray_rate, fuv_field)
-        net = sum(value for name, value in terms.items() if name.startswith("heating")) - sum(
-            value for name, value in terms.items() if name.startswith("cooling")
-        )
+        As in KROME the cooling at the floor temperature is subtracted from the
+        cooling, so that the gas does not cool below the floor.
+        """
+        heating = sum(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field).values())
+        cooling = sum(self.cooling_terms(abundances, temperature).values())
+        floor = sum(self.cooling_terms(abundances, self.cooling_floor_temperature * jnp.ones_like(temperature)).values())
         particles = jnp.maximum(jnp.sum(jnp.maximum(abundances, 0.0)), 1e-30)
-        return (adiabatic_index - 1.0) * net / (BOLTZMANN_ERG * particles)
+        return (adiabatic_index - 1.0) * (heating - cooling + floor) / (BOLTZMANN_ERG * particles)
 
 
 def build_krome_network(
     path, photo_rates=None, user_variables=None, dust_to_gas_relative=1.0, h2_formation_on_dust=False,
     data_folder=None, metal_table=True, metallicity=None, ortho_para_ratio=3.0, single_precision_literals=False,
+    photo_bins=None, xsec_folder=None, shielding=None, shield_habing_dust=False, column_density_method="DEFAULT",
+    floor_temperature=MINIMUM_TEMPERATURE_KELVIN,
 ):
     """Build the right-hand side of a KROME network file.
 
     Args:
         path: The KROME network file.
         photo_rates: Rates [1/s] of the photo-reactions, as a dictionary from the
-            KROME reaction index to the rate; the others are zero.
+            KROME reaction index (the position of the reaction among those
+            read, from one) to the rate; the others are zero. Not with
+            ``photo_bins``.
         user_variables: Values of the ``@common`` user variables other than
             ``user_crate`` (which is the cosmic-ray rate of the chemistry
             module); a variable that the rates use must be given.
@@ -504,6 +758,25 @@ def build_krome_network(
         single_precision_literals: Round the real constants written without a
             ``d`` exponent to single precision, as a Fortran compiler does (for
             comparisons with KROME to round-off; see ``_syntax_tree``).
+        photo_bins: The radiation spectrum in energy bins (KROME's
+            ``-photoBins``): a dictionary with the edges ``left`` and ``right``
+            [eV] and the ``intensity`` [eV s^-1 cm^-2 sr^-1 Hz^-1] of every bin
+            (``_krome_photo.photo_spectrum`` builds the spectra of KROME). The
+            rates and the heating of the photo-reactions and the Habing flux
+            follow from it as in KROME; it needs ``data_folder`` for the cross
+            sections of KROME's database.
+        xsec_folder: A KROME build folder; a cross section table found there
+            (``swri_*.dat``, ``leiden_*.dat``) is used instead of the one
+            derived from the database.
+        shielding: The H2 self-shielding that ``krome_fshield(n,Tgas)`` returns
+            in a rate expression: ``"DB96"``, ``"WG11"`` or ``"R14"`` (KROME's
+            ``-shielding``); without it the function returns one.
+        shield_habing_dust: Attenuate the Habing flux by dust (KROME's
+            ``-shieldHabingDust``).
+        column_density_method: ``"DEFAULT"`` or ``"JEANS"`` (KROME's
+            ``-columnDensityMethod``), for the two shielding terms.
+        floor_temperature: Temperature [K] at which the cooling is subtracted
+            from itself (KROME's ``phys_Tfloor``).
 
     Returns:
         The network (a :class:`KromeNetwork`) and the species names.
@@ -526,6 +799,74 @@ def build_krome_network(
     photo = np.zeros(len(photo_indices))
     for krome_index, rate in photo_rates.items():
         photo[photo_indices[krome_index]] = rate
+    photo_heats, bins_habing_field = np.zeros(len(photo_indices)), 0.0
+    if photo_bins is not None:
+        from astronomix._modules._chemistry import _krome_photo
+
+        if photo_rates:
+            raise ValueError(f"{path}: give the photo-rates or the photo bins, not both")
+        if isinstance(photo_bins, dict):
+            left, right, intensity = photo_bins["left"], photo_bins["right"], photo_bins["intensity"]
+        else:
+            left, right, intensity = photo_bins
+        left, right, intensity = (np.atleast_1d(np.asarray(array, dtype=float)) for array in (left, right, intensity))
+        if not (left.shape == right.shape == intensity.shape) or np.any(right <= left):
+            raise ValueError(f"{path}: the photo bins need as many left edges, right edges and intensities, with right > left")
+        table, thresholds = _krome_photo.cross_sections(
+            [
+                (tuple(species[i] for i in reactions[position][1]), tuple(species[i] for i in reactions[position][2]), lower, upper, rate)
+                for position, lower, upper, rate in parsed["photo"]
+            ],
+            lambda name: name.upper(), left, right, data_folder=data_folder, xsec_folder=xsec_folder,
+            ortho_para_ratio=ortho_para_ratio, single_precision_literals=single_precision_literals,
+            evaluate=_evaluate, syntax_tree=_syntax_tree,
+        )
+        photo, photo_heats = _krome_photo.rates_and_heats(table, thresholds, left, right, intensity)
+        bins_habing_field = _krome_photo.habing_field(left, right, intensity, single_precision_literals)
+    for position, _, _, _ in parsed["photo"]:
+        if len(reactions[position][1]) != 1:
+            raise ValueError(f"{path}: photo-reaction {position + 1} must have one reactant")
+
+    if shielding is not None and shielding not in SHIELDINGS:
+        raise ValueError(f"shielding '{shielding}' unknown: one of {SHIELDINGS}")
+    if column_density_method not in COLUMN_DENSITY_METHODS:
+        raise ValueError(f"column density method '{column_density_method}' unknown: one of {COLUMN_DENSITY_METHODS}")
+    uses_shielding = any(
+        "krome_fshield" in text.lower()
+        for text in [r[5] for r in reactions] + [expression for _, expression in parsed["variables"]] + list(parsed["modifiers"])
+    )
+    if shielding is not None and not uses_shielding:
+        # KROME: "WARNING: no krome_fshield(n(:),Tgas) variable found in rate coefficient"
+        warnings.warn(
+            f"{path}: the shielding {shielding} has no effect, since no rate coefficient of the network uses "
+            "krome_fshield(n,Tgas), as in KROME.",
+            stacklevel=2,
+        )
+    if (shielding is not None and uses_shielding) and "H2" not in species:
+        raise ValueError(f"{path}: the H2 self-shielding needs the species H2")
+
+    # statements ``k(i) = ...`` of the @reactionModifier blocks
+    modifiers = []
+    for statement in parsed["modifiers"]:
+        match = re.fullmatch(r"\s*k\(\s*(\d+)\s*\)\s*=(.*)", statement, flags=re.IGNORECASE)
+        if match is None or not 1 <= int(match.group(1)) <= len(reactions):
+            raise NotImplementedError(f"{path}: reaction modifier not supported: {statement}")
+        modifiers.append((int(match.group(1)) - 1, match.group(2).strip()))
+
+    # cosmic-ray reactions and the energy each deposits (KROME's heat_CR)
+    cosmic_ray_terms = []
+    for position in parsed["cosmic_ray"]:
+        _, reactants, products, _, _, _, _ = reactions[position]
+        if len(reactants) != 1:
+            raise ValueError(f"{path}: cosmic-ray reaction {position + 1} must have one reactant")
+        reactant, made = species[reactants[0]], sorted(species[i] for i in products)
+        if (reactant, made) in (("H", ["E", "H+"]), ("He", ["E", "He+"])):
+            kind = "atomic"
+        elif (reactant, made) == ("H2", ["E", "H2+"]):
+            kind = "H2"
+        else:
+            kind = "other"
+        cosmic_ray_terms.append((position, reactants[0], kind))
 
     user_variables = {name.lower(): value for name, value in (user_variables or {}).items()}
     user_names = tuple(name for name in parsed["commons"] if name != "user_crate")
@@ -574,6 +915,9 @@ def build_krome_network(
     network = KromeNetwork(
         stoichiometry=jnp.asarray(stoichiometry),
         photo_rates=jnp.asarray(photo),
+        photo_heats=jnp.asarray(photo_heats),
+        bins_habing_field=jnp.asarray(float(bins_habing_field)),
+        masses=jnp.asarray([_species_mass(name) for name in species]),
         user_values=jnp.asarray([float(user_variables.get(name, 0.0)) for name in user_names]),
         dust_to_gas=jnp.asarray(float(dust_to_gas_relative)),
         h2_on_dust_coefficient=jnp.asarray(coefficient),
@@ -590,5 +934,13 @@ def build_krome_network(
         variables=parsed["variables"],
         user_names=user_names,
         reactions_number=len(reactions),
+        modifiers=tuple(modifiers),
+        cosmic_ray_terms=tuple(cosmic_ray_terms),
+        photo_reactants=tuple(reactions[position][1][0] for position, _, _, _ in parsed["photo"]),
+        has_photo_bins=photo_bins is not None,
+        shielding=shielding or "",
+        shield_habing_dust=bool(shield_habing_dust),
+        column_density_method=column_density_method,
+        cooling_floor_temperature=float(floor_temperature),
     )
     return network, species

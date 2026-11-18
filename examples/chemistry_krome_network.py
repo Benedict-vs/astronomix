@@ -12,18 +12,26 @@ then prints both results and their difference. Run it from the repository root:
     python examples/chemistry_krome_network.py --network ... --thermochemistry --krome-data /path/to/krome/data
                                                                                  # evolve the temperature too; both solvers
     python examples/chemistry_krome_network.py --network ... --thermochemistry --no-kernel
+    python examples/chemistry_krome_network.py --network ... --thermochemistry --krome-data /path/to/krome/data \\
+        --draine 1 --shield-habing-dust --shielding R14          # as a KROME build with -photoBins=10
+                                                                 # -shieldHabingDust -shielding=R14
 
 The cells span ``n_H`` = 1 to 1e4 cm^-3 and start atomic, with carbon and silicon singly
 ionised. Without ``--thermochemistry`` the temperature is held at ``--temperature`` and only
 Kvaerno5 runs (the kernel of the module integrates the temperature with the species). The
 heating and cooling are KROME's; the metal lines and the metal cooling table are read from
-the data folder of a KROME installation (``--krome-data``). The
-photo-reactions of the file take their rates from ``krome_photo_rates`` (none here, i.e. no
-ionising radiation); the Habing field enters the recombination on dust.
+the data folder of a KROME installation (``--krome-data``).
+
+The radiation field is, as in KROME, a spectrum in energy bins: ``--draine X`` sets the
+interstellar field of Draine times ``X`` in ten bins between 5 and 13.6 eV, from which the
+rates and the heating of the photo-reactions and the Habing flux of the dust terms follow
+(the cross sections come from KROME's database, hence ``--krome-data``). Without it the
+photo-reactions are off and ``--habing-field`` is the Habing flux. ``--shield-habing-dust``,
+``--shielding`` and ``--column-density-method`` are the build options of KROME of the same
+names.
 """
 
 import argparse
-import os
 import time
 
 import jax
@@ -46,6 +54,7 @@ from astronomix._modules._cooling._cooling import (
     get_temperature_from_pressure,
 )
 from astronomix.option_classes.simulation_config import FINITE_VOLUME, NATIVE_JAX
+from astronomix._modules._chemistry._krome_photo import habing_field, photo_spectrum
 from astronomix.setup_helpers import build_chemistry_from_network_file
 
 # Code units of this example: density in m_p cm^-3, temperature in K, time in Myr.
@@ -80,6 +89,13 @@ def build(arguments, use_kernel):
         krome_h2_formation_on_dust=not arguments.no_h2_on_dust,
         krome_data_folder=arguments.krome_data,
         krome_metal_table=not arguments.no_metal_table,
+        krome_photo_bins=(
+            None if arguments.draine is None else photo_spectrum("draine", 5.0, 13.6, 10, scale=arguments.draine)
+        ),
+        krome_user_variables=dict((name, float(value)) for name, value in (item.split("=") for item in arguments.user_variable)),
+        krome_shield_habing_dust=arguments.shield_habing_dust,
+        krome_shielding=arguments.shielding,
+        krome_column_density_method=arguments.column_density_method,
     )
 
     if use_kernel:
@@ -97,7 +113,12 @@ def build(arguments, use_kernel):
         solver = build_fused_core_solver(
             vector_field, cc.number_of_chemical_species + 1,
             rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
-            cache_key=("example-krome-network", arguments.network, arguments.thermochemistry, arguments.krome_data, arguments.no_metal_table),
+            cache_key=(
+                "example-krome-network", arguments.network, arguments.thermochemistry, arguments.krome_data,
+                arguments.no_metal_table, arguments.draine, arguments.shield_habing_dust, arguments.shielding,
+                arguments.column_density_method, arguments.habing_field, arguments.no_h2_on_dust,
+                tuple(arguments.user_variable),
+            ),
         )
         chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
 
@@ -186,7 +207,16 @@ def main():
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--time-step", type=float, default=0.05, help="length of a step [Myr]")
     parser.add_argument("--temperature", type=float, default=50.0, help="initial (or held) temperature [K]; avoid the temperature limits of the fits (30, 100, 200 K, ...), where a rate jumps")
-    parser.add_argument("--habing-field", type=float, default=1.7, help="Habing field of the recombination on dust")
+    parser.add_argument("--habing-field", type=float, default=1.7, help="Habing flux of the dust terms (not with --draine)")
+    parser.add_argument("--draine", type=float, default=None, metavar="X", help="radiation field: Draine's times X in ten bins "
+                        "between 5 and 13.6 eV, as KROME's krome_set_photoBin_draineLin (needs --krome-data)")
+    parser.add_argument("--user-variable", action="append", default=[], metavar="NAME=VALUE", help="value of a @common "
+                        "variable of the file other than user_crate, e.g. user_myfluxLW=2e-10 (repeatable)")
+    parser.add_argument("--shield-habing-dust", action="store_true", help="attenuate the Habing flux by dust (KROME's -shieldHabingDust)")
+    parser.add_argument("--shielding", choices=("DB96", "WG11", "R14"), default=None, help="H2 self-shielding returned by "
+                        "krome_fshield in the rates of the file (KROME's -shielding)")
+    parser.add_argument("--column-density-method", choices=("DEFAULT", "JEANS"), default="DEFAULT", help="column density of "
+                        "the shielding terms (KROME's -columnDensityMethod)")
     parser.add_argument("--thermochemistry", action="store_true", help="integrate the temperature with the species")
     parser.add_argument("--no-metal-table", action="store_true", help="without the tabulated metal cooling above 1e4 K, "
                         "which the Warp kernel cannot evaluate")
@@ -196,6 +226,8 @@ def main():
     parser.add_argument("--no-kernel", action="store_true", help="skip the Warp kernel (gradsolve, warp-lang)")
     arguments = parser.parse_args()
 
+    if arguments.draine is not None and arguments.krome_data is None:
+        parser.error("--draine needs --krome-data (the cross sections of the photo-reactions are in KROME's database)")
     print(f"network: {arguments.network}")
     print(f"devices: {jax.devices()}")
     print(
@@ -207,6 +239,11 @@ def main():
 
     reference, temperature, names, hydrogen_nuclei, first, elapsed = run(arguments, False)
     print(f"species ({len(names)}): {' '.join(names)}")
+    if arguments.draine is not None:
+        spectrum = photo_spectrum("draine", 5.0, 13.6, 10, scale=arguments.draine)
+        print(f"radiation: Draine field x {arguments.draine:g} in 10 bins, Habing flux "
+              f"{habing_field(spectrum['left'], spectrum['right'], spectrum['intensity']):.4f}"
+              f"{', attenuated by dust' if arguments.shield_habing_dust else ''}")
     report("Diffrax Kvaerno5 (vmapped)", reference, temperature, names, hydrogen_nuclei)
     print(f"   first step {first:.1f} s (compilation included), all steps {elapsed:.1f} s")
     if arguments.no_kernel:

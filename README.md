@@ -268,70 +268,113 @@ imports it, so `import astronomix` works without it.
 
 `build_chemistry_from_network_file(path, "krome", ...)` reads a network written for
 [KROME](https://bitbucket.org/tgrassi/krome) (for instance its `networks/react_galaxy_ism`)
-and integrates it with the same solvers and the same thermochemistry as a carbox network.
-carbox is not needed for it; the reader is `astronomix/_modules/_chemistry/_krome_network.py`.
+and integrates it with the solvers of this module, doing with it what KROME does: the rate
+coefficients, the photo-reactions from a binned spectrum, the shielding, and KROME's heating
+and cooling. carbox is not needed for it; the reader is
+`astronomix/_modules/_chemistry/_krome_network.py`.
 
 ```python
+from astronomix._modules._chemistry._krome_photo import photo_spectrum
+
 chemistry_config, chemistry_params, species_names = build_chemistry_from_network_file(
     "/path/to/krome/networks/react_galaxy_ism", "krome",
     number_density_unit_cgs=..., temperature_unit_kelvin=..., time_unit_seconds=...,
-    cosmic_ray_rate=3e-17,              # KROME's user_crate
-    fuv_field=1.7,                      # the Habing field of the recombination on dust
-    krome_photo_rates={36: 1e-12},      # rates [1/s] of photo-reactions, by KROME reaction index
-    krome_h2_formation_on_dust=True,    # Jura's rate; in KROME a build option, not in the file
-    thermochemistry=True,               # heating and cooling as in KROME
-    krome_data_folder="/path/to/krome/data",   # metal line data and metal cooling table
+    cosmic_ray_rate=3e-17,                      # KROME's user_crate
+    thermochemistry=True,                       # heating and cooling as in KROME
+    krome_data_folder="/path/to/krome/data",    # metal lines, cooling table, cross sections
+    krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10),   # -photoBins=10, krome_set_photoBin_draineLin
+    krome_h2_formation_on_dust=True,            # -useDustH2const
+    krome_shield_habing_dust=True,              # -shieldHabingDust
+    krome_shielding="R14",                      # -shielding=R14
+    krome_column_density_method="DEFAULT",      # -columnDensityMethod
 )
 ```
 
 - **What is read.** Reaction lines under the default layout or a `@format:` line; temperature
   limits (`NONE`, `.LE.5.5e3`, `>5.5e3`, a bare number), outside which a coefficient is zero;
-  `@var:` and `@common:`; rate coefficients as Fortran expressions of `Tgas` and KROME's
+  `@var:` and `@common:` (the values of the user variables other than `user_crate` go in
+  `krome_user_variables`); rate coefficients as Fortran expressions of `Tgas` and KROME's
   shortcuts (`Te`, `lnTe`, `invT`, `T32`, ...); recombination on dust of H+, He+, C+, O+ and
-  Si+ and the Lyman-Werner rate `H2_solomonLW`. Every reaction is checked for the
-  conservation of nuclei and charge, and anything else in the file raises an error.
-- **Photo-reactions.** KROME integrates cross sections over a radiation spectrum set at run
-  time. Here each photo-reaction takes its rate from `krome_photo_rates` and is off when not
-  given; cross sections are not read, and no shielding is applied.
-- **Not in a network file.** What KROME adds from build options is not read from the file:
-  of these, the H2 formation on dust (Jura) is available as `krome_h2_formation_on_dust`.
+  Si+ and the Lyman-Werner rate `H2_solomonLW`; the photo block, the cosmic-ray block, and
+  `@reactionModifier` blocks (`k(i) = ...`). Every reaction is checked for the conservation
+  of nuclei and charge.
+- **As KROME reads it.** A line whose number of fields does not match the layout in force
+  (for instance after a commented `@format:` line) is left out with a warning, as KROME does,
+  and the reactions are numbered in the order in which they are read: that number is the
+  KROME reaction index, whatever the first column says. Any other directive that the reader
+  does not know raises an error.
+- **Radiation.** As in KROME the radiation field is a spectrum in energy bins,
+  `krome_photo_bins` (edges `left`, `right` in eV and the `intensity` of every bin in
+  eV s^-1 cm^-2 sr^-1 Hz^-1; `photo_spectrum` builds KROME's Draine, black-body and J21
+  spectra on linear or logarithmic bins, with `krome_photoBin_scale` as `scale=` or a target
+  Habing flux as `habing=`). From it follow, as in KROME's `calc_photoBins`, the rate of every
+  photo-reaction, its heating, and the Habing flux of the dust terms (the flux between 6 and
+  13.6 eV in units of 1.6e-3 erg cm^-2 s^-1; `fuv_field` is then not used). The cross
+  sections are those of KROME: `auto` takes the fit of Verner et al. (1996) from KROME's
+  database, `@xsecFile=SWRI` and `@xsecFile=LEIDEN` the tables that KROME derives from the
+  SwRI and Leiden files of its database (or the tables of a KROME build folder,
+  `krome_xsec_folder`), anything else is the expression of `energy_eV` in the file. Without
+  bins the photo-reactions take their rates from `krome_photo_rates` (by KROME reaction
+  index, zero when not given) and `fuv_field` is the Habing flux.
+- **Shielding.** `krome_shield_habing_dust` attenuates the Habing flux by dust,
+  `exp(-1.33e-21 D/D_sun N_H)`. `shield_dust(n,Tgas,gamma)` and `krome_fshield(n,Tgas)` can
+  be used in the rate expressions, `@var` lines and reaction modifiers of a file, as KROME's
+  own networks do for the photo-reactions; `krome_shielding` selects the H2 self-shielding
+  that `krome_fshield` returns (`"DB96"`, `"WG11"`, `"R14"`), and as in KROME it has no
+  effect on a file that never calls it. `krome_column_density_method` is the column density
+  of both: `"DEFAULT"` (`1.87e21 (n / 1e3)^(2/3)` cm^-2) or `"JEANS"` (half a Jeans length).
 - **Heating and cooling.** With `thermochemistry=True` a KROME network is heated and cooled
   as in KROME (`_krome_thermochemistry.py`), not by the terms of the section above. Cooling:
   H and He (Cen 1992: collisional ionisation and excitation, recombination, bremsstrahlung),
-  the lines of the metals below 1e4 K from two- and three-level systems, the metal cooling
-  table of Shen et al. (2013) above, Compton cooling, and the H2 lines of this module.
-  Heating: the photoelectric effect on dust with the dust abundance relative to solar
-  (`dust_to_gas_ratio / 0.01`) and the density of hydrogen nuclei, the chemical term
-  (formation and collisional dissociation of H2), and cosmic rays (the formula of this
-  module; KROME takes it from the cosmic-ray reactions of the network). The metal line data
-  and the table are read from the `data` folder of a KROME installation
-  (`krome_data_folder`: `coolZ.dat`, `coolZ_CIE2012NOUV.dat`); without it the metals cool
-  through [C II] and [O I] only.
+  the H2 lines (Glover & Abel 2008, Glover 2015), the lines of the metals below 1e4 K from
+  two- and three-level systems, the metal cooling table of Shen et al. (2013) above, and
+  Compton cooling. Heating: the photoelectric effect on dust net of the recombination
+  cooling, with the dust abundance relative to solar (`dust_to_gas_ratio / 0.01`); the
+  chemical term (formation and collisional dissociation of H2); the cosmic rays, through the
+  reactions of the cosmic-ray block of the file (4.3 eV per ionisation of H and He, a fit in
+  n(H2) for H2, 20 eV otherwise: a file without that block has no cosmic-ray heating, as in
+  KROME); and the photo-reactions. As in KROME the cooling at the floor temperature
+  (`krome_floor_temperature`, 2.73 K) is subtracted from the cooling. The metal line data and
+  the table are read from the `data` folder of a KROME installation (`krome_data_folder`:
+  `coolZ.dat`, `coolZ_CIE2012NOUV.dat`); without it the metals cool through [C II] and [O I]
+  only.
+- **Build options of KROME and their counterparts.** `-useDustH2const`:
+  `krome_h2_formation_on_dust`; `-photoBins`: `krome_photo_bins`; `-shieldHabingDust`,
+  `-shielding`, `-columnDensityMethod`: the three arguments above; `-gamma`: the adiabatic
+  index of the simulation; `-RTOL`, `-ATOL`: `relative_tolerance`, `absolute_tolerance`.
+  `-conserve` has no counterpart: the implicit solvers used here keep the nuclei and the
+  charge to round-off. Not ported: dust grains as species, X-rays, the opacity that KROME
+  returns to a radiative-transfer code, and the other cooling and heating options.
 - **Solvers.** The vmapped Kvaerno5 runs with a Newton iteration for these networks: the
   default chord iteration stalls on the ionisation equilibrium of hot, dense gas. The
   per-cell Warp kernel needs `thermochemistry=True` and cannot look a table up: with it,
   pass `krome_metal_table=False` (the metals then cool through their lines alone, i.e. not
-  above 1e4 K). On eight cells from 1 to 1e4 cm^-3 the kernel and Kvaerno5 then agree to
-  4e-5 dex in the abundances and 7e-6 in the temperature; the first build of the kernel for
-  this network takes several minutes on a CPU (it is cached afterwards).
+  above 1e4 K). The first build of the kernel for a network of this size takes several
+  minutes on a CPU (it is cached afterwards).
 - **Checked against KROME itself**, with the Fortran that KROME generates for
-  `react_galaxy_ism` with the metal reactions switched on (79 reactions, 16 species): the 66
-  collisional and dust coefficients agree to 2e-10 at 30 temperatures from 5 K to 3e7 K when
-  the constants are read as a Fortran compiler reads them (`single_precision_literals=True`;
-  to 1.5e-5 with the default, since KROME's constants without a `d` exponent are single
-  precision), and the abundances of five isothermal cells followed to 1e14 s with KROME's
-  own solver agree to 6e-8. Heating and cooling: for four compositions (cold neutral,
-  diffuse, molecular, ionised) at 81 temperatures from 10 K to 1e8 K, the atomic, metal line,
-  metal table and Compton cooling and the chemical and photoelectric heating agree with
-  KROME's terms to 4e-6 or better, the total cooling to 7e-6; the temperatures at which
-  heating balances cooling agree to 1.3% (86.3 against 86.4 K, 564 against 557 K, 50.3
-  against 50.4 K, 23.4 against 23.4 K), the difference being the cosmic-ray heating.
+  `react_galaxy_ism` with the metal reactions and the cosmic-ray block on (87 reactions, 16
+  species) and the options `-photoBins=10 -shielding=R14 -shieldHabingDust -useDustH2const`,
+  for three spectra (Draine, a black body of 3e5 K, a J21 power law), four compositions (cold
+  neutral, diffuse, molecular, ionised) and 17 temperatures from 10 K to 1e8 K. With the
+  constants read as a Fortran compiler reads them (`single_precision_literals=True`; KROME's
+  constants without a `d` exponent are single precision) the 87 rate coefficients agree to
+  3e-10; the cross sections per bin, the photo-rates, their heating and the Habing flux to
+  1e-14; the dust shielding, the H2 self-shielding and the column densities to 2e-13; the
+  total cooling to 3e-8, the total heating and the temperature derivative to 5e-7.
+  With the default (constants as the decimal numbers they stand for) the coefficients agree
+  to 1e-5. Five cells from 1 to 1e4 cm^-3, starting between 35 K and 2.1e4 K under 1 to 100
+  Draine fields and followed to 1e14 s with KROME's own solver (thermochemistry on), agree in
+  temperature and in every abundance above 1e-12 n_H to 2e-7. The cross section tables
+  derived here from the SwRI and Leiden files reproduce those that KROME writes to 5e-12.
+  One place where KROME itself is undefined: its metal-line rates above 1e4 K are returned
+  unset; here they are zero.
 - `examples/chemistry_krome_network.py --network <file>` runs a network file through both
-  solvers (`--thermochemistry --krome-data <folder>` for the heating and cooling);
-  `pytests/chemistry/test_krome_network.py` tests the reader and the heating and cooling on
-  a small network and small data files written in the test, and a full file when
-  `ASTRONOMIX_TEST_KROME_NETWORK` (and `ASTRONOMIX_TEST_KROME_DATA`) point at one.
-  No KROME network or data file is shipped here (KROME is GPL-3).
+  solvers (`--thermochemistry --krome-data <folder>` for the heating and cooling, `--draine`,
+  `--shield-habing-dust`, `--shielding` for the radiation and the shielding);
+  `pytests/chemistry/test_krome_network.py` tests the reader, the photo bins, the shielding
+  and the heating and cooling on small networks and data files written in the test, and a
+  full file when `ASTRONOMIX_TEST_KROME_NETWORK` (and `ASTRONOMIX_TEST_KROME_DATA`) point at
+  one. No KROME network or data file is shipped here (KROME is GPL-3).
 
 ### Per-cell implicit solver on the GPU (Warp kernel, via gradsolve)
 

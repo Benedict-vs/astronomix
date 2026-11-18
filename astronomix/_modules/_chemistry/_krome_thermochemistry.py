@@ -2,20 +2,21 @@
 Heating and cooling of KROME, for networks in the KROME format.
 
 The terms follow KROME's ``krome_cooling.f90`` and ``krome_heating.f90`` (Grassi et
-al. 2014) as built with ``-cooling=H2,ATOMIC,Z,COMPTON`` and
-``-heating=CHEM,PHOTODUST``:
+al. 2014) as built with ``-cooling=H2,ATOMIC,CHEM,Z_CIENOUV,COMPTON`` and
+``-heating=CHEM,PHOTO,PHOTODUSTNET,CR``:
 
 * cooling: the collisional excitation, ionisation, recombination and
   bremsstrahlung of H and He (Cen 1992); the fine-structure and metastable
   lines of the metals below 1e4 K, from the statistical equilibrium of two- and
   three-level systems; the tabulated metal cooling of Shen et al. (2013) above
-  1e4 K; Compton cooling on the CMB; and the H2 lines of the chemistry module
-  (Glover & Abel 2008);
+  1e4 K; Compton cooling on the CMB; and the H2 lines (Glover & Abel 2008,
+  Glover 2015), with the low-density limit summed over the colliders;
 * heating: the photoelectric effect on dust net of the recombination cooling
   (Bakes & Tielens 1994), with the dust abundance relative to solar and the
   density of hydrogen nuclei as in KROME; the chemical term (formation and
-  collisional dissociation of H2); and the cosmic-ray heating of the chemistry
-  module.
+  collisional dissociation of H2); the cosmic rays, through the reactions of
+  the cosmic-ray block of the network; and the photo-reactions, through the
+  energy of the photons above their thresholds (with photo bins).
 
 The atomic data of the metal lines and the cooling table are not part of
 astronomix: they are read from the ``data`` folder of a KROME installation
@@ -28,9 +29,6 @@ import re
 # jax
 import jax.numpy as jnp
 import numpy as np
-
-# astronomix functions
-from astronomix._modules._chemistry._thermochemistry import _glover_abel_h2_cooling
 
 # KROME's constants (krome_constants.f90)
 BOLTZMANN_ERG = 1.380648e-16
@@ -280,6 +278,28 @@ def photoelectric_heating(temperature, electrons, hydrogen, hydrogen_nuclei, hab
     return (1.3e-24 * efficiency * habing_field * hydrogen_nuclei - recombination_cooling) * dust_to_gas
 
 
+def cosmic_ray_heat_per_h2_ionisation(molecular_hydrogen, polynomial, linear):
+    """Heat deposited per cosmic-ray ionisation of H2 [eV] as a function of n(H2) (KROME's ``heat_CR``).
+
+    A polynomial in ``log10 n(H2)`` between 1e5 and 1e10 cm^-3, its value at
+    1e10 above, a straight line below 1e5 down to where it reaches zero.
+    """
+    logarithm = jnp.log10(jnp.maximum(molecular_hydrogen, 1e-40))
+    slope, intercept = linear
+    lowest = 10.0 ** (-intercept / slope)
+    highest = sum(coefficient * 10.0**power for power, coefficient in enumerate(polynomial))
+    fit = sum(coefficient * logarithm**power for power, coefficient in enumerate(polynomial))
+    return jnp.where(
+        molecular_hydrogen > 1e10,
+        highest,
+        jnp.where(
+            (molecular_hydrogen >= lowest) & (molecular_hydrogen < 1e5),
+            slope * logarithm + intercept,
+            jnp.where(molecular_hydrogen < lowest, 0.0, fit),
+        ),
+    )
+
+
 def thermalised_fraction(temperature, hydrogen, molecular_hydrogen, hydrogen_nuclei):
     """Fraction of the H2 formation energy that heats the gas (KROME's ``h2heatfac``)."""
     safe_nuclei = jnp.maximum(hydrogen_nuclei, 1e-30)
@@ -295,9 +315,109 @@ def thermalised_fraction(temperature, hydrogen, molecular_hydrogen, hydrogen_nuc
 # ======================= ↑ Heating ↑ =========================
 # -------------------------------------------------------------
 
+# -------------------------------------------------------------
+# =================== ↓ H2 line cooling ↓ =====================
+# -------------------------------------------------------------
 
-def h2_line_cooling(abundances, temperature, index):
-    """H2 line cooling of the chemistry module (Glover & Abel 2008, as in KROME)."""
-    return _glover_abel_h2_cooling(
-        abundances, temperature, index("H"), index("H2"), index("H+"), index("He"), index("E")
+
+def _window(log_temperature, low, high):
+    """KROME's ``wCool``: one inside ``[low, high]`` in ``log10 T``, falling smoothly to zero outside."""
+    x = (log_temperature - low) / (high - low)
+    sigmoid = lambda argument, midpoint: 10.0 / (10.0 + jnp.exp(-50.0 * (argument - midpoint)))
+    value = 10.0 ** (200.0 * (sigmoid(x, -0.2) * sigmoid(-x, -1.2) - 1.0))
+    return jnp.where(value < 1e-199, 0.0, value)
+
+
+def krome_h2_line_cooling(
+    temperature, molecular_hydrogen, hydrogen, ionized_hydrogen, electrons, helium, single_precision_literals=False
+):
+    """H2 line cooling [erg cm^-3 s^-1], KROME's ``cooling_H2`` term by term.
+
+    The low-density limit is the sum over the colliders H, H+, H2, e and He
+    (Glover & Abel 2008; Glover 2015), the high-density limit that of
+    Hollenbach & McKee (1979) below 2000 K and of Glover (2015) above; the two
+    combine as ``n(H2) / (1/HDL + 1/LDL)``. Every fit is evaluated at the
+    temperature clipped into its own range, so that no branch overflows where
+    another one applies. KROME writes part of the constants in single
+    precision; with ``single_precision_literals`` they are rounded in the same way.
+    """
+    s = (lambda value: float(np.float32(value))) if single_precision_literals else float
+    log_temperature = jnp.log10(temperature)
+
+    def fit(coefficients, low, high):
+        x = jnp.log10(jnp.clip(temperature, low, high) * 1e-3)
+        return sum(coefficient * x**power for power, coefficient in enumerate(coefficients))
+
+    window_1_4 = _window(log_temperature, 1.0, 4.0)
+    window_2_4 = _window(log_temperature, 2.0, 4.0)
+    lowest = 1e-30  # lower limit of the clip of a fit without one, never reached by the gas temperature
+
+    with_hydrogen = hydrogen * jnp.where(
+        temperature <= 1e2,
+        10.0 ** fit((-16.818342, 37.383713, 58.145166, 48.656103, 20.159831, 3.8479610), lowest, 1e2),
+        jnp.where(
+            temperature <= 1e3,
+            10.0 ** fit((-24.311209, 3.5692468, -11.332860, -27.850082, -21.328264, -4.2519023), 1e2, 1e3),
+            jnp.where(
+                temperature <= 6e3,
+                10.0 ** fit((-24.311209, 4.6450521, -3.7209846, 5.9369081, -5.5108049, 1.5538288), 1e3, 6e3),
+                s(1.862314467912518e-22) * _window(log_temperature, 1.0, float(np.log10(6e3))),
+            ),
+        ),
     )
+    with_protons = ionized_hydrogen * jnp.where(
+        (temperature > 1e1) & (temperature <= 1e4),
+        10.0 ** fit((-22.089523, 1.5714711, 0.015391166, -0.23619985, -0.51002221, 0.32168730), 1e1, 1e4),
+        s(1.182509139382060e-21) * window_1_4,
+    )
+    with_molecules = molecular_hydrogen * window_2_4 * 10.0 ** fit(
+        (-23.962112, 2.09433740, -0.77151436, 0.43693353, -0.14913216, -0.033638326), 2.0, 1e9
+    )
+    with_electrons = electrons * window_2_4 * jnp.where(
+        temperature <= 5e2,
+        10.0 ** jnp.minimum(
+            fit((-21.928796, 16.815730, 96.743155, 343.19180, 734.71651, 983.67576, 801.81247, 364.14446, 70.609154), 2.0, 5e2),
+            30.0,
+        ),
+        10.0 ** fit(
+            (-22.921189, 1.6802758, 0.93310622, 4.0406627, -4.7274036, -8.8077017, s(8.9167183), s(6.4380698), s(-6.3701156)),
+            5e2, 1e9,
+        ),
+    )
+    with_helium = helium * jnp.where(
+        (temperature > 1e1) & (temperature <= 1e4),
+        10.0 ** fit((-23.689237, 2.1892372, -0.81520438, 0.29036281, -0.16596184, 0.19191375), 1e1, 1e4),
+        s(1.002560385050777e-22) * window_1_4,
+    )
+    low_density = with_hydrogen + with_protons + with_molecules + with_electrons + with_helium
+
+    t3 = jnp.clip(temperature, 2.0, 2e3) * 1e-3
+    rotational = s(9.5e-22) * t3 ** s(3.76) / (1.0 + s(0.12) * t3 ** s(2.1)) * jnp.exp(-((s(0.13) / t3) ** 3)) + s(3.0e-24) * jnp.exp(
+        -s(0.51) / t3
+    )
+    vibrational = s(6.7e-19) * jnp.exp(-s(5.86) / t3) + s(1.6e-18) * jnp.exp(-s(11.7) / t3)
+    high_density = jnp.where(
+        temperature < 2e3,
+        rotational + vibrational,
+        jnp.where(
+            temperature <= 1e4,
+            10.0 ** fit(
+                (-20.584225, s(5.0194035), s(-1.5738805), s(-4.7155769), s(2.4714161), s(5.4710750), s(-3.9467356),
+                 s(-2.2148338), s(1.8161874)),
+                2e3, 1e4,
+            ),
+            s(5.531333679406485e-19) / (1.0 + jnp.exp(jnp.minimum((temperature - 3e4) * 2e-4, 3e2))),
+        ),
+    )
+    # n(H2) / (1/HDL + 1/LDL), written with the smaller of the two limits over the
+    # larger so that neither the value nor its derivative overflows when one of
+    # them is vanishingly small
+    active = (low_density > 0.0) & (high_density > 0.0)
+    smaller = jnp.where(active, jnp.minimum(low_density, high_density), 0.0)
+    larger = jnp.where(active, jnp.maximum(low_density, high_density), 1.0)
+    return molecular_hydrogen * smaller / (1.0 + smaller / larger)
+
+
+# -------------------------------------------------------------
+# =================== ↑ H2 line cooling ↑ =====================
+# -------------------------------------------------------------

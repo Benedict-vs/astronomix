@@ -110,6 +110,12 @@ def build_chemistry_from_network_file(
     krome_data_folder: str = None,
     krome_metal_table: bool = True,
     krome_metallicity: float = None,
+    krome_photo_bins=None,
+    krome_xsec_folder: str = None,
+    krome_shielding: str = None,
+    krome_shield_habing_dust: bool = False,
+    krome_column_density_method: str = "DEFAULT",
+    krome_floor_temperature: float = 2.73,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
     """Assemble the chemistry containers from a network file.
 
@@ -118,9 +124,9 @@ def build_chemistry_from_network_file(
     (``network_format="krome"``, read by
     ``astronomix._modules._chemistry._krome_network`` without carbox). For a
     KROME network ``cosmic_ray_rate`` is KROME's ``user_crate``, ``fuv_field``
-    its Habing field and ``dust_to_gas_ratio / 0.01`` its dust-to-gas ratio
-    relative to solar; ``krome_photo_rates`` gives the rates [1/s] of the
-    photo-reactions by KROME reaction index (zero when not given),
+    its unattenuated Habing flux and ``dust_to_gas_ratio / 0.01`` its
+    dust-to-gas ratio relative to solar; ``krome_photo_rates`` gives the rates
+    [1/s] of the photo-reactions by KROME reaction index (zero when not given),
     ``krome_user_variables`` the other ``@common`` variables of the file, and
     ``krome_h2_formation_on_dust`` adds the H2 formation on grains that KROME
     takes from a build option (``True`` or a coefficient in cm^3/s). With
@@ -132,6 +138,23 @@ def build_chemistry_from_network_file(
     leaves the table out (the per-cell Warp kernel cannot look a table up; the
     metals then do not cool above 1e4 K), and ``krome_metallicity`` is the metal
     abundance relative to solar (default: that of the dust).
+
+    The build options of KROME that change the physics of a network are
+    arguments here. ``krome_photo_bins`` is the radiation spectrum in energy
+    bins (``-photoBins``; a dictionary with the edges ``left`` and ``right``
+    [eV] and the ``intensity`` [eV s^-1 cm^-2 sr^-1 Hz^-1] of every bin, built
+    for KROME's spectra by ``_krome_photo.photo_spectrum``): the rates and the
+    heating of the photo-reactions and the Habing flux then follow from it as
+    in KROME, ``fuv_field`` is not used and ``krome_data_folder`` is needed for
+    the cross sections (``krome_xsec_folder``, a KROME build folder, makes the
+    reader take the cross section tables found there). ``krome_shield_habing_dust``
+    attenuates the Habing flux by dust (``-shieldHabingDust``),
+    ``krome_shielding`` selects the H2 self-shielding that ``krome_fshield``
+    returns in the rate expressions of the file (``-shielding``: ``"DB96"``,
+    ``"WG11"`` or ``"R14"``), ``krome_column_density_method`` the column density
+    of both (``-columnDensityMethod``: ``"DEFAULT"`` or ``"JEANS"``), and
+    ``krome_floor_temperature`` is KROME's ``phys_Tfloor``, at which the cooling
+    is subtracted from itself.
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -181,7 +204,16 @@ def build_chemistry_from_network_file(
             data_folder=krome_data_folder,
             metal_table=krome_metal_table,
             metallicity=krome_metallicity,
+            photo_bins=krome_photo_bins,
+            xsec_folder=krome_xsec_folder,
+            shielding=krome_shielding,
+            shield_habing_dust=krome_shield_habing_dust,
+            column_density_method=krome_column_density_method,
+            floor_temperature=krome_floor_temperature,
         )
+        if krome_photo_bins is not None:
+            # the Habing flux in use is the one of the binned spectrum
+            fuv_field = float(reaction_network.bins_habing_field)
     else:
         # carbox is an optional dependency; import locally so the package imports
         # without it when chemistry is unused.
