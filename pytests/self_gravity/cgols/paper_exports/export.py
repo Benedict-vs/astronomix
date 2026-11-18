@@ -61,7 +61,7 @@ SHA256_MAX_BYTES = 4 * 1024**3
 
 def _git(*args, cwd):
     """Run git in ``cwd``; stdout stripped, '' on failure."""
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run(["git", *args], check=False, cwd=cwd, capture_output=True, text=True)
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
@@ -151,7 +151,7 @@ def _update(paper, section, entry, commit):
     with _locked_manifest(paper) as (manifest, write):
         items = [item for item in manifest.get(section) or [] if item["key"] != entry["key"]]
         manifest[section] = sorted(items + [entry], key=lambda item: item["key"])
-        manifest["generated"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        manifest["generated"] = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
         manifest["astronomix_commit"] = commit  # of the latest export; each entry has its own
         manifest.setdefault("numbers", [])
         manifest.setdefault("figures", [])

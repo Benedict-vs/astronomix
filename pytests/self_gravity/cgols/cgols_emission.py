@@ -754,9 +754,8 @@ def main():
                 f"{SOLAR_ABUNDANCE_SET} solar; --solar-abundances {ARGS.solar_abundances} "
                 "needs the checkpoints"
             )
-        if ARGS.xray_band != "0.3-2" or ARGS.xray_photons_nh is not None:
-            if source != "checkpoints":
-                raise SystemExit("--xray-band / --xray-photons-nh need the checkpoints (frames hold 0.3-2 keV maps)")
+        if source != "checkpoints" and (ARGS.xray_band != "0.3-2" or ARGS.xray_photons_nh is not None):
+            raise SystemExit("--xray-band / --xray-photons-nh need the checkpoints (frames hold 0.3-2 keV maps)")
         table = load_xray_emissivity_table(
             XRAY_TABLE_PATHS[ARGS.xray_band],
             photons=ARGS.xray_photons_nh is not None,
