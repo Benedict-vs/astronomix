@@ -349,8 +349,10 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   default chord iteration stalls on the ionisation equilibrium of hot, dense gas. The
   per-cell Warp kernel needs `thermochemistry=True` and cannot look a table up: with it,
   pass `krome_metal_table=False` (the metals then cool through their lines alone, i.e. not
-  above 1e4 K). The first build of the kernel for a network of this size takes several
-  minutes on a CPU (it is cached afterwards).
+  above 1e4 K). On eight cells from 1 to 1e4 cm^-3 under the Draine field, with the dust
+  shielding, the H2 self-shielding and cosmic rays, the kernel and Kvaerno5 agree to 4e-5 dex
+  in the abundances and 6e-6 in the temperature; the first build of the kernel for a network
+  of this size takes about ten minutes on a CPU (it is cached afterwards).
 - **Checked against KROME itself**, with the Fortran that KROME generates for
   `react_galaxy_ism` with the metal reactions and the cosmic-ray block on (87 reactions, 16
   species) and the options `-photoBins=10 -shielding=R14 -shieldHabingDust -useDustH2const`,
