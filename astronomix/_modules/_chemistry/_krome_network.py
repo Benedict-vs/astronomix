@@ -464,6 +464,8 @@ class KromeNetwork(eqx.Module):
     shield_habing_dust: bool = eqx.field(static=True)
     column_density_method: str = eqx.field(static=True)
     cooling_floor_temperature: float = eqx.field(static=True)
+    # the metal table without a look-up (for the per-cell Warp kernel), see ``build_krome_network``
+    metal_table_without_lookup: bool = eqx.field(static=True, default=False)
 
     def _single(self, value):
         # a real constant that KROME's Fortran writes without a ``d`` exponent
@@ -652,9 +654,12 @@ class KromeNetwork(eqx.Module):
             blend = thermo.metal_blend(temperature)
             terms["cooling_metal_lines"] = (1.0 - blend) * lines
             if self.metal_table:
-                terms["cooling_metal_table"] = blend * thermo.tabulated_metal_cooling(
-                    temperature, nuclei, self.metallicity, *self.metal_table
+                tabulated = (
+                    thermo.tabulated_metal_cooling_without_lookup
+                    if self.metal_table_without_lookup
+                    else thermo.tabulated_metal_cooling
                 )
+                terms["cooling_metal_table"] = blend * tabulated(temperature, nuclei, self.metallicity, *self.metal_table)
         else:
             # without KROME's data: the two fine-structure lines of the chemistry module
             terms["cooling_metal_lines"] = _ionized_carbon_cooling(
@@ -750,8 +755,12 @@ def build_krome_network(
             the table ``coolZ_CIE2012NOUV.dat`` above. Without it they cool
             through the [C II] and [O I] lines of the chemistry module only.
         metal_table: Read the table (default). The per-cell Warp kernel cannot
-            look a table up; with ``False`` the metals cool through their lines
-            alone, i.e. not above 1e4 K, and the kernel can be used.
+            look a table up. With ``"kernel"`` the table is interpolated without
+            a look-up, every node entering with its weight
+            (``tabulated_metal_cooling_without_lookup``): the same cooling to
+            round-off in a form the kernel can take, at one product per table
+            value in every call. With ``False`` the table is left out: the
+            metals then cool through their lines alone, i.e. not above 1e4 K.
         metallicity: Metal abundance relative to solar, the factor of the
             tabulated metal cooling (default: ``dust_to_gas_relative``).
         ortho_para_ratio: Ortho-to-para ratio of H2 as a collider of the metal lines.
@@ -886,7 +895,9 @@ def build_krome_network(
         change[species.index("H")], change[species.index("H2")] = -2.0, 1.0
 
     # heating and cooling: metal coolants of KROME's data folder, reactions of the chemical heating
-    with_table, metal_lines, metal_table = bool(metal_table), (), ()
+    if metal_table not in (True, False, "kernel"):
+        raise ValueError(f"metal_table must be True, False or 'kernel', got {metal_table!r}")
+    with_table, without_lookup, metal_lines, metal_table = bool(metal_table), metal_table == "kernel", (), ()
     if data_folder is not None:
         import os
 
@@ -942,5 +953,6 @@ def build_krome_network(
         shield_habing_dust=bool(shield_habing_dust),
         column_density_method=column_density_method,
         cooling_floor_temperature=float(floor_temperature),
+        metal_table_without_lookup=without_lookup,
     )
     return network, species

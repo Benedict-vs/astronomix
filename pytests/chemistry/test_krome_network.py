@@ -495,6 +495,31 @@ def test_metals_without_krome_data(network_file):
     assert "cooling_metal_table" not in terms and float(terms["cooling_metal_lines"]) > 0.0
 
 
+@pytest.mark.parametrize("temperature", [8.0, 30.0, 3.0e3, 2.0e4, 3.0e6, 2.0e8])
+def test_metal_table_without_lookup(network_file, data_folder, temperature):
+    """The metal table in the form the per-cell kernel can take cools like the table look-up, also beyond its edges."""
+    arguments = dict(user_variables={"user_flux": 0.0}, h2_formation_on_dust=True, data_folder=data_folder)
+    lookup, species = build_krome_network(network_file, **arguments)
+    kernel, _ = build_krome_network(network_file, metal_table="kernel", **arguments)
+    assert kernel.metal_table_without_lookup and not lookup.metal_table_without_lookup
+    fractions = {"H": 0.7, "E": 2e-3, "H+": 1.8e-3, "He+": 1e-4, "He": 0.08, "H2": 0.14, "H2+": 1e-6, "C": 1e-4, "C+": 1e-4}
+    for hydrogen_nuclei in (1e-4, 50.0, 3e5):  # below, inside and above the densities of the table (1e-2 to 1e4)
+        abundances = jnp.asarray([fractions[name] * hydrogen_nuclei for name in species])
+        expected = lookup.cooling_terms(abundances, temperature)
+        terms = kernel.cooling_terms(abundances, temperature)
+        assert set(terms) == set(expected) and float(expected["cooling_metal_table"]) > 0.0
+        for name in expected:
+            assert float(terms[name]) == pytest.approx(float(expected[name]), rel=1e-12, abs=1e-300), name
+        # the Jacobian of the kernel needs the derivatives: in temperature and in the abundances
+        for network_derivative in (
+            lambda network: jax.grad(lambda t: network.cooling_terms(abundances, t)["cooling_metal_table"])(temperature),
+            lambda network: jax.grad(lambda n: network.cooling_terms(n, temperature)["cooling_metal_table"])(abundances),
+        ):
+            np.testing.assert_allclose(network_derivative(kernel), network_derivative(lookup), rtol=1e-9, atol=1e-300)
+    with pytest.raises(ValueError):
+        build_krome_network(network_file, metal_table="fit", **arguments)
+
+
 def test_update_chemistry_with_heating_and_cooling(network_file, data_folder):
     """The temperature equation of a KROME network through the module, against SciPy on the same right-hand side."""
     scipy_integrate = pytest.importorskip("scipy.integrate")

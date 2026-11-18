@@ -108,7 +108,7 @@ def build_chemistry_from_network_file(
     krome_user_variables: dict = None,
     krome_h2_formation_on_dust=False,
     krome_data_folder: str = None,
-    krome_metal_table: bool = True,
+    krome_metal_table=True,
     krome_metallicity: float = None,
     krome_photo_bins=None,
     krome_xsec_folder: str = None,
@@ -134,10 +134,12 @@ def build_chemistry_from_network_file(
     (``_krome_thermochemistry.py``), not by the terms of this module;
     ``krome_data_folder`` is the ``data`` folder of a KROME installation, from
     which the metal line data and the metal cooling table are read (without it
-    the metals cool through [C II] and [O I] only), ``krome_metal_table=False``
-    leaves the table out (the per-cell Warp kernel cannot look a table up; the
-    metals then do not cool above 1e4 K), and ``krome_metallicity`` is the metal
-    abundance relative to solar (default: that of the dust).
+    the metals cool through [C II] and [O I] only). The per-cell Warp kernel
+    cannot look a table up: ``krome_metal_table="kernel"`` interpolates the
+    table without a look-up (the same cooling to round-off, in a form the kernel
+    can take), ``krome_metal_table=False`` leaves the table out (the metals then
+    do not cool above 1e4 K). ``krome_metallicity`` is the metal abundance
+    relative to solar (default: that of the dust).
 
     The build options of KROME that change the physics of a network are
     arguments here. ``krome_photo_bins`` is the radiation spectrum in energy

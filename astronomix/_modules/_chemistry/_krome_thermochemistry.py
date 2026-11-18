@@ -243,6 +243,54 @@ def tabulated_metal_cooling(temperature, hydrogen_nuclei, metallicity, log_densi
     return jnp.where(hydrogen_nuclei >= 1e-20, 10.0**value * safe_nuclei * safe_nuclei * metallicity, 0.0)
 
 
+def _node_weights(x, nodes):
+    """Weight of every node of an evenly spaced grid in the linear interpolation at ``x``.
+
+    The two nodes of the interval that holds ``x`` share one, all others get
+    zero, and beyond the ends the first or last interval is continued linearly:
+    the weights of the index-based interpolation of ``tabulated_metal_cooling``,
+    with the same choice of the interval (``floor`` of the position on the grid
+    of the first spacing, clipped to the table) and the same fraction within
+    it, written with comparisons so that no index depends on ``x``.
+    """
+    scale = 1.0 / (nodes[1] - nodes[0])
+    position = (x - nodes[0]) * scale
+    intervals = nodes.shape[0] - 1
+    if intervals == 1:
+        holds = jnp.ones(1, dtype=bool)
+    else:
+        inner = jnp.arange(1, intervals - 1)
+        # exactly one interval holds x; the first and the last reach beyond the table
+        holds = jnp.concatenate(
+            [
+                jnp.reshape(position < 1.0, (1,)),
+                (position >= inner) & (position < inner + 1),
+                jnp.reshape(position >= intervals - 1, (1,)),
+            ]
+        )
+    fraction = (x - nodes[:-1]) * scale
+    zero = jnp.zeros(1)
+    return jnp.concatenate([jnp.where(holds, 1.0 - fraction, 0.0), zero]) + jnp.concatenate(
+        [zero, jnp.where(holds, fraction, 0.0)]
+    )
+
+
+def tabulated_metal_cooling_without_lookup(temperature, hydrogen_nuclei, metallicity, log_density, log_temperature, log_lambda):
+    """``tabulated_metal_cooling`` for the per-cell Warp kernel, which cannot look a table up.
+
+    The same bilinear interpolation, with the same linear continuation beyond
+    the edges, written as ``w_n . (table . w_T)``: every node of the table
+    enters with its interpolation weight (zero for all but four). The result is
+    that of ``tabulated_metal_cooling`` to round-off; the price is one product
+    per table value in every call, so the vmapped solvers keep the look-up.
+    """
+    safe_nuclei = jnp.maximum(hydrogen_nuclei, 1e-20)
+    weights_density = _node_weights(jnp.log10(safe_nuclei), log_density)
+    weights_temperature = _node_weights(jnp.log10(temperature), log_temperature)
+    value = jnp.dot(weights_density, jnp.dot(log_lambda, weights_temperature))
+    return jnp.where(hydrogen_nuclei >= 1e-20, 10.0**value * safe_nuclei * safe_nuclei * metallicity, 0.0)
+
+
 def metal_blend(temperature):
     """Weight of the tabulated metal cooling; the lines carry one minus it (KROME's ``sigmoid`` at 1e4 K)."""
     return 10.0 / (10.0 + jnp.exp(-10.0 * (jnp.log10(temperature) - 4.0)))
