@@ -150,46 +150,12 @@ def _extend_translator(JF):
                     out.append(_fold(e, "add", terms))
         return (out_shape, out)
 
-    # Look-ups with a run-time index (an interpolation table). The generated code is straight-line and scalar, so an array
-    # cannot be indexed in it; a table of constants becomes a Warp function instead, a binary decision tree over the flat
-    # index whose leaves are constant vectors of 32 values. A look-up then costs about log2(size / 32) comparisons,
-    # whatever the size of the table. The values are constants of the function, not statements: written out as
-    # statements (one constructor argument each) a 131 x 162 table made a function of 150,000 lines that the CUDA
-    # compiler needed longer for than for the whole network.
-    LEAF = 32
-
-    def _table_function(values):
-        """The Warp function ``name(k: int)`` that returns ``values[k]`` (``k`` clamped into the table); cached by content."""
-        import os
-        import warp as wp
-        key = np.asarray(values, dtype=np.float64).tobytes()
-        if key in _TABLES:
-            return _TABLES[key][0]
-        name = f"_astronomix_table_{len(_TABLES)}"
-        lines = ["@wp.func", f"def {name}(k: int):", f"    k = wp.clamp(k, 0, {len(values) - 1})"]
-        vector = wp.types.vector(length=LEAF, dtype=wp.float64)
-        path = os.path.join(JF._GEN_DIR, f"astronomix_table_{len(_TABLES)}_{os.getpid()}.py")
-        namespace = {"wp": wp, "__name__": f"astronomix_table_{len(_TABLES)}", "__file__": path}
-
-        def branch(low, high, depth):   # the leaves start at multiples of LEAF
-            pad = "    " * depth
-            if high - low <= LEAF:
-                leaf = [float(v) for v in values[low:high]] + [float(values[high - 1])] * (LEAF - (high - low))
-                namespace[f"_leaf_{low}"] = wp.constant(vector(*leaf))
-                lines.append(f"{pad}return _leaf_{low}[k - {low}]")
-                return
-            middle = low + LEAF * max(1, ((high - low + LEAF - 1) // LEAF) // 2)
-            lines.append(f"{pad}if k < {middle}:")
-            branch(low, middle, depth + 1)
-            lines.append(f"{pad}else:")
-            branch(middle, high, depth + 1)
-        branch(0, len(values), 1)
-        with open(path, "w") as handle:
-            handle.write("\n".join(lines) + "\n")
-        exec(compile("\n".join(lines) + "\n", path, "exec"), namespace)   # co_filename == path: Warp reads the source back
-        _TABLES[key] = (name, namespace[name])
-        return name
-
+    # Look-ups with a run-time index (an interpolation table). The generated code is straight-line and scalar, so a
+    # constant array cannot be indexed in it. The tables of constants that a right-hand side indexes are therefore
+    # collected in one array, which the kernel receives as an argument and hands to the generated field and Jacobian:
+    # a look-up is one read of that array. (Two ways of keeping the table inside the generated code were tried first,
+    # 2026-11-18: a decision tree with the values as constructor arguments made 150,000 lines for a 131 x 162 table and
+    # did not compile in 12 minutes; with constant vectors as leaves it compiled, and ran 60 times slower on the GPU.)
     def _h_gather_at_run_time(e, operand, index, p):
         """``table[i, j, ...]`` for a table of constants and indices computed in the kernel: one element per index tuple."""
         if not all(JF._is_num(c) for c in operand.reshape(-1)):
@@ -209,11 +175,17 @@ def _extend_translator(JF):
         if all(v == values[0] for v in values):   # e.g. the zero tangent of a constant table
             return values[0]
         strides = [int(np.prod(operand.shape[axis + 1:])) for axis in range(operand.ndim)]
-        # the indices are taken to be in range, as JAX promises for them (the table function clamps the flat index)
         flat = _fold(e, "add", [e._scalar_binop("mul", index[axis], float(strides[axis])) for axis in range(operand.ndim)])
         if JF._is_num(flat):
             return values[int(flat)]
-        return e.emit(f"{_table_function(values)}(int({e._src(flat)}))")
+        store = _TABLE_STORE
+        if store is None:
+            raise JF.UnsupportedRHS("gather", "a table look-up at a run-time index needs build_fused_core_solver")
+        key = np.asarray(values, dtype=np.float64).tobytes()
+        if key not in store["offsets"]:   # the field and the Jacobian read the same tables
+            store["offsets"][key] = len(store["values"]); store["values"].extend(values)
+        # the indices are taken to be in range, as JAX promises for them; the flat index is clamped into its table
+        return e.emit(f"_tables[wp.clamp(int({e._src(flat)}), 0, {len(values) - 1}) + {store['offsets'][key]}]")
 
     def _h_dynamic_slice(e, iv, p):
         """``table[i]`` / ``table[i, j]`` with scalar indices: JAX lowers these to a ``dynamic_slice`` of size one."""
@@ -277,12 +249,22 @@ def _extend_translator(JF):
         "dynamic_slice": _h_dynamic_slice,
     })
 
-    # the generated field and Jacobian call the table functions by name: hand them to the namespace they are compiled in
+    # the field and the Jacobian that build_fused_core_solver generates take the array of the tables as last argument
     emit_func_orig = JF._emit_func
 
     def _emit_func(base_name, body_lines, return_expr, sig, namespace):
-        namespace.update({name: function for name, function in _TABLES.values()})
-        return emit_func_orig(base_name, body_lines, return_expr, sig, namespace)
+        if _TABLE_STORE is None:   # not a build of this module
+            return emit_func_orig(base_name, body_lines, return_expr, sig, namespace)
+        import warp as wp
+        # Forward only (the kernel is wrapped without gradients): without this Warp also generates and compiles the
+        # adjoint of the field and of the Jacobian, 60% of the code of a KROME network (1.4 million lines of CUDA,
+        # not compiled after an hour on 2026-11-18). The option is read when the module of the function is created.
+        backward = wp.config.enable_backward
+        wp.config.enable_backward = False
+        try:
+            return emit_func_orig(base_name, body_lines, return_expr, sig + ", _tables: wp.array(dtype=wp.float64)", namespace)
+        finally:
+            wp.config.enable_backward = backward
     JF._emit_func = _emit_func
 
     def _walk_with_consts(emitter, jaxpr, invals, consts=()):
@@ -328,7 +310,7 @@ def _extend_translator(JF):
 # Kernel: adaptive Rosenbrock23 per cell with a per-cell step length (gradsolve's scheme, constants and controller)
 # ---------------------------------------------------------------------------------------------------------------------
 _CACHE = {}
-_TABLES = {}   # look-up tables of the generated code: content -> (name, Warp function), see ``_table_function``
+_TABLE_STORE = None   # the tables of the build in progress: {"values": [...], "offsets": {content: offset}}, see ``_element``
 
 
 def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_steps=2048, cache_key=None,
@@ -351,13 +333,21 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     import gradsolve.warp._warp_rosenbrock as GR
     _extend_translator(JF)
     wp.init()
+    wp.set_module_options({"enable_backward": False})   # this module: the kernel and its linear solve, forward only
     D = int(dim)
 
     def f_jax(t, y, p):
         return vector_field(t, y, None)
 
-    field, vecD, vecP = JF.jaxpr_to_warp_field(f_jax, D, 1, wp_scalar=wp.float64)
-    jac, _, matDD, _ = JF.jaxpr_to_warp_jacobian(f_jax, D, 1, wp_scalar=wp.float64)
+    global _TABLE_STORE
+    _TABLE_STORE = {"values": [], "offsets": {}}
+    try:
+        field, vecD, vecP = JF.jaxpr_to_warp_field(f_jax, D, 1, wp_scalar=wp.float64)
+        jac, _, matDD, _ = JF.jaxpr_to_warp_jacobian(f_jax, D, 1, wp_scalar=wp.float64)
+        # every table the right-hand side looks up, one after the other (a single zero when it looks none up)
+        table_values = np.asarray(_TABLE_STORE["values"] or [0.0], dtype=np.float64)
+    finally:
+        _TABLE_STORE = None
     dcoef = float(GR._D_COEF); e32 = float(GR._E32)
     SAFETY, ERR_FLOOR, FAC_MIN, FAC_MAX, ORDER_EXP = float(GR.SAFETY), float(GR.ERR_FLOOR), float(GR.FAC_MIN), float(GR.FAC_MAX), float(GR.ORDER_EXP)
     RTOL, ATOL, MAXS, FIRST = float(rtol), float(atol), int(max_steps), float(first_step_fraction)
@@ -393,7 +383,8 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
         return out
 
     @wp.kernel
-    def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), y_out: wp.array(dtype=vecD)):
+    def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), tables: wp.array(dtype=wp.float64),
+                           y_out: wp.array(dtype=vecD)):
         jt = wp.tid()
         t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
@@ -401,18 +392,18 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
             if t >= t1:
                 break
             h = wp.min(dt, t1 - t)
-            J = jac(t, y, pj)
+            J = jac(t, y, pj, tables)
             W = matDD()
             for i in range(D):
                 for jc in range(D):
                     W[i, jc] = -wp.float64(dcoef) * h * J[i, jc]
                 W[i, i] = W[i, i] + wp.float64(1.0)
-            F0 = field(t, y, p)
+            F0 = field(t, y, p, tables)
             k1 = _gauss_solve(W, F0)
-            F1 = field(t, y + wp.float64(0.5) * h * k1, p)
+            F1 = field(t, y + wp.float64(0.5) * h * k1, p, tables)
             k2 = _gauss_solve(W, F1 - k1) + k1
             ynew = y + h * k2
-            F2 = field(t, ynew, p)
+            F2 = field(t, ynew, p, tables)
             rhs3 = F2 - wp.float64(e32) * (k2 - F1) - wp.float64(2.0) * (k1 - F0)
             k3 = _gauss_solve(W, rhs3)
             err_vec = (h / wp.float64(6.0)) * (k1 - wp.float64(2.0) * k2 + k3)
@@ -428,10 +419,12 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
             dt = h * wp.clamp(fac, wp.float64(FAC_MIN), wp.float64(FAC_MAX))
         y_out[jt] = y
 
-    kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=1)
+    kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=1)   # one thread per row of the first argument
+    import jax.numpy as jnp
+    tables = jnp.asarray(table_values)
 
     def fn(*args):   # jax_kernel returns a list of outputs; hand back the single array
-        out = kernel_fn(*args)
+        out = kernel_fn(*args, tables)
         return out[0] if isinstance(out, (list, tuple)) else out
     _CACHE[key] = fn
     return fn

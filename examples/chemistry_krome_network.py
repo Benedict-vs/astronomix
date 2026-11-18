@@ -10,18 +10,17 @@ then prints both results and their difference. The temperature is evolved with t
 abundances (thermochemistry). Run it from the repository root:
 
     python examples/chemistry_krome_network.py --network /path/to/krome/networks/react_galaxy_ism \\
-        --krome-data /path/to/krome/data --draine 1 --shield-habing-dust --no-metal-table
+        --krome-data /path/to/krome/data --draine 1 --shield-habing-dust
                                     # both solvers, as a KROME build with -photoBins=10 -shieldHabingDust
     python examples/chemistry_krome_network.py --network ... --krome-data /path/to/krome/data --draine 1 \\
-        --shield-habing-dust        # with KROME's metal cooling table too: Kvaerno5 only
+        --shield-habing-dust --no-metal-table   # without KROME's metal cooling table above 1e4 K
     python examples/chemistry_krome_network.py --network ... --no-kernel    # Kvaerno5 only, without KROME's data
 
 The cells span ``n_H`` = 1 to 1e4 cm^-3 and start atomic, with carbon and silicon singly
 ionised. The heating and cooling are KROME's; the metal lines and the metal cooling table are
-read from the data folder of a KROME installation (``--krome-data``). The per-cell kernel
-cannot look a table up, so the two solvers are compared with ``--no-metal-table`` (the metals
-then cool through their lines alone, i.e. not above 1e4 K); its first build takes about ten
-minutes on a CPU and is cached. ``--isothermal`` holds the temperature at ``--temperature``
+read from the data folder of a KROME installation (``--krome-data``). Both solvers look the
+table up (the kernel receives it as an array); the first build of the kernel takes a minute or
+two and is cached. ``--isothermal`` holds the temperature at ``--temperature``
 instead (Kvaerno5 only: the kernel of the module integrates the temperature with the species).
 
 The radiation field is, as in KROME, a spectrum in energy bins: ``--draine X`` sets the
@@ -257,13 +256,7 @@ def main():
         print("\nThe Warp kernel of the chemistry module integrates the temperature with the species: "
               "run without --isothermal to compare the two solvers.")
         return
-    if arguments.krome_data and not arguments.no_metal_table:
-        print("\nThe Warp kernel cannot look up the tabulated metal cooling: run with --no-metal-table to compare the "
-              "two solvers (the metals then cool through their lines alone).")
-        return
-
-    print("\nBuilding the per-cell kernel: about ten minutes on a CPU the first time, cached afterwards "
-          "(--no-kernel skips it).")
+    print("\nBuilding the per-cell kernel: a minute or two the first time, cached afterwards (--no-kernel skips it).")
     kernel, kernel_temperature, _, _, first, elapsed = run(arguments, True)
     report("Rosenbrock23 Warp kernel (gradsolve), one thread per cell", kernel, kernel_temperature, names, hydrogen_nuclei)
     print(f"   first step {first:.1f} s (kernel build included), all steps {elapsed:.1f} s")

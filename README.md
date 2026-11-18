@@ -297,18 +297,17 @@ installation; neither is shipped here.
 
    `--draine 1` is the interstellar radiation field in ten energy bins and
    `--shield-habing-dust` its attenuation by dust. Without `--no-metal-table` the metals also
-   cool above 1e4 K through KROME's table and only the vmapped Kvaerno5 runs (the per-cell
-   kernel cannot look a table up). `--user-variable NAME=VALUE` sets a `@common` variable of
-   the file, `--help` lists the rest. The first build of the per-cell kernel takes about ten
-   minutes on a CPU and is cached afterwards; `--no-kernel` skips it.
+   cool above 1e4 K through KROME's table, in both solvers. `--user-variable NAME=VALUE` sets a
+   `@common` variable of the file, `--help` lists the rest. The first build of the per-cell
+   kernel takes a minute or two and is cached afterwards; `--no-kernel` skips it.
 2. *In a simulation*: build the chemistry with the call below and hand it over as
    `SimulationConfig(..., chemistry_config=chemistry_config)` and
    `SimulationParams(..., chemistry_params=chemistry_params)`. Species `i` of
    `species_names` is the field `registered_variables.chemistry_species_index + i` of the
    state, a number density in units of `number_density_unit_cgs`.
-3. *With the per-cell kernel (gradsolve)*: pass `krome_metal_table=False` to the call below
-   and attach the kernel as in the section on the per-cell implicit solver further down;
-   the function `build` of `examples/chemistry_krome_network.py` does exactly this.
+3. *With the per-cell kernel (gradsolve)*: attach the kernel as in the section on the
+   per-cell implicit solver further down; the function `build` of
+   `examples/chemistry_krome_network.py` does exactly this.
 
 ```python
 from astronomix._modules._chemistry._krome_photo import photo_spectrum
@@ -384,14 +383,24 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   returns to a radiative-transfer code, and the other cooling and heating options.
 - **Solvers.** The vmapped Kvaerno5 runs with a Newton iteration for these networks: the
   default chord iteration stalls on the ionisation equilibrium of hot, dense gas. The
-  per-cell Warp kernel needs `thermochemistry=True` and cannot look a table up: with it,
-  pass `krome_metal_table=False` (the metals then cool through their lines alone, i.e. not
-  above 1e4 K). On eight cells from 1 to 1e4 cm^-3 under the Draine field, with the dust
-  shielding, the H2 self-shielding and cosmic rays, the kernel and Kvaerno5 agree to 4e-5 dex
-  in the abundances and 6e-6 in the temperature (2e-4 dex and 7e-6 for the same network
-  without its cosmic-ray block, where H+ decays through the run); the first build of the
-  kernel for a network of this size takes about ten minutes on a CPU (it is cached
-  afterwards).
+  per-cell Warp kernel needs `thermochemistry=True`. It looks the metal cooling table up
+  like the vmapped solvers: the generated code cannot index a constant array, so the tables
+  that a right-hand side indexes are handed to the kernel as one array (2026-11-18;
+  `krome_metal_table="kernel"` is an alternative that needs no look-up at one product per
+  table value in every call, `krome_metal_table=False` leaves the table out). For
+  react_galaxy_ism_plus with the table, on one H200 that another job was using at the same
+  time: the kernel builds in 98 s, one solver step costs about 0.2 microseconds per cell,
+  and a step of 1e-3 Myr over gas from 30 K to 1e8 K at ionisation equilibrium agrees with
+  Kvaerno5 to 2e-3 dex in the abundances and 6e-5 in the temperature
+  (`pytests/chemistry/krome_cgols_conditions.py --kernel`). On eight cells from 1 to 1e4
+  cm^-3 under the Draine field, with the dust shielding, the H2 self-shielding and cosmic
+  rays, the kernel and Kvaerno5 agree to 4e-5 dex in the abundances and 6e-6 in the
+  temperature (2e-4 dex and 1e-5 for the same network without its cosmic-ray block, where H+
+  decays through the run). The first build of the kernel for a network of this size takes
+  about a quarter of a minute on a CPU and a minute and a half on a GPU (it is cached
+  afterwards); before 2026-11-18 it took about ten minutes on a CPU and did not finish on
+  a GPU, because the Jacobian carried the zero tangents of every direction through each
+  division and Warp compiled an adjoint that is never used.
 - **Checked against KROME itself**, with the Fortran that KROME generates for
   `react_galaxy_ism` with the metal reactions and the cosmic-ray block on (87 reactions, 16
   species) and the options `-photoBins=10 -shielding=R14 -shieldHabingDust -useDustH2const`,
