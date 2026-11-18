@@ -1,0 +1,498 @@
+paper: paper1
+generated: '2026-11-18T16:21:48+00:00'
+astronomix_commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+numbers:
+- key: AxisVelocityOffsetCCEightyFive
+  value: -2.3929005999037134
+  unit: percent
+  uncertainty:
+    kind: range
+    lo: -2.4662166745341176
+    hi: -2.3929005999037134
+  status: converged
+  convergence: converged
+  description: 'Median offset of the free-wind velocity on the axis (|z| = 1.5-4 kpc) from the CC85 solution
+    (Mdot 12 Msun/yr, Edot 5.4e42 erg/s, R = 0.3 kpc), frames 20-38 Myr, A-2048 (cgols_fvfd_synthesis.py,
+    metric cc85_dv); FV-2048 -2.41 %. Ladder: FD-512 -2.47; FD-1024 -2.4; FD-2048 -2.39 (-0.4% at the
+    last doubling).'
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: ec483223522f0648eb5dc09e56a424e5a3085fcdadf5c3518db470d09d7085ec
+  digits: 3
+- key: CostRatioFDFV
+  value: 6.539244956611512
+  unit: ''
+  uncertainty: null
+  status: converged
+  convergence: null
+  description: GPU-hours to 75 Myr of FD-2048 over FV-2048 (2292 / 350 H200-h, time integration wall time
+    x GPUs; FD without the 780 GPU-h of a leg lost to an InfiniBand hang). A measured cost, not a convergence
+    statement.
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data: null
+  digits: 3
+- key: CumMassNmax
+  value: 738312488.2384813
+  unit: Msun
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Mass through both |z| = 5 kpc planes from 0 to 75 Myr, C-512 with N = 128, frames.
+  runs:
+  - C-512 N = 128
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
+    sha256: null
+  digits: 3
+- key: CumMassNsixteen
+  value: 600000439.8426758
+  unit: Msun
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Mass through both |z| = 5 kpc planes from 0 to 75 Myr, C-512 with N = 16, frames.
+  runs:
+  - C-512 N = 16
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C512
+    sha256: null
+  digits: 3
+- key: EdotAfiveKpc
+  value: 2.874705401540253e+42
+  unit: erg/s
+  uncertainty:
+    kind: range
+    lo: 2.874705401540253e+42
+    hi: 2.8922956934421133e+42
+  status: converged
+  convergence: converged
+  description: 'Net energy flux through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    A-2048, every checkpoint (1.25 Myr), all phases. Ladder: A-512 2.89e+42; A-1024 2.88e+42; A-2048 2.87e+42
+    (-0.3% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: LxAsixtyMyr
+  value: 6.338166702134244e+39
+  unit: erg/s
+  uncertainty: null
+  status: single_snapshot
+  convergence: not_converged
+  description: 'Soft X-ray luminosity at 60 Myr, CGOLS I recipe (n^2 Lambda_A4, (3/2) kT in 0.3-2 keV,
+    mu = 0.6), whole box, A-2048. Ladder: A-512 1.35e+40; A-1024 8.25e+39; A-2048 6.34e+39 (-23.2% at
+    the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
+    sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
+  digits: 3
+- key: LxCsixtyMyr
+  value: 1.8566310371545317e+40
+  unit: erg/s
+  uncertainty: null
+  status: single_snapshot
+  convergence: not_converged
+  description: 'Soft X-ray luminosity at 60 Myr, CGOLS I recipe (n^2 Lambda_A4, (3/2) kT in 0.3-2 keV,
+    mu = 0.6), whole box, C-1024. Ladder: C-256 1.73e+40; C-512 1.74e+40; C-1024 1.86e+40 (+6.9% at the
+    last doubling).'
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
+    sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
+  digits: 3
+- key: LxDropCthousand
+  value: 26.243625154959645
+  unit: ''
+  uncertainty: null
+  status: single_snapshot
+  convergence: null
+  description: L_X(N = 16) / L_X(N = 1000) at 60 Myr, C-1024, CGOLS I recipe (1.86e+40 / 7.07e+38 erg/s).
+  runs:
+  - C-1024
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
+    sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024n1000.npz
+    sha256: 4132154d53f8684f9cfd464987969640d4fe63fb50afad7c4ad291624c1cf1dc
+  digits: 3
+- key: LxLateFD
+  value: 5.524566034746077e+39
+  unit: erg/s
+  uncertainty: null
+  status: not_converged
+  convergence: not_converged
+  description: Soft X-ray luminosity, CGOLS I recipe, mean over 60-75 Myr (12 snapshots after 60 Myr),
+    A-2048. Neither scheme has converged in L_X.
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
+    sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
+  digits: 3
+- key: LxLateFV
+  value: 5.145035745833915e+39
+  unit: erg/s
+  uncertainty: null
+  status: not_converged
+  convergence: not_converged
+  description: Soft X-ray luminosity, CGOLS I recipe, mean over 60-75 Myr (12 snapshots after 60 Myr),
+    FV-2048. Neither scheme has converged in L_X.
+  runs:
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_A2048fv.npz
+    sha256: 724c5a692547555929cde3f65356908a33d8ab07c5f9387a2149ec745cd79f7b
+  digits: 3
+- key: MassAfiveKpc
+  value: 311101669.88114053
+  unit: Msun
+  uncertainty:
+    kind: range
+    lo: 305135823.8814744
+    hi: 311101669.88114053
+  status: converged
+  convergence: converged
+  description: 'Mass through both |z| = 5 kpc planes from 0 to 75 Myr, A-2048, trapezoid over the frames.
+    Ladder: A-512 3.05e+08; A-1024 3.06e+08; A-2048 3.11e+08 (+1.5% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
+    sha256: null
+  digits: 3
+- key: MdotAfiveKpc
+  value: 6.945413279533386
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 6.945413279533386
+    hi: 6.965005338191986
+  status: converged
+  convergence: converged
+  description: 'Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    A-2048, from the frames (1.25 Myr). Ladder: A-512 6.97; A-1024 6.96; A-2048 6.95 (-0.2% at the last
+    doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
+    sha256: null
+  digits: 3
+- key: MdotAfiveKpcFiveTwelve
+  value: 6.965005338191986
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 6.945413279533386
+    hi: 6.965005338191986
+  status: converged
+  convergence: converged
+  description: 'Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    A-512, from the frames (1.25 Myr). Ladder: A-512 6.97; A-1024 6.96; A-2048 6.95 (-0.2% at the last
+    doubling).'
+  runs:
+  - A-512
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A512
+    sha256: null
+  digits: 3
+- key: MdotAfiveKpcTenTwentyFour
+  value: 6.960068964958191
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 6.945413279533386
+    hi: 6.965005338191986
+  status: converged
+  convergence: converged
+  description: 'Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    A-1024, from the frames (1.25 Myr). Ladder: A-512 6.97; A-1024 6.96; A-2048 6.95 (-0.2% at the last
+    doubling).'
+  runs:
+  - A-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A1024
+    sha256: null
+  digits: 3
+- key: MdotCfiveKpc
+  value: 13.910719394683838
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 13.910719394683838
+    hi: 17.087126231193544
+  status: provisional
+  convergence: converged
+  description: 'Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    C-1024 (N = 16), from the frames. Provisional until C-2048. Ladder: C-256 17.1; C-512 14.6; C-1024
+    13.9 (-4.8% at the last doubling).'
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
+    sha256: null
+  digits: 3
+- key: MdotCthousand
+  value: 26.94217747449875
+  unit: Msun/yr
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    C-1024 with N = 1000 (one run), from the frames.
+  runs:
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024n1000
+    sha256: null
+  digits: 3
+- key: MixedMdotAoneKpcRim
+  value: 4.2092864587895535
+  unit: Msun/yr
+  uncertainty: null
+  status: not_converged
+  convergence: not_converged
+  description: 'Outflow of mixed-entropy gas through both |z| = 1 kpc planes, 30-45 Myr (every checkpoint
+    after 30 Myr, 45 Myr included), A-2048 (A-512 and A-1024 every 2.5 Myr). Ladder: A-512 1.84; A-1024
+    3.7; A-2048 4.21 (+13.9% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: NsweepSlope
+  value: 2.2286961500237625
+  unit: Msun/yr
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Slope of the mean outflow through |z| = 5 kpc (15-40 Myr (every snapshot after 15 Myr),
+    frames) against log2 N, 512^3, N = 1, 4, 16, 64, 128, one run each; means 5.66, 10.27, 14.62, 18.86,
+    21.46 Msun/yr; intercept 5.70.
+  runs:
+  - C-512 N = 1
+  - C-512 N = 4
+  - C-512 N = 16
+  - C-512 N = 64
+  - C-512 N = 128
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n1
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n4
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C512
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n64
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
+    sha256: null
+  digits: 3
+- key: RatioMdotCtoA
+  value: 1.9986467755880057
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: 'Burst outflow through |z| = 5 kpc of C over A at 1024^3, 15-40 Myr (every snapshot after
+    15 Myr), frames (C-512 / A-512: 2.10).'
+  runs:
+  - C-1024
+  - A-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A1024
+    sha256: null
+  digits: 3
+- key: ShellMdotAfiveKpc
+  value: 14.609596639911743
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 13.966064911798615
+    hi: 14.609596639911743
+  status: provisional
+  convergence: converged
+  description: 'Net outflow through the full sphere r = 5 kpc (bin [r - 0.125, r) kpc), 15-40 Myr (every
+    snapshot after 15 Myr), A-2048, every checkpoint. Ladder: A-512 14; A-1024 14; A-2048 14.6 (+4.6%
+    at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: ShellMdotAoneKpc
+  value: 19.98509908241988
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 18.453270740313876
+    hi: 19.98509908241988
+  status: provisional
+  convergence: not_converged
+  description: 'Net outflow through the full sphere r = 1 kpc (bin [r - 0.125, r) kpc), 15-40 Myr (every
+    snapshot after 15 Myr), A-2048, every checkpoint. Ladder: A-512 19.9; A-1024 18.5; A-2048 20 (+8.3%
+    at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: ShellToPlaneC
+  value: 1.869583549604671
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Net outflow through the sphere r = 5 kpc over that through both |z| = 5 kpc planes, 15-40
+    Myr (every snapshot after 15 Myr), C-1024 (N = 16), the same 2.5 Myr checkpoints (26.24 / 14.03 Msun/yr).
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_C1024.npz
+    sha256: 7921e11752224b09de24fe96c78487617ca20eb8b6b5b24bd99d0b26c48388da
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
+    sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
+  digits: 3
+figures:
+- key: cluster_number_512
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/model_c_cluster_number_scaling_512.png
+  caption_hint: Outflow against cluster number N at 512^3 (N = 1-128, smooth limit)
+  runs:
+  - C-512 N = 1-128
+  script: pytests/self_gravity/cgols/cgols_cluster_number_scaling.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: cost_accuracy
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/cost_accuracy_families.png
+  caption_hint: Error against cost per family of quantities, FD and FV
+  runs:
+  - FD/FV 128-2048
+  script: pytests/self_gravity/cgols/cgols_cost_accuracy.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: fvfd_summary
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/fvfd_summary_significance.png
+  caption_hint: FD - FV differences for all metrics, 128^3-2048^3, in units of their combined scatter
+  runs:
+  - FD/FV 128-2048
+  script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: outflow_A_ladder
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_outflow_128_2048.png
+  caption_hint: Net outflow of model A through |z| = 1, 5, 8 kpc and cumulative mass through 5 kpc, 128^3-2048^3
+  runs:
+  - A-128
+  - A-256
+  - A-512
+  - A-1024
+  - A-2048
+  script: pytests/self_gravity/cgols/cgols_model_c_compare.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: outflow_C_vs_A
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/model_c_outflow_c1024_a2048.png
+  caption_hint: Outflow of C-1024 (N = 16) against A-1024 and A-2048
+  runs:
+  - C-1024
+  - A-1024
+  - A-2048
+  script: pytests/self_gravity/cgols/cgols_model_c_compare.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: outflow_per_R_A_C
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/outflow_per_R_A_C.png
+  caption_hint: Net mass flux through |z| = 1 and 5 kpc per cylindrical radius bin (R < 0.5, 0.5-1, 1-2,
+    > 2 kpc), (15, 40] and (50, 75] Myr, models A (256-2048) and C (256-1024, N = 16 and 1000)
+  runs:
+  - A-256
+  - A-512
+  - A-1024
+  - A-2048
+  - C-256
+  - C-512
+  - C-1024
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/cgols_outflow_per_radius.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: shells_A
+  path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_shells_profiles.png
+  caption_hint: Mass, momentum and energy flux through spherical shells and bicones, model A 128^3-2048^3
+  runs:
+  - A-128
+  - A-256
+  - A-512
+  - A-1024
+  - A-2048
+  script: pytests/self_gravity/cgols/cgols_shell_fluxes.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
+- key: slices_A2048
+  path: pytests/self_gravity/cgols/figures/cgols/paper/paper_slices_A2048.png
+  caption_hint: A-2048 density and temperature x-z slices at 10, 25, 50, 60 Myr (layout of CGOLS I Fig.
+    6); 200 dpi
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/cgols_paper_slices.py
+  commit: 84261614edcd74d0a4ed1f071c9226065eaca902
+  status: draft
