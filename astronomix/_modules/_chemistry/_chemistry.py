@@ -85,7 +85,10 @@ def make_vector_field(
     parameters at set-up time (2026-10-12).
     """
     def chemistry_derivative(time, abundances, temperature_kelvin):
-        abundances = jnp.maximum(abundances, 0.0)
+        # A network that is safe for the slightly negative abundances an implicit solver probes can opt out of
+        # the clamp, whose kink at zero stalls the solve once a species decays to zero (KROME networks do).
+        if not getattr(reaction_network, "accepts_negative_abundances", False):
+            abundances = jnp.maximum(abundances, 0.0)
         temperature_kelvin = jnp.clip(temperature_kelvin, 3.0, 1.0e9)
         return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field, visual_extinction,
                                 rate_modifier_a, rate_modifier_b)
@@ -95,11 +98,17 @@ def make_vector_field(
             abundances = state[:-1]
             temperature_kelvin = state[-1]
             abundance_derivative = chemistry_derivative(time, abundances, temperature_kelvin)
-            temperature_rate = temperature_derivative(
-                abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
-                hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
-                atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
-                carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
+            if getattr(reaction_network, "own_thermochemistry", False):
+                # a network with its own heating and cooling (KROME networks)
+                temperature_rate = reaction_network.temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
+                )
+            else:
+                temperature_rate = temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
+                    hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
+                    atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
+                    carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
             return jnp.concatenate([abundance_derivative, jnp.reshape(temperature_rate, (1,))])
     else:
         def vector_field(time, abundances, args):
@@ -208,7 +217,10 @@ def _advance_single_cell(
         # Arrhenius/temperature-dependent rates), so a pathological cell cannot
         # emit NaNs/infs that would poison the whole vmapped solve. Physical
         # states are untouched.
-        abundances = jnp.maximum(abundances, 0.0)
+        # A network that is safe for the slightly negative abundances an implicit solver probes can opt out of
+        # the clamp, whose kink at zero stalls the solve once a species decays to zero (KROME networks do).
+        if not getattr(reaction_network, "accepts_negative_abundances", False):
+            abundances = jnp.maximum(abundances, 0.0)
         temperature_kelvin = jnp.clip(temperature_kelvin, 3.0, 1.0e9)
         return reaction_network(
             time,
@@ -232,26 +244,32 @@ def _advance_single_cell(
                 abundances,
                 temperature_kelvin,
             )
-            temperature_rate = temperature_derivative(
-                abundances,
-                temperature_kelvin,
-                adiabatic_index,
-                cosmic_ray_rate,
-                fuv_field,
-                dust_to_gas_ratio,
-                hydrogen_molecule_formation_rate_coefficient,
-                hydrogen_index,
-                molecular_hydrogen_index,
-                electron_index,
-                atomic_oxygen_index,
-                ionized_hydrogen_index,
-                helium_index,
-                ionized_carbon_index,
-                co_cooling,
-                carbon_monoxide_index,
-                co_cooling_table,
-                co_cooling_bounds,
-            )
+            if getattr(reaction_network, "own_thermochemistry", False):
+                # a network with its own heating and cooling (KROME networks)
+                temperature_rate = reaction_network.temperature_derivative(
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
+                )
+            else:
+                temperature_rate = temperature_derivative(
+                    abundances,
+                    temperature_kelvin,
+                    adiabatic_index,
+                    cosmic_ray_rate,
+                    fuv_field,
+                    dust_to_gas_ratio,
+                    hydrogen_molecule_formation_rate_coefficient,
+                    hydrogen_index,
+                    molecular_hydrogen_index,
+                    electron_index,
+                    atomic_oxygen_index,
+                    ionized_hydrogen_index,
+                    helium_index,
+                    ionized_carbon_index,
+                    co_cooling,
+                    carbon_monoxide_index,
+                    co_cooling_table,
+                    co_cooling_bounds,
+                )
             return jnp.concatenate(
                 [abundance_derivative, jnp.reshape(temperature_rate, (1,))]
             )
@@ -597,6 +615,13 @@ def update_chemistry(
 
         ensure_lineax_sharding_compatibility()
         solver = dx.Kvaerno5()
+        if getattr(reaction_network, "newton_root_finder", False):
+            # The default chord iteration of the implicit stages (one Jacobian per step) does not converge for a
+            # network whose ionised gas sits at equilibrium, and the solve stalls; Newton, with a Jacobian per
+            # iteration, does. The tolerances are those of the step-size controller, as for the default.
+            import optimistix as optx
+
+            solver = dx.Kvaerno5(root_finder=dx.with_stepsize_controller_tols(optx.Newton)())
     else:
         raise ValueError(
             f"Unsupported chemistry solver tag: {chemistry_config.solver}"
