@@ -60,6 +60,41 @@ def _extend_translator(JF):
         return tuple(A2.shape), list(A2.reshape(-1)), list(B2.reshape(-1))
     E._broadcast_pair = _broadcast_pair
 
+    scalar_binop_orig = E._scalar_binop
+
+    def _scalar_binop(self, op, xa, xb):
+        # 0 / x is a structural zero like 0 * x, which gradsolve already drops. jacfwd seeds the tangents with zeros, and
+        # the derivative of every log, sqrt and quotient divides its tangent: without this the zero tangents of the 16
+        # directions a quantity does not depend on are written out and carried through everything that follows (found
+        # 2026-11-18 on a KROME network: every quantity derived from log T had 17 tangents in the Jacobian instead of one).
+        if op == "div" and JF._is_num(xa) and xa == 0 and not JF._is_num(xb):
+            return 0.0
+        return scalar_binop_orig(self, op, xa, xb)
+    E._scalar_binop = _scalar_binop
+
+    unary_orig = E._unary
+    constant_math = {"exp": np.exp, "log": np.log, "sqrt": np.sqrt, "sin": np.sin, "cos": np.cos, "tan": np.tan, "tanh": np.tanh}
+
+    def _unary(self, a, op):
+        # exp, log, sqrt, ... of a constant are constants: evaluate them here instead of in the kernel. gradsolve folds the
+        # arithmetic of constants but writes these functions out, so that everything computed from a fixed temperature (the
+        # cooling at the floor temperature of a KROME network, about half of its field) ran in every call (2026-11-18).
+        fold = constant_math.get(op)
+        if fold is None:
+            return unary_orig(self, a, op)
+        shape, comps = a; out = []
+        for c in comps:
+            value = None
+            if JF._is_num(c):
+                with np.errstate(all="ignore"):
+                    value = float(fold(float(c)))
+            if value is not None and np.isfinite(value):
+                out.append(value)
+            else:   # not a constant, or outside the domain of the function: as before
+                out.append(self.emit(JF._OP_TMPL[op].format(a=self._src(c))))
+        return (shape, out)
+    E._unary = _unary
+
     def _h_select_n(e, iv, p):
         pred = iv[0]; cases = iv[1:]
         if len(cases) != 2:
