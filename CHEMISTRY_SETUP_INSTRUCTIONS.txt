@@ -1,5 +1,5 @@
 CHEMISTRY WITH ASTRONOMIX: OUR CARBOX VERSION, GRADSOLVE AND THE 16-SPECIES NETWORK
-Setup instructions, 17 November 2026
+Setup instructions, 17 November 2026 (section 7 added 18 November 2026)
 ==================================================================================
 
 What you get
@@ -111,7 +111,43 @@ autocvd waits until a GPU is completely free. Do not use its "--least-used"
 option and do not set CUDA_VISIBLE_DEVICES by hand.
 
 
-7. Things that go wrong
+7. A network in the KROME format
+--------------------------------
+astronomix also reads a network written for KROME (for instance
+react_galaxy_ism, or our react_galaxy_ism_plus) and evolves it as KROME does:
+rate coefficients, photo-reactions from a radiation spectrum, shielding, and
+KROME's heating and cooling. carbox is not used for it. The temperature is
+always evolved with the abundances.
+
+You need two things that are not in this repository (KROME is GPL-3): the
+network file, and the "data" folder of a KROME installation
+(https://bitbucket.org/tgrassi/krome). Ask for both.
+
+  python examples/chemistry_krome_network.py \
+      --network /path/to/react_galaxy_ism_plus --krome-data /path/to/krome/data \
+      --draine 1 --shield-habing-dust --no-metal-table
+
+This evolves 16 cells (n_H from 1 to 1e4 cm^-3) for 1 Myr under the
+interstellar radiation field, once with Kvaerno5 and once with the per-cell
+gradsolve kernel, and prints both results and their difference (a few 1e-5
+dex in the abundances). The first build of the kernel for this network takes
+about ten minutes on a CPU; it is cached afterwards. Add "--no-kernel" to
+skip it.
+
+  without --no-metal-table    the metals also cool above 1e4 K (KROME's table);
+                              only Kvaerno5 runs, the kernel cannot use a table
+  --draine X                  radiation field: Draine's times X
+  --help                      everything else
+
+Warnings like "wrong format for reaction 36 ... line skipped as in KROME" are
+expected with react_galaxy_ism_plus: three lines of that file do not fit their
+layout, KROME skips them, and so do we.
+
+Details: README.md, section "Networks in the KROME format" (how to use it in
+a simulation, the options of a KROME build and their counterparts here).
+
+
+8. Things that go wrong
 -----------------------
 - "network file not found": you skipped "git submodule update --init".
 - Use the carbox in external/carbox. Do not install carbox from its main

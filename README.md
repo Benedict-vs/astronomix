@@ -273,6 +273,33 @@ coefficients, the photo-reactions from a binned spectrum, the shielding, and KRO
 and cooling. carbox is not needed for it; the reader is
 `astronomix/_modules/_chemistry/_krome_network.py`.
 
+**How to run it.** The temperature is evolved with the abundances in everything below
+(`thermochemistry=True`). You need the network file and the `data` folder of a KROME
+installation; neither is shipped here.
+
+1. *On a row of cells, without hydrodynamics* (both solvers and their difference):
+
+   ```bash
+   python examples/chemistry_krome_network.py \
+       --network /path/to/krome/networks/react_galaxy_ism --krome-data /path/to/krome/data \
+       --draine 1 --shield-habing-dust --no-metal-table
+   ```
+
+   `--draine 1` is the interstellar radiation field in ten energy bins and
+   `--shield-habing-dust` its attenuation by dust. Without `--no-metal-table` the metals also
+   cool above 1e4 K through KROME's table and only the vmapped Kvaerno5 runs (the per-cell
+   kernel cannot look a table up). `--user-variable NAME=VALUE` sets a `@common` variable of
+   the file, `--help` lists the rest. The first build of the per-cell kernel takes about ten
+   minutes on a CPU and is cached afterwards; `--no-kernel` skips it.
+2. *In a simulation*: build the chemistry with the call below and hand it over as
+   `SimulationConfig(..., chemistry_config=chemistry_config)` and
+   `SimulationParams(..., chemistry_params=chemistry_params)`. Species `i` of
+   `species_names` is the field `registered_variables.chemistry_species_index + i` of the
+   state, a number density in units of `number_density_unit_cgs`.
+3. *With the per-cell kernel (gradsolve)*: pass `krome_metal_table=False` to the call below
+   and attach the kernel as in the section on the per-cell implicit solver further down;
+   the function `build` of `examples/chemistry_krome_network.py` does exactly this.
+
 ```python
 from astronomix._modules._chemistry._krome_photo import photo_spectrum
 
@@ -371,8 +398,8 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   One place where KROME itself is undefined: its metal-line rates above 1e4 K are returned
   unset; here they are zero.
 - `examples/chemistry_krome_network.py --network <file>` runs a network file through both
-  solvers (`--thermochemistry --krome-data <folder>` for the heating and cooling, `--draine`,
-  `--shield-habing-dust`, `--shielding` for the radiation and the shielding);
+  solvers with the thermochemistry on (`--krome-data <folder>` for KROME's metal cooling,
+  `--draine`, `--shield-habing-dust`, `--shielding` for the radiation and the shielding);
   `pytests/chemistry/test_krome_network.py` tests the reader, the photo bins, the shielding
   and the heating and cooling on small networks and data files written in the test, and a
   full file when `ASTRONOMIX_TEST_KROME_NETWORK` (and `ASTRONOMIX_TEST_KROME_DATA`) point at
