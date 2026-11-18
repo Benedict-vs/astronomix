@@ -100,9 +100,11 @@ def _commit(repo, script):
 
 
 def _data_record(data):
-    """``{"path": "host:/abs/path", "sha256": ...}`` for a data file, or None."""
+    """``{"path": "host:/abs/path", "sha256": ...}`` for a data file, a list of those for a list, or None."""
     if data is None:
         return None
+    if isinstance(data, (list, tuple)):
+        return [_data_record(item) for item in data]
     path = Path(data).resolve()  # the real location, not a symlinked view
     record = {"path": f"{socket.gethostname()}:{path}", "sha256": None}
     if path.is_file() and path.stat().st_size <= SHA256_MAX_BYTES:
@@ -161,7 +163,7 @@ def _update(paper, section, entry, commit):
 
 
 def export_number(paper, key, value, *, unit, status, description, runs, data=None,
-                  uncertainty=None, convergence=None, digits=3):
+                  uncertainty=None, convergence=None, digits=3, script=None):
     """
     Add or replace a number in the paper's manifest.
 
@@ -174,10 +176,12 @@ def export_number(paper, key, value, *, unit, status, description, runs, data=No
         status: converged | not_converged | single_snapshot | provisional.
         description: what exactly was measured (quantity, window, cadence, run).
         runs: run tags, e.g. ["A-2048"].
-        data: the cache the number was computed from (recorded with host and sha256).
+        data: the cache the number was computed from (recorded with host and sha256),
+            or a list of caches.
         uncertainty: None or {"kind": noise|richardson|range, "lo": .., "hi": ..}.
         convergence: None or converged | not_converged | single_snapshot | unknown.
         digits: significant digits to print.
+        script: the script that computed the number, if not the caller.
     """
     if not (key.isascii() and key.isalpha()):
         raise ValueError(f"number key {key!r} must be ASCII letters only (it becomes a LaTeX macro)")
@@ -187,7 +191,7 @@ def export_number(paper, key, value, *, unit, status, description, runs, data=No
         raise ValueError(f"convergence must be one of {CONVERGENCE}")
     if value is not None and not math.isfinite(float(value)):
         raise ValueError(f"{key}: value {value} is not finite")
-    script = _caller_file()
+    script = Path(script).absolute() if script else _caller_file()
     repo = _repo_root(script)
     commit = _commit(repo, script)
     entry = {
@@ -207,17 +211,18 @@ def export_number(paper, key, value, *, unit, status, description, runs, data=No
     _update(paper, "numbers", entry, commit)
 
 
-def export_figure(paper, key, path, *, caption_hint, runs, status="draft"):
+def export_figure(paper, key, path, *, caption_hint, runs, status="draft", script=None):
     """
     Add or replace a figure in the paper's manifest.
 
     The figure stays where it is; the manifest stores its path relative to the
     repository root. Commit the figure before tagging, or the writing side
-    cannot fetch it.
+    cannot fetch it. ``script`` names the script that drew the figure, if that is
+    not the caller (e.g. when a separate exporter lists existing figures).
     """
     if status not in FIGURE_STATUSES:
         raise ValueError(f"figure status must be one of {FIGURE_STATUSES}")
-    script = _caller_file()
+    script = Path(script).absolute() if script else _caller_file()
     repo = _repo_root(script)
     figure = Path(path).absolute()
     if not figure.is_file():
