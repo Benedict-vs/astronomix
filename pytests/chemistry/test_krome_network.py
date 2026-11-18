@@ -754,6 +754,20 @@ def test_h2_line_cooling_against_krome(row):
         assert bool(jnp.isfinite(slope))
 
 
+@pytest.mark.parametrize("row", KROME_H2_COOLING, ids=lambda row: f"{row[0]}K")
+def test_h2_line_cooling_of_the_chemistry_module_against_krome(row):
+    """The H2 line cooling that the chemistry module applies to its carbox networks is KROME's too."""
+    from astronomix._modules._chemistry._thermochemistry import _glover_abel_h2_cooling
+
+    temperature, expected = float(row[0]), row[1:]
+    for collider, reference in zip((0, 2, 1, 4, 3), expected):  # densities ordered H, H2, H+, He, E
+        densities = np.zeros(5)
+        densities[1] = 1.0
+        densities[collider] += 1.0
+        value = float(_glover_abel_h2_cooling(jnp.asarray(densities), temperature, 0, 1, 2, 3, 4))
+        assert value == pytest.approx(reference, rel=3e-6, abs=1e-60)  # constants read as decimal numbers
+
+
 # KROME's database of automatic reactions and two cross section files in the formats of the Leiden and SwRI
 # databases, written for this test (wavelengths in nm and in Angstrom, cross sections in cm^2).
 PHOTO_DATABASE = """###########
