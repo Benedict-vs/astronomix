@@ -82,6 +82,21 @@ _parser.add_argument(
     default=None,
     help="drop H-alpha / EM at |z| below this (kpc); default off",
 )
+_parser.add_argument(
+    "--xray-band",
+    choices=("0.3-2", "0.3-1"),
+    default="0.3-2",
+    help="band of the AtomDB products (X2): 0.3-2 keV (default) or 0.3-1 keV, the band of the "
+    "Strickland+04 M82 fits; a non-default band names its own cache and figures",
+)
+_parser.add_argument(
+    "--xray-photons-nh",
+    type=float,
+    default=None,
+    help="AtomDB products as PHOTON surface brightness after TBabs absorption by this column "
+    "[cm^-2] (0.3-1 keV table only; e.g. 4e20 = Galactic toward M82), compared with the "
+    "Strickland+04 photon fits without any erg/photon conversion",
+)
 _parser.add_argument("--threads", type=int, default=16, help="CPU threads (XLA + tensorstore)")
 _parser.add_argument("--figures-only", action="store_true", help="re-render the figures from the cache")
 _parser.add_argument("--no-figures", action="store_true", help="only update the cache")
@@ -139,6 +154,7 @@ from astronomix.analysis_helpers.emission import EmissionMapSettings
 
 # astronomix functions
 from astronomix import get_registered_variables
+from astronomix.analysis_helpers.emission import XRAY_TABLE_PATHS
 from astronomix.analysis_helpers.emission import (
     emission_conversions,
     emission_maps,
@@ -182,6 +198,14 @@ STRICKLAND04_M82_FITS = (
     ("south", "ACIS-I", (0.2, 10.0), 0.73, 103.4),
 )
 STRICKLAND04_ERG_PER_PHOTON = 2e-9
+
+
+def xray_suffix():
+    """Name suffix of a non-default X-ray band / photon mode ('' for the default)."""
+    suffix = "" if ARGS.xray_band == "0.3-2" else "_sx" + ARGS.xray_band.replace(".", "p").replace("-", "_") + "keV"
+    if ARGS.xray_photons_nh is not None:
+        suffix += f"_ph_nh{ARGS.xray_photons_nh:.0e}".replace("+", "")
+    return suffix
 
 
 def _in_dir(subdir, name):
@@ -582,6 +606,9 @@ def plot_profiles(records, metadata, tag, figure_directory):
         "xray_atomdb": ("C1", "X2 AtomDB, " + _solar_label(metadata)),
         "xray_atomdb_lopez": ("C2", "X2 AtomDB, Lopez+20 M82 wind"),
     }
+    photon_mode = ARGS.xray_photons_nh is not None
+    if photon_mode:
+        styles.pop("xray_cgols")  # the CGOLS recipe is in erg, not photons
     for product, (color, label) in styles.items():
         key = f"profile_{product}_xz_north"
         if key not in record or np.all(~np.isfinite(record[key])):
@@ -592,10 +619,10 @@ def plot_profiles(records, metadata, tag, figure_directory):
     for side, instrument, (z_min, z_max), scale_height, central in STRICKLAND04_M82_FITS:
         fit_z = np.linspace(z_min, z_max, 100)
         photons = central * 1e-9 * np.exp(-fit_z / scale_height)
-        energy_per_arcmin2 = photons * STRICKLAND04_ERG_PER_PHOTON * 3600.0
+        per_arcmin2 = photons * 3600.0 * (1.0 if photon_mode else STRICKLAND04_ERG_PER_PHOTON)
         axis.plot(
             fit_z,
-            energy_per_arcmin2,
+            per_arcmin2,
             color="red",
             linestyle="-" if side == "north" else "--",
             linewidth=2.0,
@@ -605,7 +632,11 @@ def plot_profiles(records, metadata, tag, figure_directory):
     axis.set_yscale("log")
     axis.set_xlim(0, BOX_SIZE_KPC[2] / 2)
     axis.set_xlabel("|z| [kpc]")
-    axis.set_ylabel(r"$S_X$ [erg s$^{-1}$ cm$^{-2}$ arcmin$^{-2}$]")
+    axis.set_ylabel(
+        r"$S_X$ [photons s$^{-1}$ cm$^{-2}$ arcmin$^{-2}$]"
+        if photon_mode
+        else r"$S_X$ [erg s$^{-1}$ cm$^{-2}$ arcmin$^{-2}$]"
+    )
     axis.set_title(
         f"{tag.lstrip('_')}: minor-axis profile, |x| < 5 kpc, t = "
         f"{float(record['time_myr']):.2f} Myr",
@@ -614,8 +645,16 @@ def plot_profiles(records, metadata, tag, figure_directory):
     axis.text(
         0.02,
         0.02,
-        "Simulated: 0.3-2.0 keV. Strickland+04 Table 6 fits: 0.3-1.0 keV band,\n"
-        "converted at 2e-9 erg/photon as in CGOLS I (band mismatch).",
+        (
+            f"Simulated X2: 0.3-1.0 keV photons after TBabs N_H = {ARGS.xray_photons_nh:.1e} cm^-2.\n"
+            "Strickland+04 Table 6 fits: 0.3-1.0 keV photons at the telescope, no conversion."
+        )
+        if photon_mode
+        else (
+            f"Simulated X1: 0.3-2.0 keV window; X2: AtomDB {ARGS.xray_band} keV, intrinsic.\n"
+            "Strickland+04 Table 6 fits: 0.3-1.0 keV photons x 2e-9 erg/photon\n"
+            "(their intrinsic energy flux in 0.3-1.0 or 0.3-2.0 keV, uncertain by ~2x)."
+        ),
         transform=axis.transAxes,
         fontsize=7,
         color="red",
@@ -623,13 +662,15 @@ def plot_profiles(records, metadata, tag, figure_directory):
     finite = [
         np.asarray(record[key]) / ARCMIN2_PER_STERADIAN
         for key in record
-        if key.startswith("profile_xray") and key.endswith(("north", "south"))
+        if key.startswith("profile_xray")
+        and key.endswith(("north", "south"))
+        and not (photon_mode and key.startswith("profile_xray_cgols"))
     ]
     finite = np.concatenate([values[np.isfinite(values) & (values > 0)] for values in finite] or [np.ones(1)])
     axis.set_ylim(max(finite.min(), finite.max() * 1e-6), finite.max() * 3)
     axis.legend(fontsize=7, loc="upper right")
     figure.tight_layout()
-    out = os.path.join(figure_directory, f"{tag.lstrip('_')}_sx_profile.png")
+    out = os.path.join(figure_directory, f"{tag.lstrip('_')}{xray_suffix()}_sx_profile.png")
     figure.savefig(out, dpi=150)
     plt.close(figure)
     print(f"wrote {out}")
@@ -677,7 +718,11 @@ def plot_luminosities(records, metadata, tag, figure_directory):
 def main():
     """Process the requested snapshots into the cache, then render the figures."""
     tag = ARGS.tag
-    cache_path = _resolve(ARGS.cache) if ARGS.cache else _in_dir(os.path.join("data", "studies"), f"emission{tag}.npz")
+    cache_path = (
+        _resolve(ARGS.cache)
+        if ARGS.cache
+        else _in_dir(os.path.join("data", "studies"), f"emission{tag}{xray_suffix()}.npz")
+    )
     figure_directory = (
         _resolve(ARGS.figure_dir) if ARGS.figure_dir else os.path.join(SCRIPT_DIR, "figures", "cgols", "emission")
     )
@@ -709,7 +754,14 @@ def main():
                 f"{SOLAR_ABUNDANCE_SET} solar; --solar-abundances {ARGS.solar_abundances} "
                 "needs the checkpoints"
             )
-        table = load_xray_emissivity_table()
+        if ARGS.xray_band != "0.3-2" or ARGS.xray_photons_nh is not None:
+            if source != "checkpoints":
+                raise SystemExit("--xray-band / --xray-photons-nh need the checkpoints (frames hold 0.3-2 keV maps)")
+        table = load_xray_emissivity_table(
+            XRAY_TABLE_PATHS[ARGS.xray_band],
+            photons=ARGS.xray_photons_nh is not None,
+            absorbing_column_cm2=ARGS.xray_photons_nh or 0.0,
+        )
         settings = EmissionMapSettings(
             projection_axes=(1, 0),
             solar_abundance_set=ARGS.solar_abundances,
@@ -718,6 +770,8 @@ def main():
             source=source,
             metallicity=ARGS.metallicity,
             solar_abundances=ARGS.solar_abundances,
+            xray_band=ARGS.xray_band,
+            xray_photons_nh=np.nan if ARGS.xray_photons_nh is None else ARGS.xray_photons_nh,
             halpha_disk_mask_kpc=np.nan if ARGS.halpha_disk_mask_kpc is None else ARGS.halpha_disk_mask_kpc,
         )
         for index in selected:
@@ -752,6 +806,11 @@ def main():
         return
     if not records:
         raise SystemExit(f"nothing to plot: {cache_path} is empty or missing")
+    if xray_suffix():
+        # Non-default band / photons: only the S_X(z) comparison; the map and
+        # L_X(t) figures (and their file names) are those of the default run.
+        plot_profiles(records, metadata, tag, figure_directory)
+        return
     plot_maps(stored_maps, metadata, tag, figure_directory)
     plot_profiles(records, metadata, tag, figure_directory)
     plot_luminosities(records, metadata, tag, figure_directory)

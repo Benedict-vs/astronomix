@@ -117,6 +117,19 @@ DEFAULT_XRAY_TABLE_PATH = os.path.join(
     "xray_emissivity_0p3_2keV_atomdb.npz",
 )
 
+#: Further band tables (built by ``data/generate_xray_emissivity_table.py`` with
+#: ``ASTRONOMIX_XRAY_BAND_KEV``), keyed by band. The 0.3-1.0 keV table is the
+#: band of the Strickland et al. (2004) M82 minor-axis fits and also carries
+#: photon emissivities after TBabs absorption (``absorbing_column_cm2``).
+XRAY_TABLE_PATHS = {
+    "0.3-2": DEFAULT_XRAY_TABLE_PATH,
+    "0.3-1": os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        "xray_emissivity_0p3_1keV_atomdb.npz",
+    ),
+}
+
 #: Above the table (AtomDB's CIE grid ends at 1e9 K) the band emissivity is
 #: extrapolated as free-free emission far below kT, epsilon ~ T^-1/2.
 HIGH_TEMPERATURE_LOG_SLOPE = -0.5
@@ -253,7 +266,7 @@ def cgols_xray_emissivity(
 
 
 class XrayEmissivityTable(NamedTuple):
-    """The AtomDB 0.3-2.0 keV band-emissivity table (see the module docstring).
+    """An AtomDB band-emissivity table, 0.3-2.0 keV by default (see the module docstring).
 
     The temperature grid is uniform in log10 T, which lets the lookup be a
     gather-free index computation (see :func:`_interpolate_uniform_grid`).
@@ -273,18 +286,41 @@ class XrayEmissivityTable(NamedTuple):
     solar_abundance_ga10: np.ndarray
 
 
-def load_xray_emissivity_table(path: str = DEFAULT_XRAY_TABLE_PATH) -> XrayEmissivityTable:
+def load_xray_emissivity_table(
+    path: str = DEFAULT_XRAY_TABLE_PATH,
+    photons: bool = False,
+    absorbing_column_cm2: float = 0.0,
+) -> XrayEmissivityTable:
     """
     Load the AtomDB band-emissivity table.
 
     Args:
         path: The ``.npz`` table written by
             ``data/generate_xray_emissivity_table.py``.
+        photons: Load the photon emissivity [photons cm^3 s^-1 per n_e n_H]
+            instead of the energy emissivity. Every downstream function then
+            returns photons where it would return erg (the ``unit`` arguments
+            keep their numbers, read as photons).
+        absorbing_column_cm2: With ``photons``, the absorbing column the photons
+            have passed through; must be one of the table's columns.
 
     Returns:
         An :class:`XrayEmissivityTable` (host numpy arrays).
     """
     with np.load(path) as data:
+        if photons:
+            if "absorbing_column_cm2" not in data.files:
+                raise ValueError(f"{path} has no photon emissivities; rebuild it")
+            columns = np.asarray(data["absorbing_column_cm2"], dtype=np.float64)
+            matches = np.flatnonzero(np.isclose(columns, absorbing_column_cm2, rtol=1e-6, atol=0.0))
+            if matches.size != 1:
+                raise ValueError(f"absorbing column {absorbing_column_cm2:g} not in {path}: {columns}")
+            column = int(matches[0])
+            hydrogen_helium = data["log10_photon_emissivity_hydrogen_helium"][column]
+            metals = data["log10_photon_emissivity_metals"][:, column]
+        else:
+            hydrogen_helium = data["log10_emissivity_hydrogen_helium"]
+            metals = data["log10_emissivity_metals"]
         log10_temperature = np.asarray(data["log10_temperature"], dtype=np.float64)
         steps = np.diff(log10_temperature)
         if not np.allclose(steps, steps[0], rtol=0, atol=1e-9):
@@ -292,12 +328,8 @@ def load_xray_emissivity_table(path: str = DEFAULT_XRAY_TABLE_PATH) -> XrayEmiss
         return XrayEmissivityTable(
             log10_temperature_start=float(log10_temperature[0]),
             log10_temperature_step=float(steps[0]),
-            log10_emissivity_hydrogen_helium=np.asarray(
-                data["log10_emissivity_hydrogen_helium"], dtype=np.float64
-            ),
-            log10_emissivity_metals=np.asarray(
-                data["log10_emissivity_metals"], dtype=np.float64
-            ),
+            log10_emissivity_hydrogen_helium=np.asarray(hydrogen_helium, dtype=np.float64),
+            log10_emissivity_metals=np.asarray(metals, dtype=np.float64),
             metal_atomic_numbers=tuple(int(z) for z in data["metal_atomic_numbers"]),
             solar_abundance_ag89=np.asarray(data["solar_abundance_ag89"], dtype=np.float64),
             solar_abundance_ga10=np.asarray(data["solar_abundance_ga10"], dtype=np.float64),

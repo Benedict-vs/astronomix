@@ -110,6 +110,9 @@ T_END_MYR = float(os.environ.get("CGOLS_SENS_TMYR", "18"))
 FDCHECK = os.environ.get("CGOLS_SENS_FDCHECK", "0") == "1"
 RES = int(os.environ["CGOLS_DIM"])
 TAG = f"_d{RES}_t{T_END_MYR:g}myr"
+# float64 runs (CGOLS_X64=1) get their own files, never overwriting the float32 maps.
+if os.environ.get("CGOLS_X64", "0") == "1":
+    TAG += "_x64"
 
 # --- code-density -> physical helpers (module-level equivalents of the ones
 #     built inside cgols.make_snapshot_callable) ------------------------------
