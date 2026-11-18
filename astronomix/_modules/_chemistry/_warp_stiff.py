@@ -152,8 +152,11 @@ def _extend_translator(JF):
 
     # Look-ups with a run-time index (an interpolation table). The generated code is straight-line and scalar, so an array
     # cannot be indexed in it; a table of constants becomes a Warp function instead, a binary decision tree over the flat
-    # index with eight values per leaf. A look-up then costs about log2(size) comparisons, whatever the size of the table.
-    LEAF = 8
+    # index whose leaves are constant vectors of 32 values. A look-up then costs about log2(size / 32) comparisons,
+    # whatever the size of the table. The values are constants of the function, not statements: written out as
+    # statements (one constructor argument each) a 131 x 162 table made a function of 150,000 lines that the CUDA
+    # compiler needed longer for than for the whole network.
+    LEAF = 32
 
     def _table_function(values):
         """The Warp function ``name(k: int)`` that returns ``values[k]`` (``k`` clamped into the table); cached by content."""
@@ -164,23 +167,25 @@ def _extend_translator(JF):
             return _TABLES[key][0]
         name = f"_astronomix_table_{len(_TABLES)}"
         lines = ["@wp.func", f"def {name}(k: int):", f"    k = wp.clamp(k, 0, {len(values) - 1})"]
+        vector = wp.types.vector(length=LEAF, dtype=wp.float64)
+        path = os.path.join(JF._GEN_DIR, f"astronomix_table_{len(_TABLES)}_{os.getpid()}.py")
+        namespace = {"wp": wp, "__name__": f"astronomix_table_{len(_TABLES)}", "__file__": path}
 
-        def branch(low, high, depth):
+        def branch(low, high, depth):   # the leaves start at multiples of LEAF
             pad = "    " * depth
             if high - low <= LEAF:
-                leaf = list(values[low:high]) + [values[high - 1]] * (LEAF - (high - low))
-                lines.append(f"{pad}return _leaf({', '.join(f'wp.float64({float(v)!r})' for v in leaf)})[k - {low}]")
+                leaf = [float(v) for v in values[low:high]] + [float(values[high - 1])] * (LEAF - (high - low))
+                namespace[f"_leaf_{low}"] = wp.constant(vector(*leaf))
+                lines.append(f"{pad}return _leaf_{low}[k - {low}]")
                 return
-            middle = (low + high) // 2
+            middle = low + LEAF * max(1, ((high - low + LEAF - 1) // LEAF) // 2)
             lines.append(f"{pad}if k < {middle}:")
             branch(low, middle, depth + 1)
             lines.append(f"{pad}else:")
             branch(middle, high, depth + 1)
         branch(0, len(values), 1)
-        path = os.path.join(JF._GEN_DIR, f"astronomix_table_{len(_TABLES)}_{os.getpid()}.py")
         with open(path, "w") as handle:
             handle.write("\n".join(lines) + "\n")
-        namespace = {"wp": wp, "_leaf": wp.types.vector(length=LEAF, dtype=wp.float64), "__name__": f"astronomix_table_{len(_TABLES)}", "__file__": path}
         exec(compile("\n".join(lines) + "\n", path, "exec"), namespace)   # co_filename == path: Warp reads the source back
         _TABLES[key] = (name, namespace[name])
         return name
