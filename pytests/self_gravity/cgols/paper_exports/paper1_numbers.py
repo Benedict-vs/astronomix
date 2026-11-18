@@ -442,8 +442,8 @@ def figures():
          "Mass, momentum and energy flux through spherical shells and bicones, model A 128^3-2048^3",
          ["A-128", "A-256", "A-512", "A-1024", "A-2048"]),
         ("outflow_per_R_A_C", FIGURES / "comparisons" / "outflow_per_R_A_C.png", "cgols_outflow_per_radius.py",
-         "Net mass flux through |z| = 1 and 5 kpc per cylindrical radius bin (R < 0.5, 0.5-1, 1-2, > 2 kpc), "
-         "(15, 40] and (50, 75] Myr, models A (256-2048) and C (256-1024, N = 16 and 1000)",
+         ("Net mass flux through |z| = 1 and 5 kpc per cylindrical radius bin (R < 0.5, 0.5-1, 1-2, > 2 kpc), "
+          "(15, 40] and (50, 75] Myr, models A (256-2048) and C (256-1024, N = 16 and 1000)"),
          ["A-256", "A-512", "A-1024", "A-2048", "C-256", "C-512", "C-1024", "C-1024 (N = 1000)"]),
         ("cluster_number_512", FIGURES / "comparisons" / "model_c_cluster_number_scaling_512.png",
          "cgols_cluster_number_scaling.py", "Outflow against cluster number N at 512^3 (N = 1-128, smooth limit)",
