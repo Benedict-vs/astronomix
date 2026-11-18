@@ -150,8 +150,82 @@ def _extend_translator(JF):
                     out.append(_fold(e, "add", terms))
         return (out_shape, out)
 
+    # Look-ups with a run-time index (an interpolation table). The generated code is straight-line and scalar, so an array
+    # cannot be indexed in it; a table of constants becomes a Warp function instead, a binary decision tree over the flat
+    # index with eight values per leaf. A look-up then costs about log2(size) comparisons, whatever the size of the table.
+    LEAF = 8
+
+    def _table_function(values):
+        """The Warp function ``name(k: int)`` that returns ``values[k]`` (``k`` clamped into the table); cached by content."""
+        import os
+        import warp as wp
+        key = np.asarray(values, dtype=np.float64).tobytes()
+        if key in _TABLES:
+            return _TABLES[key][0]
+        name = f"_astronomix_table_{len(_TABLES)}"
+        lines = ["@wp.func", f"def {name}(k: int):", f"    k = wp.clamp(k, 0, {len(values) - 1})"]
+
+        def branch(low, high, depth):
+            pad = "    " * depth
+            if high - low <= LEAF:
+                leaf = list(values[low:high]) + [values[high - 1]] * (LEAF - (high - low))
+                lines.append(f"{pad}return _leaf({', '.join(f'wp.float64({float(v)!r})' for v in leaf)})[k - {low}]")
+                return
+            middle = (low + high) // 2
+            lines.append(f"{pad}if k < {middle}:")
+            branch(low, middle, depth + 1)
+            lines.append(f"{pad}else:")
+            branch(middle, high, depth + 1)
+        branch(0, len(values), 1)
+        path = os.path.join(JF._GEN_DIR, f"astronomix_table_{len(_TABLES)}_{os.getpid()}.py")
+        with open(path, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+        namespace = {"wp": wp, "_leaf": wp.types.vector(length=LEAF, dtype=wp.float64), "__name__": f"astronomix_table_{len(_TABLES)}", "__file__": path}
+        exec(compile("\n".join(lines) + "\n", path, "exec"), namespace)   # co_filename == path: Warp reads the source back
+        _TABLES[key] = (name, namespace[name])
+        return name
+
+    def _h_gather_at_run_time(e, operand, index, p):
+        """``table[i, j, ...]`` for a table of constants and indices computed in the kernel: one element per index tuple."""
+        if not all(JF._is_num(c) for c in operand.reshape(-1)):
+            raise JF.UnsupportedRHS("gather", "a run-time index needs a table of constants")
+        dn = p["dimension_numbers"]; nd = operand.ndim
+        point = (tuple(dn.offset_dims) == () and tuple(sorted(dn.collapsed_slice_dims)) == tuple(range(nd))
+                 and tuple(dn.start_index_map) == tuple(range(nd)) and all(int(size) == 1 for size in p["slice_sizes"])
+                 and not tuple(getattr(dn, "operand_batching_dims", ())))
+        index = np.array(index[1], dtype=object).reshape(index[0])
+        if not point or index.shape[-1] != nd:
+            raise JF.UnsupportedRHS("gather", "with a run-time index only single elements, table[i, j, ...], are supported")
+        return (tuple(index.shape[:-1]), [_element(e, operand, row) for row in index.reshape(-1, nd)])
+
+    def _element(e, operand, index):
+        """The source of ``operand[index]``, a table of constants at one index tuple computed in the kernel."""
+        values = [float(v) for v in operand.reshape(-1)]
+        if all(v == values[0] for v in values):   # e.g. the zero tangent of a constant table
+            return values[0]
+        strides = [int(np.prod(operand.shape[axis + 1:])) for axis in range(operand.ndim)]
+        # the indices are taken to be in range, as JAX promises for them (the table function clamps the flat index)
+        flat = _fold(e, "add", [e._scalar_binop("mul", index[axis], float(strides[axis])) for axis in range(operand.ndim)])
+        if JF._is_num(flat):
+            return values[int(flat)]
+        return e.emit(f"{_table_function(values)}(int({e._src(flat)}))")
+
+    def _h_dynamic_slice(e, iv, p):
+        """``table[i]`` / ``table[i, j]`` with scalar indices: JAX lowers these to a ``dynamic_slice`` of size one."""
+        operand = e._as_obj_array(iv[0]); starts = [value[1][0] for value in iv[1:]]; sizes = [int(size) for size in p["slice_sizes"]]
+        if all(JF._is_num(start) for start in starts):   # constant start: an ordinary slice (JAX clamps it into the array)
+            window = tuple(slice(min(max(int(start), 0), dim - size), min(max(int(start), 0), dim - size) + size)
+                           for start, size, dim in zip(starts, sizes, operand.shape))
+            return e._from_obj_array(operand[window])
+        if not all(JF._is_num(c) for c in operand.reshape(-1)) or any(size != 1 for size in sizes):
+            raise JF.UnsupportedRHS("dynamic_slice", "a run-time index needs a table of constants and single elements")
+        return ((1,) * operand.ndim, [_element(e, operand, starts)])
+
     def _h_gather(e, iv, p):
-        operand = e._as_obj_array(iv[0]); idx = _num_arr(iv[1]).astype(np.int64)
+        operand = e._as_obj_array(iv[0])
+        if not all(JF._is_num(c) for c in iv[1][1]):
+            return _h_gather_at_run_time(e, operand, iv[1], p)
+        idx = _num_arr(iv[1]).astype(np.int64)
         q = dict(p); fill = p.get("fill_value", None)
         if "fill_value" in q: q["fill_value"] = -1
         grid = jnp.arange(operand.size, dtype=jnp.int32).reshape(operand.shape)
@@ -194,7 +268,17 @@ def _extend_translator(JF):
         "reshape": _h_reshape, "copy": lambda e, iv, p: iv[0], "copy_p": lambda e, iv, p: iv[0], "stop_gradient": lambda e, iv, p: iv[0],
         "exp2": un(lambda c: 2.0 ** c, "wp.pow(%(s)s(2.0), %(a)s)"), "square": un(lambda c: c * c, "(%(a)s * %(a)s)"),
         "rsqrt": un(lambda c: c ** -0.5, "(%(s)s(1.0) / wp.sqrt(%(a)s))"), "log1p": un(np.log1p, "wp.log(%(s)s(1.0) + %(a)s)"), "expm1": un(np.expm1, "(wp.exp(%(a)s) - %(s)s(1.0))"),
+        "floor": un(lambda c: float(np.floor(c)), "wp.floor(%(a)s)"),   # the index of a table look-up
+        "dynamic_slice": _h_dynamic_slice,
     })
+
+    # the generated field and Jacobian call the table functions by name: hand them to the namespace they are compiled in
+    emit_func_orig = JF._emit_func
+
+    def _emit_func(base_name, body_lines, return_expr, sig, namespace):
+        namespace.update({name: function for name, function in _TABLES.values()})
+        return emit_func_orig(base_name, body_lines, return_expr, sig, namespace)
+    JF._emit_func = _emit_func
 
     def _walk_with_consts(emitter, jaxpr, invals, consts=()):
         env = {}
@@ -239,17 +323,22 @@ def _extend_translator(JF):
 # Kernel: adaptive Rosenbrock23 per cell with a per-cell step length (gradsolve's scheme, constants and controller)
 # ---------------------------------------------------------------------------------------------------------------------
 _CACHE = {}
+_TABLES = {}   # look-up tables of the generated code: content -> (name, Warp function), see ``_table_function``
 
 
-def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_steps=2048, cache_key=None):
+def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_steps=2048, cache_key=None,
+                            first_step_fraction=0.01):
     """Return ``fn(y0[n, dim], dt[n]) -> y1[n, dim]`` (float64), a JAX primitive running one Warp thread per cell.
 
     ``vector_field(t, state, args)`` is the diffrax-style right-hand side with CONCRETE closed-over parameters (it is
     traced once here, at build time). A cell whose ``max_steps`` are exhausted returns its last accepted state, like
-    diffrax with ``throw=False``.
+    diffrax with ``throw=False``. ``first_step_fraction`` is the first trial step of every cell as a fraction of its
+    step length: the controller grows a step by at most a factor of five, so with the default of 0.01 a cell that
+    hardly changes still takes four steps; with 1 it takes the whole step at once when the error estimate allows it,
+    and is otherwise cut back as after any rejected step.
     """
     key = cache_key if cache_key is not None else id(vector_field)
-    key = (key, int(dim), float(rtol), float(atol), int(max_steps))
+    key = (key, int(dim), float(rtol), float(atol), int(max_steps), float(first_step_fraction))
     if key in _CACHE:
         return _CACHE[key]
     import warp as wp
@@ -266,7 +355,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     jac, _, matDD, _ = JF.jaxpr_to_warp_jacobian(f_jax, D, 1, wp_scalar=wp.float64)
     dcoef = float(GR._D_COEF); e32 = float(GR._E32)
     SAFETY, ERR_FLOOR, FAC_MIN, FAC_MAX, ORDER_EXP = float(GR.SAFETY), float(GR.ERR_FLOOR), float(GR.FAC_MIN), float(GR.FAC_MAX), float(GR.ORDER_EXP)
-    RTOL, ATOL, MAXS = float(rtol), float(atol), int(max_steps)
+    RTOL, ATOL, MAXS, FIRST = float(rtol), float(atol), int(max_steps), float(first_step_fraction)
 
     @wp.func
     def _gauss_solve(A: matDD, b: vecD):
@@ -301,7 +390,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     @wp.kernel
     def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), y_out: wp.array(dtype=vecD)):
         jt = wp.tid()
-        t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 / wp.float64(100.0)
+        t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
         for _ in range(MAXS):
             if t >= t1:

@@ -232,6 +232,63 @@ def test_carbox_like_network_matches_kvaerno5():
 
 
 # ---------------------------------------------------------------------------
+# 2b. A table looked up at an index computed in the kernel
+# ---------------------------------------------------------------------------
+
+TABLE_NODES = np.linspace(1.0, 5.0, 33)  # log10 of the temperature
+# log10 of a decay rate on five densities and the temperature nodes, with structure between the nodes
+TABLE = (
+    -2.0
+    + 1.5 * np.sin(1.7 * TABLE_NODES)[None, :]
+    + 0.2 * TABLE_NODES[None, :]
+    + 0.3 * np.linspace(-1.0, 1.0, 5)[:, None] * np.cos(TABLE_NODES)[None, :]
+)
+
+
+def _tabulated_decay(indexing):
+    """dT/dt = -rate(n, T) T with the rate interpolated in a table, as the cooling tables of the chemistry are."""
+    nodes, table = jnp.asarray(TABLE_NODES), jnp.asarray(TABLE)
+    spacing = TABLE_NODES[1] - TABLE_NODES[0]
+
+    def field(time, state, args):
+        density, temperature = state[0], jnp.clip(state[1], 10.0, 1.0e5)
+        x = jnp.log10(temperature)
+        j = jnp.clip(jnp.floor((x - nodes[0]) / spacing).astype(int), 0, nodes.shape[0] - 2)
+        i = jnp.clip(jnp.floor(2.0 * jnp.log10(density) + 2.0).astype(int), 0, table.shape[0] - 1)
+        if indexing == "scalars":  # table[i, j]: a dynamic_slice in the jaxpr
+            low, high, node = table[i, j], table[i, j + 1], nodes[j]
+        else:  # index arrays: a gather
+            pair = table[jnp.stack([i, i]), jnp.stack([j, j + 1])]
+            low, high, node = pair[0], pair[1], nodes[jnp.stack([j])][0]
+        rate = 10.0 ** (low + (x - node) / spacing * (high - low))
+        return jnp.stack([0.0 * density, -rate * state[1]])
+
+    return field
+
+
+@pytest.mark.parametrize("indexing", ["scalars", "arrays"])
+def test_table_lookup_at_a_run_time_index(indexing):
+    # The generated code is straight-line and scalar: a table of constants indexed in the kernel becomes a Warp
+    # function (a decision tree over the flat index). Without it the tabulated metal cooling of a KROME network
+    # could not be part of the kernel.
+    cells = 40
+    generator = np.random.default_rng(3)
+    initial = np.stack([10.0 ** generator.uniform(-1.0, 1.0, cells), 10.0 ** generator.uniform(2.0, 4.8, cells)], axis=1)
+    field = _tabulated_decay(indexing)
+    rate = -np.asarray(jax.vmap(lambda state: field(0.0, state, None)[1])(jnp.asarray(initial))) / initial[:, 1]
+    steps = jnp.asarray(1.5 / rate)  # the temperature falls by a factor of a few, across several nodes of the table
+    solver = build_fused_core_solver(field, 2, rtol=RTOL, atol=ATOL, max_steps=4096, cache_key=f"pytest-table-{indexing}")
+    result = np.asarray(solver(jnp.asarray(initial), steps))
+    reference = _reference(_tabulated_decay("scalars"), jnp.asarray(initial), steps)
+
+    assert np.all(np.isfinite(result))
+    # the temperatures start between 100 K and 6e4 K; where the rate rises on the way down they decay to nothing
+    np.testing.assert_allclose(result, reference, rtol=1.0e-4, atol=1.0e-3)
+    crossed = np.log10(initial[:, 1] / np.maximum(reference[:, 1], 10.0)) / (TABLE_NODES[1] - TABLE_NODES[0])
+    assert np.median(crossed) > 2.0  # the solve crosses table intervals: the look-up is exercised, not one constant
+
+
+# ---------------------------------------------------------------------------
 # 3. update_chemistry on a carbox network: the kernel against the vmapped Kvaerno5
 # ---------------------------------------------------------------------------
 
