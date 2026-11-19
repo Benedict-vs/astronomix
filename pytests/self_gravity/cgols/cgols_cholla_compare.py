@@ -2,8 +2,9 @@
 Our emission pipeline on a public CGOLS (Cholla) snapshot, side by side with our own checkpoint.
 
 TobiBu/asgard-papers issue #1: our A-series L_X lies below CGOLS I's values (1.9e40 erg/s for A-2048 at 60 Myr)
-under every reading of their recipe, so the offset should be in the simulated gas. This script runs the
-unchanged cgols_emission projector on one state of either code and adds what locates the difference:
+under every reading of their recipe. Running the same pipeline on their state tells whether the offset is in the
+simulated gas or in how the published number was computed. This script runs the unchanged cgols_emission
+projector on one state of either code and adds what locates the difference:
 
 * the cgols_emission cache (box L_X, edge-on maps, minor-axis profiles) in two variants per pass: the default
   0.3-2 keV energy products (CGOLS recipe X1, AtomDB X2) and the 0.3-1 keV photons after TBabs absorption by
@@ -13,6 +14,10 @@ unchanged cgols_emission projector on one state of either code and adds what loc
 * data/studies/cholla_compare<tag>.npz: (log n, log T) histograms weighted by the CGOLS-recipe X-ray
   emissivity and by mass, and per z cell the emissivity-weighted sums of log n and log T of the 2-15 MK gas
   (their means against height).
+
+The plot mode also scans the lower edge of the CGOLS-recipe temperature window (Eq. 17 with (3/2) k_B T in
+0.3-2 keV puts it at 2.32 MK): from the mass histogram, the box L_X is rescaled by
+sum(M n Lambda_A4(T)) over the bins inside each window, normalised to the full calculation at the default window.
 
 Sources:
   --h5 FILE           one Cholla snapshot (README of the CGOLS data release, doi:10.13139/OLCF/3366667):
@@ -56,7 +61,11 @@ matplotlib.use("Agg")
 import cgols_emission as ce
 import matplotlib.pyplot as plt
 
+from astronomix._modules._cooling._cooling import cooling_rate_cie_parabolic
+from astronomix._modules._cooling.cooling_options import CIEParabolicParams
 from astronomix.analysis_helpers.emission import (
+    CGOLS_XRAY_TEMPERATURE_MAX_K,
+    CGOLS_XRAY_TEMPERATURE_MIN_K,
     XRAY_EMISSIVITY_UNIT,
     XRAY_TABLE_PATHS,
     EmissionMapSettings,
@@ -74,6 +83,10 @@ LOG_N_EDGES = np.linspace(-6.0, 1.0, 141)
 LOG_T_EDGES = np.linspace(4.0, 9.0, 201)
 #: The gas Tobias asked about: 2-15 MK.
 HOT_RANGE_K = (2e6, 1.5e7)
+#: Legend names of the tags used for issue #1.
+READABLE = {"_CGOLSI": "CGOLS I (public, 2048$^3$)", "_A2048c": "our A-2048"}
+#: Lower window edges [K] for the scan of the CGOLS-recipe temperature window.
+LOWER_EDGES_K = np.geomspace(1.0e6, 4.0e6, 31)
 
 CONVERSIONS = emission_conversions(ce.CODE_UNITS)
 #: sr -> arcmin^2, for the profiles in photons per arcmin^2.
@@ -265,11 +278,30 @@ def _height_means(phase, bin_kpc=0.25):
     return np.array(centers), np.array(log_n), np.array(log_t)
 
 
+def lower_edge_scan(phase, box_luminosity, upper_k=CGOLS_XRAY_TEMPERATURE_MAX_K, lower_edges_k=LOWER_EDGES_K):
+    """Box L_X of the CGOLS recipe for each lower window edge (upper edge fixed), from the mass histogram.
+
+    Each bin contributes M n Lambda_A4(T) at its centre (n^2 Lambda V = (rho V) n Lambda / (mu m_p)); the sum is
+    normalised so the default window (2.32-15.5 MK) gives ``box_luminosity``, the full cell-by-cell result.
+    """
+    density = 10.0 ** (0.5 * (LOG_N_EDGES[1:] + LOG_N_EDGES[:-1]))
+    temperature = 10.0 ** (0.5 * (LOG_T_EDGES[1:] + LOG_T_EDGES[:-1]))
+    curve = np.asarray(cooling_rate_cie_parabolic(jnp.asarray(temperature), CIEParabolicParams(log10_lambda_cgs_to_code=0.0)))
+    per_t = (phase["hist_mass"] * density[:, None]).sum(axis=0) * curve
+
+    def window_sum(low, high):
+        return per_t[(temperature >= low) & (temperature <= high)].sum()
+
+    scale = box_luminosity / window_sum(CGOLS_XRAY_TEMPERATURE_MIN_K, CGOLS_XRAY_TEMPERATURE_MAX_K)
+    return np.array([scale * window_sum(low, upper_k) for low in lower_edges_k])
+
+
 def plot():
     """xray_cgols_vs_A: S_X(z) against Strickland, the emission-weighted n-T distributions, n and T against |z|."""
-    labels = {ce.ARGS.tag: ce.ARGS.tag.lstrip("_"), OWN.against: OWN.against.lstrip("_")}
+    labels = {tag: READABLE.get(tag, tag.lstrip("_")) for tag in (ce.ARGS.tag, OWN.against)}
     states = {tag: _load(tag) for tag in labels}
-    fig, axes = plt.subplots(1, 4, figsize=(19, 4.4))
+    fig, axes = plt.subplots(1, 5, figsize=(23.5, 4.4))
+    published = ce.CGOLS_LUMINOSITIES["A-2048"]
     for (tag, (phase, record)), color in zip(states.items(), ("C3", "C0"), strict=True):
         z = record["profile_z_kpc"]
         for side, style in (("north", "-"), ("south", "--")):
@@ -278,6 +310,13 @@ def plot():
         centers, log_n, log_t = _height_means(phase)
         axes[3].plot(centers, log_n, color=color, label=f"{labels[tag]}: log n")
         axes[3].plot(centers, log_t - 7.0, color=color, ls="--", label=f"{labels[tag]}: log T - 7")
+        box = float(record["L_xray_cgols_xz"])
+        for upper, style, text in ((CGOLS_XRAY_TEMPERATURE_MAX_K, "-", "15.5 MK"), (np.inf, ":", "none")):
+            scan = lower_edge_scan(phase, box, upper_k=upper)
+            axes[4].plot(LOWER_EDGES_K / 1e6, scan, color=color, ls=style, label=f"{labels[tag]}, upper edge {text}")
+            crossing = np.interp(np.log(published), np.log(scan[::-1]), LOWER_EDGES_K[::-1])
+            print(f"{tag:10s} upper edge {text:8s}: L_X = {box:.3e} erg/s at 2.32 MK; "
+                  f"{published:.2g} erg/s needs a lower edge of {crossing / 1e6:.2f} MK")
     for side, _instrument, (z_min, z_max), scale_height, central in ce.STRICKLAND04_M82_FITS:
         fit_z = np.linspace(z_min, z_max, 100)
         axes[0].plot(fit_z, central * 1e-9 * np.exp(-fit_z / scale_height) * 3600.0, color="k", lw=2, alpha=0.5,
@@ -298,6 +337,12 @@ def plot():
     fig.colorbar(image, ax=axes[2], label="log fraction of L_X per bin")
     axes[3].set(xlabel="|z| [kpc]", ylabel="L_X-weighted mean, 2-15 MK gas", title="n and T against height")
     axes[3].legend(fontsize=7)
+    axes[4].axhline(published, color="k", lw=1, alpha=0.6, label="CGOLS I, A-2048, 60 Myr")
+    axes[4].axvline(CGOLS_XRAY_TEMPERATURE_MIN_K / 1e6, color="0.5", lw=0.8, ls="--", label="(3/2) kT = 0.3 keV")
+    axes[4].set(xscale="log", yscale="log", xlabel="lower edge of the temperature window [MK]",
+                ylabel="box L_X, CGOLS recipe [erg s$^{-1}$]", title="L_X against the window's lower edge")  # fmt: skip
+    axes[4].set_xticks([1, 1.5, 2, 3, 4], labels=["1", "1.5", "2", "3", "4"])
+    axes[4].legend(fontsize=7)
     fig.tight_layout()
     out = OWN.figure or os.path.join(ce.SCRIPT_DIR, "figures", "cgols", "comparisons", "xray_cgols_vs_A.png")
     fig.savefig(out, dpi=150)

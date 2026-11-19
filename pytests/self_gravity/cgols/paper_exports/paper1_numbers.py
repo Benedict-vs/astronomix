@@ -347,6 +347,27 @@ def numbers():
             runs=[run], data=STUDIES / f"emission_{tags[-1]}.npz",
         )  # fmt: skip
 
+    # Our pipeline on the public CGOLS I snapshot (issue #1); the release has only the 2048^3 run.
+    cgols_cache, cgols_path = emission("CGOLSI")
+    if cgols_cache is None:
+        print(f"skipped LxCGOLSsnapshot: no {cgols_path.name} (cgols_cholla_compare.py measure --h5 ... --tag _CGOLSI)")
+    else:
+        index = at_time(cgols_cache, 60.0)
+        lx_cgols = float(cgols_cache["per_snapshot__L_xray_cgols_xz"][index])
+        published = 1.9e40
+        yield "LxCGOLSsnapshot", dict(
+            value=lx_cgols, unit="erg/s", status="single_snapshot", convergence="single_snapshot",
+            description=f"Soft X-ray luminosity, CGOLS I recipe as for LxAsixtyMyr, from our pipeline (unchanged) "
+                        f"on the public CGOLS I 2048^3 state at "
+                        f"{float(cgols_cache['per_snapshot__time_myr'][index]):.3f} Myr (Schneider 2026, "
+                        f"doi:10.13139/OLCF/3366667, file 'CGOLS I/60.h5', grid 2048 x 2048 x 4096), whole box. "
+                        f"CGOLS I publish {published:.2g} erg/s for this state ({published / lx_cgols:.2f}x); our "
+                        f"A-2048 at 60 Myr gives {lx['A2048']:.3g} erg/s. cgols_cholla_compare.py plot: "
+                        f"{published:.2g} erg/s needs a window lower edge of about 1.6 MK instead of 2.32 MK "
+                        f"((3/2) kT = 0.3 keV), on both states.",
+            runs=["CGOLS I 2048^3 (public)"], data=cgols_path, script=CGOLS / "cgols_cholla_compare.py",
+        )  # fmt: skip
+
     # Minor-axis soft X-ray profile against Strickland et al. (2004), 0.3-1.0 keV absorbed photons.
     photon = {tag: emission(tag, SX_SUFFIX) for tag in ("A512", "A1024", "A2048", "C1024")}
     missing = [tag for tag, (cache, _) in photon.items() if cache is None]
@@ -465,6 +486,12 @@ def figures():
         ("cluster_number_512", FIGURES / "comparisons" / "model_c_cluster_number_scaling_512.png",
          "cgols_cluster_number_scaling.py", "Outflow against cluster number N at 512^3 (N = 1-128, smooth limit)",
          ["C-512 N = 1-128"]),
+        ("xray_cgols_vs_A", FIGURES / "comparisons" / "xray_cgols_vs_A.png", "cgols_cholla_compare.py",
+         ("Public CGOLS I 2048^3 state against our A-2048, both at 60 Myr, same emission pipeline: minor-axis "
+          "0.3-1 keV absorbed photon profile against Strickland+04, L_X-weighted n-T distributions (CGOLS recipe), "
+          "L_X-weighted n and T of the 2-15 MK gas against |z|, and box L_X against the lower edge of the "
+          "recipe's temperature window with CGOLS I's published 1.9e40 erg/s"),
+         ["CGOLS I 2048^3 (public)", "A-2048"]),
         ("fvfd_summary", FIGURES / "comparisons" / "fvfd_summary_significance.png", "cgols_fvfd_synthesis.py",
          "FD - FV differences for all metrics, 128^3-2048^3, in units of their combined scatter",
          ["FD/FV 128-2048"]),
