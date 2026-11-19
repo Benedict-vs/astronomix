@@ -274,7 +274,9 @@ WINDOW_MARGIN = 0.2  # Myr, as cgols_seed_scatter.window
 
 
 def window(t, start, end):
-    return (t >= start - WINDOW_MARGIN) & (t <= end + WINDOW_MARGIN)
+    """Frames in (start, end] Myr, the paper's window rule; the margin keeps a late-written seed-run frame
+    (up to ~0.07 Myr past its mark) at its nominal time."""
+    return (t > start + WINDOW_MARGIN) & (t <= end + WINDOW_MARGIN)
 
 
 def block_se(t, y, start, end, block=5.0):
@@ -291,7 +293,7 @@ def block_se(t, y, start, end, block=5.0):
     edges = np.arange(start, end + 1e-6, block)
     means = []
     for a, b in itertools.pairwise(edges):
-        sel = inside & (t >= a - WINDOW_MARGIN) & ((t < b - WINDOW_MARGIN) if b < end - 1e-6 else (t <= b + WINDOW_MARGIN))
+        sel = inside & (t > a + WINDOW_MARGIN) & (t <= b + WINDOW_MARGIN)
         if sel.any():
             means.append(np.mean(resid[sel]))
     return float(np.std(means, ddof=1) / np.sqrt(len(means))) if len(means) >= 2 else np.nan

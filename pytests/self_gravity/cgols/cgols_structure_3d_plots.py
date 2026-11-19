@@ -119,9 +119,9 @@ def series(member, name):
 
 
 def window_records(member, window):
-    """Records of the even checkpoints in [t0, t1) if all of them exist (2.5 Myr cadence; FV-512: every 4th)."""
+    """Records of the even checkpoints in (t0, t1] if all of them exist (2.5 Myr cadence; FV-512: every 4th)."""
     recs = member["recs"]
-    sel = [s for s in sorted(recs) if window[0] - 0.01 <= recs[s]["time_myr"] < window[1] - 0.01]
+    sel = [s for s in sorted(recs) if window[0] + 0.01 < recs[s]["time_myr"] <= window[1] + 0.01]
     if not sel:
         return None
     t = [recs[s]["time_myr"] for s in sel]

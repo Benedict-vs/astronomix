@@ -75,7 +75,7 @@ def metrics(run):
         return None
     t, mdot = data
     z = (np.arange(mdot.shape[1]) + 0.5) * BOX_Z / mdot.shape[1] - BOX_Z / 2
-    high = (t >= 15) & (t <= 40)
+    high = (t > 15 + 1e-3) & (t <= 40 + 1e-3)  # (15, 40]
     out = {}
     for H in (1.0, 5.0, 8.0):
         rate = mdot[:, np.argmin(np.abs(z - H))] - mdot[:, np.argmin(np.abs(z + H))]

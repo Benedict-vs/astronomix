@@ -139,8 +139,8 @@ def main(runs):
         for ax, height in zip(axes[:3], (1.0, 5.0, 8.0)):
             rate = outflow_through(frames, height)
             ax.plot(t, rate, label=label, **style)
-            high = (t >= 15) & (t <= 40)
-            late = t >= 45
+            high = (t > 15 + 1e-3) & (t <= 40 + 1e-3)  # (15, 40]
+            late = t > 45 + 1e-3  # (45, 75]
             cumulative = np.concatenate(
                 [[0.0], np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(t) * 1e6)]
             )

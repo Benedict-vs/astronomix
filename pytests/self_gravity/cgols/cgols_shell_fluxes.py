@@ -398,7 +398,7 @@ def solid_angle_bins():
 
 
 def window_mean(rec, window, fn):
-    steps = [s for s in sorted(rec) if window[0] <= rec[s]["time_myr"] <= window[1]]
+    steps = [s for s in sorted(rec) if window[0] + 1e-3 < rec[s]["time_myr"] <= window[1] + 1e-3]  # (t0, t1]
     return np.mean([fn(rec[s]) for s in steps], axis=0)
 
 
