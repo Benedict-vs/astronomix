@@ -1171,6 +1171,11 @@ if KI02 and "CGOLS_IC_TAG" not in os.environ:
 #   CGOLS_CHEM_CR_RATE     cosmic-ray ionisation rate [1/s] (3e-17)
 #   CGOLS_CHEM_DRAINE      radiation field in units of the Draine field (1),
 #                          the same in every cell, attenuated by dust
+#   CGOLS_CHEM_FREE_FREE   bremsstrahlung of the ions (KROME's -cooling=FF),
+#                          default 1: the main cooling of the 1e7-1e8 K wind
+#   CGOLS_CHEM_FIRST_STEP  first trial step of the kernel as a fraction of the
+#                          hydro step, default 1 (quiet halo cells, nine in
+#                          ten, then take one solver step instead of four)
 #   CGOLS_CHEM_COOLING_COURANT  largest fractional temperature change per
 #                          reaction; 0 (default) = no limit
 #   CGOLS_CHEM_DISK_T_OVER_MU   thermal support of the disk IC as T / mu [K].
@@ -1187,6 +1192,8 @@ CHEM_ATOL = float(os.environ.get("CGOLS_CHEM_ATOL", "1e-12"))
 CHEM_STEP_MYR = float(os.environ.get("CGOLS_CHEM_STEP_MYR", "0"))
 CHEM_CR_RATE = float(os.environ.get("CGOLS_CHEM_CR_RATE", "3e-17"))
 CHEM_DRAINE = float(os.environ.get("CGOLS_CHEM_DRAINE", "1"))
+CHEM_FREE_FREE = os.environ.get("CGOLS_CHEM_FREE_FREE", "1") == "1"
+CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
 if CHEMISTRY:
@@ -1588,6 +1595,8 @@ def chemistry_setup():
             draine_field=CHEM_DRAINE,
             step_target=(CHEM_STEP_MYR * u.Myr).to(code_units.code_time).value,
             cooling_courant=CHEM_COOLING_COURANT,
+            free_free=CHEM_FREE_FREE,
+            first_step_fraction=CHEM_FIRST_STEP,
         )
     return _CHEMISTRY_SETUP
 
@@ -1599,7 +1608,7 @@ def chemistry_equilibrium_table():
     setup = chemistry_setup()
     return cgols_chemistry.equilibrium_table(
         setup,
-        cache_path=_data_initial(f"cgols_chem_equilibrium_{setup.key[:12]}.npz"),
+        cache_path=_data_initial(f"cgols_chem_equilibrium_{setup.equilibrium_key[:12]}.npz"),
         verbose=rprint,
     )
 
@@ -2424,6 +2433,7 @@ def build_config():
             + (f"reacting every {CHEM_STEP_MYR:g} Myr" if CHEM_STEP_MYR > 0 else "reacting every hydro step")
             + f", Draine field x {CHEM_DRAINE:g}, cosmic-ray rate {CHEM_CR_RATE:g} /s "
             f"({len(_setup.params.network.cosmic_ray_terms)} cosmic-ray reactions in the file), "
+            f"bremsstrahlung {'on' if CHEM_FREE_FREE else 'off'}, "
             f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
         )
     elif COOLING:

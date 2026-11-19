@@ -60,13 +60,17 @@ _START = {
 
 #: The grid of the equilibrium table: log10 of the temperature [K] and of the
 #: hydrogen nuclei [cm^-3]. A CGOLS box spans 10 K to a few 1e8 K and 1e-6 to a
-#: few 1e2 cm^-3; outside the grid the edge value is used.
-TABLE_LOG_TEMPERATURE = np.linspace(1.0, 9.0, 81)
+#: few 1e2 cm^-3; outside the grid the edge value is used. The temperatures are
+#: offset by 0.004 dex from the round values: reactions of a KROME network
+#: switch on and off at temperature limits such as 100 K, 1e4 K and 1e6 K, and
+#: at a node that sits exactly on a limit rounding would decide which side the
+#: equilibrium is computed on (seen for Si+ / Si++ at 1e6 K).
+TABLE_LOG_TEMPERATURE = np.linspace(1.004, 9.004, 81)
 TABLE_LOG_HYDROGEN = np.linspace(-7.0, 4.0, 23)
 
 #: Bump when the set-up below changes what the equilibrium table holds, so that
 #: a cached table is not reused.
-_TABLE_VERSION = 1
+_TABLE_VERSION = 2
 
 PROTON_MASS_CGS = 1.67262192e-24
 
@@ -82,7 +86,11 @@ class ChemistrySetup(NamedTuple):
             integration starts from, shape ``[species]``.
         mass_per_hydrogen: The mass of the gas per hydrogen nucleus, in proton
             masses (about 1.35).
-        key: A hash of everything that defines the network and its parameters.
+        key: A hash of everything that defines the network and its parameters
+            (the per-cell kernel is cached under it).
+        equilibrium_key: A hash of what the ionisation equilibrium depends on:
+            the network, the abundances, the radiation field and the cosmic
+            rays, not the cooling.
     """
 
     config: object
@@ -91,6 +99,7 @@ class ChemistrySetup(NamedTuple):
     start_abundances: np.ndarray
     mass_per_hydrogen: float
     key: str
+    equilibrium_key: str
 
 
 def build_chemistry(
@@ -111,6 +120,8 @@ def build_chemistry(
     cooling_courant=0.0,
     floor_temperature=10.0,
     reaction_chunk_size=0,
+    free_free=True,
+    first_step_fraction=1.0,
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -139,6 +150,16 @@ def build_chemistry(
             reaction; 0 for no limit.
         floor_temperature: The temperature floor of the reaction [K].
         reaction_chunk_size: Cells per chunk of the vmapped solver (memory).
+        free_free: Bremsstrahlung of the ions (KROME's ``-cooling=FF``). The
+            wind is 1e7 to 1e8 K, where it is the main cooling.
+        first_step_fraction: The first trial step of the kernel in every cell,
+            as a fraction of the hydro step. 1 (default): the whole step. Nine
+            cells in ten of a CGOLS box are halo gas that hardly changes in a
+            step and then take one solver step, not the four that the kernel's
+            own default of 0.01 costs every cell (1.6 against 4.4 steps per cell
+            on frames of the 256 run, at the same accuracy against a tight
+            tolerance); a cell that needs short steps is cut back by a factor
+            of up to five per rejected step.
 
     Returns:
         A :class:`ChemistrySetup`.
@@ -177,6 +198,7 @@ def build_chemistry(
             krome_metal_table=True,
             krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10, scale=draine_field),
             krome_shield_habing_dust=True,
+            krome_free_free=free_free,
             # all particles of the gas are species of the network
             temperature_from_species=True,
         )
@@ -205,13 +227,18 @@ def build_chemistry(
 
     with open(network_path, "rb") as file:
         network_hash = hashlib.sha1(file.read()).hexdigest()
+    equilibrium = (
+        network_hash, os.path.abspath(krome_data_folder), species, tuple(ABUNDANCES.items()),
+        float(cosmic_ray_rate), float(draine_field),
+    )  # fmt: skip
+    equilibrium_key = hashlib.sha1(repr(equilibrium).encode()).hexdigest()
     key = hashlib.sha1(
         repr(
-            (
-                network_hash, os.path.abspath(krome_data_folder), species, tuple(ABUNDANCES.items()),
+            equilibrium
+            + (
                 float(number_density_unit_cgs), float(temperature_unit_kelvin), float(time_unit_seconds),
-                float(adiabatic_index), float(cosmic_ray_rate), float(draine_field), float(floor_temperature),
-                float(cooling_courant),
+                float(adiabatic_index), float(floor_temperature), float(cooling_courant), bool(free_free),
+                float(first_step_fraction),
             )
         ).encode()
     ).hexdigest()  # fmt: skip
@@ -222,6 +249,7 @@ def build_chemistry(
             chemistry_params,
             adiabatic_index,
             cache_key=("cgols", key),
+            first_step_fraction=first_step_fraction,
         )
 
     return ChemistrySetup(
@@ -231,6 +259,7 @@ def build_chemistry(
         start_abundances=start_abundances,
         mass_per_hydrogen=mass_per_hydrogen,
         key=key,
+        equilibrium_key=equilibrium_key,
     )
 
 
@@ -259,7 +288,7 @@ def equilibrium_table(setup, cache_path=None, verbose=print):
     say = verbose if verbose is not None else (lambda *args, **kwargs: None)
     table_key = hashlib.sha1(
         repr(
-            (setup.key, _TABLE_VERSION, TABLE_LOG_TEMPERATURE.tolist(), TABLE_LOG_HYDROGEN.tolist())
+            (setup.equilibrium_key, _TABLE_VERSION, TABLE_LOG_TEMPERATURE.tolist(), TABLE_LOG_HYDROGEN.tolist())
         ).encode()
     ).hexdigest()
     if cache_path is not None and os.path.exists(cache_path):
@@ -277,14 +306,27 @@ def equilibrium_table(setup, cache_path=None, verbose=print):
         grid.ravel()
         for grid in np.meshgrid(10.0**TABLE_LOG_HYDROGEN, 10.0**TABLE_LOG_TEMPERATURE, indexing="ij")
     )
-    abundances = equilibrium_abundances(
-        setup.config, setup.params, grid_hydrogen, grid_temperature, setup.start_abundances
+    abundances, last_change = equilibrium_abundances(
+        setup.config, setup.params, grid_hydrogen, grid_temperature, setup.start_abundances,
+        return_last_change=True,
     )
     if not np.isfinite(abundances).all():
         raise RuntimeError(
             "chemistry: the equilibrium integration left non-finite abundances in "
             f"{int((~np.isfinite(abundances).all(axis=0)).sum())} of {abundances.shape[1]} table points"
         )
+    # Has every point settled? Thin, cold gas recombines more slowly than the
+    # hold lasts and keeps a memory of the start; a CGOLS box has none of it
+    # (its thin gas is hot), so this is reported, not refused.
+    unsettled = last_change > 0.01
+    if unsettled.any():
+        say(
+            f"[chemistry] {int(unsettled.sum())} of {last_change.size} table points still changed by more than 0.01 dex "
+            f"over the last 5.9 Gyr (largest {last_change.max():.2f} dex): all with n_H <= "
+            f"{grid_hydrogen[unsettled].max():.1e} cm^-3 and T <= {grid_temperature[unsettled].max():.1e} K"
+        )
+    else:
+        say(f"[chemistry] every table point has settled (largest change over the last 5.9 Gyr: {last_change.max():.1e} dex)")
     log_abundances = np.log10(np.maximum(abundances, 1.0e-30)).reshape(
         len(setup.species), len(TABLE_LOG_HYDROGEN), len(TABLE_LOG_TEMPERATURE)
     )
@@ -294,6 +336,7 @@ def equilibrium_table(setup, cache_path=None, verbose=print):
             cache_path,
             key=table_key,
             log_abundances=log_abundances,
+            last_change_dex=last_change.reshape(len(TABLE_LOG_HYDROGEN), len(TABLE_LOG_TEMPERATURE)),
             log_hydrogen=TABLE_LOG_HYDROGEN,
             log_temperature=TABLE_LOG_TEMPERATURE,
             species=np.asarray(setup.species),
