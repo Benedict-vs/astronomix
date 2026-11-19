@@ -322,7 +322,7 @@ def _network_file():
     return None
 
 
-def _react(use_kernel, network_csv):
+def _react(use_kernel, network_csv, order_cells=True):
     """One call of ``update_chemistry`` over a 1-D box of ``NUM_CELLS`` different cells."""
     from astronomix import (
         SimulationConfig,
@@ -371,7 +371,9 @@ def _react(use_kernel, network_csv):
             rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
             cache_key="pytest-carbox",
         )
-        chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
+        chemistry_config = chemistry_config._replace(
+            stiff_core_solver="warp", stiff_core_fn=solver, order_cells_for_kernel=order_cells
+        )
 
     config = SimulationConfig(
         dimensionality=1,
@@ -434,3 +436,32 @@ def test_update_chemistry_kernel_matches_kvaerno5():
         f"largest difference {np.max(difference[relevant]):.2e} dex"
     )
     np.testing.assert_allclose(kernel_pressure, kvaerno5_pressure, rtol=1.0e-3)
+
+
+def test_order_of_the_cells_in_the_kernel_launch_does_not_change_them():
+    """``update_chemistry`` launches the kernel with the cells ordered by gas phase
+    (``order_cells_for_kernel``, so that the threads of a GPU warp need about the
+    same number of steps) and puts them back: the same cells bit for bit."""
+    network_csv = _network_file()
+    if network_csv is None:
+        pytest.skip("carbox network file not found (set ASTRONOMIX_TEST_NETWORK_CSV)")
+
+    initial, ordered, _, ordered_pressure, _ = _react(True, network_csv, order_cells=True)
+    _, in_grid_order, _, grid_pressure, _ = _react(True, network_csv, order_cells=False)
+    assert np.max(np.abs(ordered - initial) / initial) > 1.0e-3  # the chemistry acted
+    np.testing.assert_array_equal(ordered, in_grid_order)
+    np.testing.assert_array_equal(ordered_pressure, grid_pressure)
+
+
+def test_cost_key_groups_cells_by_density_then_temperature():
+    from astronomix._modules._chemistry._chemistry import _kernel_cost_key
+
+    # two species per cell; particle densities 1e-3, 1e-3, 30, 30, 1e-3 and temperatures as below
+    species = jnp.asarray([[5e-4, 5e-4], [6e-4, 4e-4], [10.0, 20.0], [15.0, 15.0], [5e-4, 5e-4]])
+    temperature = jnp.asarray([1.0e6, 1.0e4, 100.0, 5000.0, 1.0e6])
+    step = jnp.asarray([1.0, 1.0, 1.0, 1.0, 0.0])
+    key = np.asarray(_kernel_cost_key(species, temperature, step))
+    # thin gas before dense gas, cold before hot within a density bin, a zero step last
+    assert list(np.argsort(key)) == [1, 0, 2, 3, 4]
+    assert np.isinf(key[4])
+

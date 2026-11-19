@@ -571,6 +571,33 @@ def _particle_density(species_code_units):
     )
 
 
+def _kernel_cost_key(species_per_cell, temperature_per_cell, step_per_cell):
+    """
+    A key that orders cells by gas phase, for the launch of the per-cell kernel.
+
+    How many solver steps a cell needs is set by its time scales, which go with
+    the density first (reaction and cooling times are inversely proportional to
+    it) and with the temperature second. The key is the particle density in
+    bins of a quarter dex, and within a bin the temperature: the integer part
+    is the bin, the fraction the temperature between 1 K and 1e10 K. Cells with
+    a zero step (not reacted in this call) do no work and go last.
+
+    Args:
+        species_per_cell: Species number densities [cm^-3], shape ``[cells, species]``.
+        temperature_per_cell: Temperatures [K], shape ``[cells]``.
+        step_per_cell: The step of every cell, shape ``[cells]``.
+
+    Returns:
+        The key, shape ``[cells]``; ascending order groups similar cells.
+    """
+    particles = jnp.maximum(jnp.sum(jnp.maximum(species_per_cell, 0.0), axis=1), 1e-300)
+    density_bin = jnp.floor(4.0 * jnp.log10(particles))
+    temperature_fraction = jnp.clip(
+        jnp.log10(jnp.maximum(temperature_per_cell, 1.0)) / 10.0, 0.0, 0.999
+    )
+    return jnp.where(step_per_cell > 0.0, density_bin + temperature_fraction, jnp.inf)
+
+
 def chemistry_code_temperature(
     primitive_state, registered_variables, chemistry_config, chemistry_params
 ):
@@ -834,12 +861,30 @@ def update_chemistry(
         reacted_per_cell = jnp.concatenate(
             [species_per_cell, temperature_per_cell[:, None]], axis=1
         )
+        # The threads of a GPU kernel run in groups of 32 neighbours that stay
+        # together until the slowest of them is done, so one cell of a group
+        # that needs many solver steps holds up the other 31. On a grid the
+        # neighbours are a stretch of a column, and a column through a disk
+        # puts a few slow cells next to many fast ones. Ordered by their gas
+        # phase, the cells of a group need about the same number of steps. The
+        # result of a cell does not depend on where it sits in the launch.
+        order = None
+        if chemistry_config.order_cells_for_kernel:
+            order = jnp.argsort(
+                _kernel_cost_key(species_per_cell, temperature_per_cell, step_cells)
+            )
+            reacted_per_cell = reacted_per_cell[order]
+            step_cells = step_cells[order]
         for _ in range(splits):
             proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits)
             # like diffrax with throw=False: a cell that returned a non-finite
             # state keeps its pre-step state
             finite = jnp.all(jnp.isfinite(proposed), axis=1)
             reacted_per_cell = jnp.where(finite[:, None], proposed, reacted_per_cell)
+        if order is not None:
+            # back to the order of the grid
+            position = jnp.zeros_like(order).at[order].set(jnp.arange(number_of_cells, dtype=order.dtype))
+            reacted_per_cell = reacted_per_cell[position]
     elif gated:
         splits = max(int(chemistry_config.chemistry_call_splits), 1)
         step_per_cell = time_step_seconds_per_cell.reshape(number_of_cells) / splits

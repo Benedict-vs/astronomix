@@ -182,6 +182,11 @@ class ChemistryConfig(NamedTuple):
     # build_fused_core_solver) and carried here as a static callable.
     stiff_core_solver: str = "diffrax"
     stiff_core_fn: Any = None
+    # With the kernel in every cell: launch the cells ordered by gas phase (particle density, then temperature)
+    # instead of in grid order. The 32 threads of a GPU warp stay together until the slowest is done, so a few slow
+    # cells among fast neighbours (a disk in a column of halo cells) hold the others up; ordered, a warp holds cells
+    # that need about the same number of steps. The results are the same bit for bit; the cost is one sort per call.
+    order_cells_for_kernel: bool = True
     # --- composition of the species (``build_chemistry_from_network_file`` fills these from the species names) ---
     # The elements of the network, the atoms of every element in every species (one row per element, one column per
     # species) and the charge of every species. Static, because the finite-difference transport of the species

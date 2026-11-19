@@ -466,6 +466,12 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
 
 - The same in one call: `chemistry_config = attach_per_cell_kernel(chemistry_config,
   chemistry_params, gamma)` (`astronomix.setup_helpers`).
+- The cells are launched ordered by gas phase (particle density in quarter-dex bins, then
+  temperature), not in grid order (`order_cells_for_kernel`, on by default). The 32 threads of
+  a GPU warp stay together until the slowest is done, so a few slow cells among fast neighbours
+  hold the others up: in a galaxy box every column through the disk does that. The results are
+  the same bit for bit. On the 256 x 256 x 512 galaxy run below, with a cold disk under a hot
+  halo, a step took 21 s with the ordering against 45 to 60 s without.
 - Without an emulator, `update_chemistry` then advances **every cell** with the kernel. With
   the emulator and `stiff_core_capacity > 0`, the kernel solves the gathered dense cells and
   the emulator the rest. A cell that returns a non-finite state keeps its previous one, as
