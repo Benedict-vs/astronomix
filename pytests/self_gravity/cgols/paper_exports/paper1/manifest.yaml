@@ -1,6 +1,6 @@
 paper: paper1
-generated: '2026-11-19T10:22:07+00:00'
-astronomix_commit: 550eb05a31383df624108cdfd75844489fb42885
+generated: '2026-11-19T10:27:24+00:00'
+astronomix_commit: 5c969317b5a46245481ba8daf67502113eacb202
 numbers:
 - key: AxisVelocityOffsetCCEightyFive
   value: -2.3929005999037134
@@ -19,7 +19,7 @@ numbers:
   - A-2048
   - FV-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
     sha256: ec483223522f0648eb5dc09e56a424e5a3085fcdadf5c3518db470d09d7085ec
@@ -37,7 +37,7 @@ numbers:
   - A-2048
   - FV-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data: null
   digits: 3
 - key: CumMassNmax
@@ -50,7 +50,7 @@ numbers:
   runs:
   - C-512 N = 128
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
     sha256: null
@@ -65,7 +65,7 @@ numbers:
   runs:
   - C-512 N = 16
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C512
     sha256: null
@@ -85,7 +85,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
     sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
@@ -102,12 +102,12 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
     sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
   digits: 3
-- key: LxCsixtyMyr
+- key: LxCsixtyMyrTenTwentyFour
   value: 1.8566310371545317e+40
   unit: erg/s
   uncertainty: null
@@ -119,7 +119,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
     sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
@@ -135,7 +135,7 @@ numbers:
   - C-1024
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
   - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
     sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
@@ -153,7 +153,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
     sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
@@ -169,7 +169,7 @@ numbers:
   runs:
   - FV-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048fv.npz
     sha256: 724c5a692547555929cde3f65356908a33d8ab07c5f9387a2149ec745cd79f7b
@@ -188,7 +188,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
     sha256: null
@@ -208,7 +208,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
     sha256: null
@@ -228,7 +228,7 @@ numbers:
   runs:
   - A-512
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A512
     sha256: null
@@ -248,12 +248,12 @@ numbers:
   runs:
   - A-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A1024
     sha256: null
   digits: 3
-- key: MdotCfiveKpc
+- key: MdotCfiveKpcTenTwentyFour
   value: 13.910719394683838
   unit: Msun/yr
   uncertainty:
@@ -261,14 +261,14 @@ numbers:
     lo: 13.910719394683838
     hi: 17.087126231193544
   status: provisional
-  convergence: converged
+  convergence: not_converged
   description: 'Mean net outflow through both |z| = 5 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
-    C-1024 (N = 16), from the frames. Provisional until C-2048. Ladder: C-256 17.1; C-512 14.6; C-1024
-    13.9 (-4.8% at the last doubling).'
+    C-1024 (N = 16), from the frames. Not converged until C-2048 closes the ladder (one-way trend). Ladder:
+    C-256 17.1; C-512 14.6; C-1024 13.9 (-4.8% at the last doubling).'
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
     sha256: null
@@ -284,7 +284,7 @@ numbers:
   runs:
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024n1000
     sha256: null
@@ -301,7 +301,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
     sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
@@ -322,7 +322,7 @@ numbers:
   - C-512 N = 64
   - C-512 N = 128
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n1
     sha256: null
@@ -335,7 +335,7 @@ numbers:
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
     sha256: null
   digits: 3
-- key: RatioMdotCtoA
+- key: RatioMdotCtoATenTwentyFour
   value: 1.9986467755880057
   unit: ''
   uncertainty: null
@@ -347,7 +347,7 @@ numbers:
   - C-1024
   - A-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
     sha256: null
@@ -368,7 +368,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
@@ -387,12 +387,12 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
   digits: 3
-- key: SXratioCfiveKpc
+- key: SXratioCfiveKpcTenTwentyFour
   value: 0.5421354956040179
   unit: ''
   uncertainty: null
@@ -405,12 +405,12 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
   digits: 3
-- key: SXratioCtwoKpc
+- key: SXratioCtwoKpcTenTwentyFour
   value: 0.4275669938869065
   unit: ''
   uncertainty: null
@@ -423,7 +423,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
@@ -441,12 +441,12 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
   digits: 3
-- key: ScaleHeightC
+- key: ScaleHeightCTenTwentyFour
   value: 1.4237277305120761
   unit: kpc
   uncertainty: null
@@ -458,7 +458,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
@@ -471,14 +471,35 @@ numbers:
     lo: 13.966064911798615
     hi: 14.609596639911743
   status: provisional
-  convergence: converged
+  convergence: not_converged
   description: 'Net outflow through the full sphere r = 5 kpc (bin [r - 0.125, r) kpc), 15-40 Myr (every
     snapshot after 15 Myr), A-2048, every checkpoint. Ladder: A-512 14; A-1024 14; A-2048 14.6 (+4.6%
     at the last doubling).'
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: ShellMdotAfiveKpcEarly
+  value: 13.248536723953892
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 13.248536723953892
+    hi: 13.929188751917641
+  status: converged
+  convergence: converged
+  description: 'Net outflow through the full sphere r = 5 kpc (bin [r - 0.125, r) kpc), 15-30 Myr (every
+    snapshot after 15 Myr), before the 30-45 Myr episode, A-2048, every checkpoint; the burst-inclusive
+    15-40 Myr value is ShellMdotAfiveKpc. Ladder: A-512 13.9; A-1024 13.4; A-2048 13.2 (-1.2% at the last
+    doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
     sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
@@ -498,12 +519,12 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
     path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
     sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
   digits: 3
-- key: ShellToPlaneC
+- key: ShellToPlaneCTenTwentyFour
   value: 1.869583549604671
   unit: ''
   uncertainty: null
@@ -514,7 +535,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   data:
   - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_C1024.npz
     sha256: 7921e11752224b09de24fe96c78487617ca20eb8b6b5b24bd99d0b26c48388da
@@ -528,7 +549,7 @@ figures:
   runs:
   - C-512 N = 1-128
   script: pytests/self_gravity/cgols/cgols_cluster_number_scaling.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: cost_accuracy
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/cost_accuracy_families.png
@@ -536,7 +557,7 @@ figures:
   runs:
   - FD/FV 128-2048
   script: pytests/self_gravity/cgols/cgols_cost_accuracy.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: fvfd_summary
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/fvfd_summary_significance.png
@@ -544,7 +565,7 @@ figures:
   runs:
   - FD/FV 128-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: outflow_A_ladder
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_outflow_128_2048.png
@@ -556,7 +577,7 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_model_c_compare.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: outflow_C_vs_A
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/model_c_outflow_c1024_a2048.png
@@ -566,7 +587,7 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_model_c_compare.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: outflow_per_R_A_C
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/outflow_per_R_A_C.png
@@ -582,7 +603,7 @@ figures:
   - C-1024
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/cgols_outflow_per_radius.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: shells_A
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_shells_profiles.png
@@ -594,7 +615,7 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_shell_fluxes.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: slices_A2048
   path: pytests/self_gravity/cgols/figures/cgols/paper/paper_slices_A2048.png
@@ -603,7 +624,7 @@ figures:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/cgols_paper_slices.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: sx_profile_A2048
   path: pytests/self_gravity/cgols/figures/cgols/emission/A2048_sx0p3_1keV_ph_nh4e20_sx_profile.png
@@ -612,7 +633,7 @@ figures:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/cgols_emission.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
 - key: sx_profile_C1024
   path: pytests/self_gravity/cgols/figures/cgols/emission/C1024_sx0p3_1keV_ph_nh4e20_sx_profile.png
@@ -621,5 +642,5 @@ figures:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/cgols_emission.py
-  commit: 550eb05a31383df624108cdfd75844489fb42885
+  commit: 5c969317b5a46245481ba8daf67502113eacb202
   status: draft
