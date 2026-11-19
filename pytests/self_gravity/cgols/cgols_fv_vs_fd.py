@@ -97,7 +97,7 @@ def frame_at(frames, time_myr):
 
 def outflow_metrics(frames):
     """Peak and late-time mean outflow through |z| = 5 and 8 kpc."""
-    late = (frames["time_myr"] >= LATE_WINDOW_MYR[0]) & (frames["time_myr"] <= LATE_WINDOW_MYR[1])
+    late = (frames["time_myr"] > LATE_WINDOW_MYR[0] + 1e-3) & (frames["time_myr"] <= LATE_WINDOW_MYR[1] + 1e-3)  # (t0, t1]
     metrics = {}
     for height in (5.0, 8.0):
         rate = outflow_through(frames, height)
