@@ -432,7 +432,14 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
         steps_out[jt] = taken
 
     kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=2)   # one thread per row of the first argument
-    import jax.numpy as jnp
+    import jax, jax.numpy as jnp
+    # Load the compiled kernel on every device of the JAX backend now. Warp preloads it on the current device only and
+    # on any other device at the first call there. On a second GPU that first call comes from inside the jitted step,
+    # while XLA captures its CUDA graph; a module cannot be loaded during a capture (CUDA error 900, "operation not
+    # permitted when stream is capturing"), the launch fails and the step never returns. Emulated CPU devices are one
+    # Warp device, so only real multi-GPU runs meet this.
+    devices = {str(device): device for device in map(wp.device_from_jax, jax.local_devices())}
+    wp.load_module(rosenbrock23_cells.module, device=list(devices.values()))
     tables = jnp.asarray(table_values)
 
     def fn(*args):   # the states alone

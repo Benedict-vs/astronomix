@@ -44,8 +44,21 @@ handed to the kernel as an array): 9e-16 dex and 6e-16 after one step, 2e-10 dex
 after the short run. On 2026-11-19 with the finite-difference solver
 (``--solver fd --kernel``, 2 emulated devices): the carbox network 1.8e-15 dex
 after one step and 7e-15 dex after the short run, react_galaxy_ism_plus with
-its cosmic-ray block (8^3 cells) 1.8e-15 dex and 2.5e-10 dex. Not yet run on
-GPUs.
+its cosmic-ray block (8^3 cells) 1.8e-15 dex and 2.5e-10 dex.
+
+On two real GPUs (2026-11-19, two H200, ``--kernel --solver fd``, carbox
+network; set ``NCCL_NVLS_ENABLE=0`` on this machine): the first run did not
+return, because the kernel was loaded on the second card from inside the jitted
+step (fixed in ``_warp_stiff.py``: the kernel is now loaded on every device when
+it is built). With that, one step agrees as on the CPU (1.8e-15 dex, density and
+pressure identical). The short adaptive run differs by 4e-7 dex in the species
+and 3e-7 to 5e-7 in the density, which is far above the 7e-15 of the emulated
+devices. One GPU twice, two GPUs twice, and one GPU with and without a
+one-device mesh are each bit-identical, and the order of the cells in the launch
+changes nothing, so the difference comes with the split over two real cards. Its
+origin is OPEN (time step, exchange between the cards, or the kernel on the
+second card): do not rely on a multi-GPU chemistry run before it is found. The
+KROME network has not been run on two real GPUs yet.
 """
 
 import argparse

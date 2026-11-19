@@ -542,7 +542,10 @@ the same function. What differs is how the species are moved between two reactio
   (the product agrees to 0.07 % on average and 0.8 % at most on 64^2 cells), open boundaries,
   both temperature conventions on a recombining gas with an exact solution, the density floor,
   and the Pallas backend against native JAX. `pytests/chemistry/chemistry_multidevice.py
-  --solver fd` compares one device with several.
+  --solver fd` compares one device with several: emulated CPU devices agree to rounding. On
+  two real GPUs one step agrees to rounding as well, but a short run differs by a few 1e-7,
+  with a cause that is still open (see the docstring of that script); the production runs so
+  far are on one GPU.
 - **In a galaxy run**: `pytests/self_gravity/cgols/cgols.py` with `CGOLS_CHEMISTRY=1` (see the
   comment block at that knob and `cgols_chemistry.py`): the network replaces the cooling
   curve, and every cell starts in ionisation equilibrium at its own density and temperature.
