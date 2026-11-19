@@ -15,10 +15,10 @@ Networks in the KROME format (``astronomix/_modules/_chemistry/_krome_network.py
    ``update_chemistry``.
 5. What KROME takes from its build options: the dust shielding of the Habing
    flux, the column densities, the H2 self-shielding and the reaction
-   modifiers; the heating by the cosmic-ray reactions; the H2 line cooling
-   against values computed with KROME; and the photo bins (cross sections,
-   rates, heating and Habing flux) against the same sums written in NumPy, with
-   a small database written here in KROME's formats.
+   modifiers; the heating by the cosmic-ray reactions; the H2 line cooling and
+   the bremsstrahlung against values computed with KROME; and the photo bins
+   (cross sections, rates, heating and Habing flux) against the same sums
+   written in NumPy, with a small database written here in KROME's formats.
 6. Optionally a full KROME network file, when ASTRONOMIX_TEST_KROME_NETWORK
    points at one (for instance ``networks/react_galaxy_ism`` of KROME): it is
    read, its reactions conserve nuclei and charge, and its rates are finite;
@@ -487,44 +487,6 @@ def test_heating_and_cooling_terms(network_file, data_folder, temperature):
     assert float(warm.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)) == pytest.approx(expected, rel=1e-12)
 
 
-@pytest.mark.parametrize("temperature", [3.0e3, 2.0e4, 3.0e6, 2.0e8])
-def test_free_free_cooling(network_file, data_folder, temperature):
-    """KROME's ``cooling_ff`` (``-cooling=FF``): 1.42e-27 g sqrt(T) n_e sum Z^2 n_ion with g = 1.5, over the
-    atomic ions; an option, and nothing else changes with it."""
-    arguments = dict(user_variables={"user_flux": 0.0}, h2_formation_on_dust=True, data_folder=data_folder)
-    without, species = build_krome_network(network_file, **arguments)
-    network, _ = build_krome_network(network_file, free_free=True, **arguments)
-    assert without.free_free_weights == ()
-    # H+, He+ and C+ are the atomic ions of the test network; H2+ is a molecule
-    assert dict(zip(species, network.free_free_weights)) == {
-        "H": 0.0, "E": 0.0, "H+": 1.0, "He+": 1.0, "He": 0.0, "H2": 0.0, "H2+": 0.0, "C": 0.0, "C+": 1.0,
-    }
-    fractions = {"H": 0.1, "E": 0.95, "H+": 0.9, "He+": 0.05, "He": 0.03, "H2": 1e-6, "H2+": 1e-7, "C": 1e-5, "C+": 1e-4}
-    hydrogen_nuclei = 0.02
-    abundances = jnp.asarray([fractions[name] * hydrogen_nuclei for name in species])
-    terms = {name: float(value) for name, value in network.cooling_terms(abundances, temperature).items()}
-    plain = {name: float(value) for name, value in without.cooling_terms(abundances, temperature).items()}
-    ions = (fractions["H+"] + fractions["He+"] + fractions["C+"]) * hydrogen_nuclei
-    expected = 1.42e-27 * 1.5 * np.sqrt(temperature) * ions * fractions["E"] * hydrogen_nuclei
-    assert terms["cooling_free_free"] == pytest.approx(expected, rel=1e-12)
-    assert set(terms) == set(plain) | {"cooling_free_free"}
-    for name, value in plain.items():
-        assert terms[name] == value, name
-    # it enters the temperature derivative like every other cooling term (the cooling at the floor is subtracted)
-    floor = 1.42e-27 * 1.5 * np.sqrt(2.73) * ions * fractions["E"] * hydrogen_nuclei
-    difference = float(
-        without.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)
-        - network.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)
-    )
-    assert difference == pytest.approx(
-        (5.0 / 3.0 - 1.0) * (expected - floor) / (1.380648e-16 * float(abundances.sum())), rel=1e-6
-    )
-    # a doubly charged ion counts four times
-    from astronomix._modules._chemistry._krome_network import _free_free_weights
-
-    assert _free_free_weights(("He++", "Si++", "O+", "H-", "H2+", "E", "CO+")) == (4.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0)
-
-
 def test_metals_without_krome_data(network_file):
     """Without KROME's data folder the metals cool through the two lines of the chemistry module."""
     network, species = build_krome_network(network_file, user_variables={"user_flux": 0.0})
@@ -831,6 +793,55 @@ def test_h2_line_cooling_of_the_chemistry_module_against_krome(row):
         densities[collider] += 1.0
         value = float(_glover_abel_h2_cooling(jnp.asarray(densities), temperature, 0, 1, 2, 3, 4))
         assert value == pytest.approx(reference, rel=3e-6, abs=1e-60)  # constants read as decimal numbers
+
+
+# A network with singly and doubly charged atomic ions, a molecular ion and an anion, written for the bremsstrahlung.
+FREE_FREE_NETWORK = """# test network for the bremsstrahlung
+@format:idx,R,R,P,P,P,rate
+1,H,E,H+,E,E,1d-10
+2,HE,E,HE+,E,E,1d-10
+3,HE+,E,HE++,E,E,1d-10
+@format:idx,R,R,P,P,rate
+4,H2,H+,H2+,H,1d-10
+@format:idx,R,R,P,rate
+5,H,E,H-,1d-16
+"""
+FREE_FREE_DENSITIES = {"H": 0.3, "E": 1.7, "H+": 1.0, "He": 0.01, "He+": 0.02, "He++": 0.08, "H2": 0.1, "H2+": 0.5, "H-": 0.25}
+# Bremsstrahlung [erg cm^-3 s^-1] of these densities computed with KROME's cooling_ff (its source, with the sum over the
+# ions that KROME's generator writes for this network: n(H+) + n(He+) + 4 n(He++); compiled with gfortran):
+# temperature, cooling.
+KROME_FREE_FREE_COOLING = (
+    (2.73, 8.017051006592636e-27),
+    (1.0e2, 4.852140000000000e-26),
+    (1.0e4, 4.852140000000000e-25),
+    (1.0e6, 4.852140000000000e-24),
+    (1.0e8, 4.852140000000000e-23),
+    (1.0e9, 1.534381392600940e-22),
+)
+
+
+@pytest.mark.parametrize("row", KROME_FREE_FREE_COOLING, ids=lambda row: f"{row[0]:g}K")
+def test_free_free_cooling_against_krome(tmp_path, row):
+    """The bremsstrahlung (KROME's -cooling=FF): the atomic ions only, each with its charge squared."""
+    temperature, expected = row
+    path = _write(tmp_path, FREE_FREE_NETWORK)
+    network, species = build_krome_network(path, free_free_cooling=True)
+    weights = {"H+": 1.0, "He+": 1.0, "He++": 4.0}  # not the molecular ion H2+, not the anion H-, not the electrons
+    assert network.free_free_charges == tuple(weights.get(name, 0.0) for name in species)
+    abundances = jnp.asarray([FREE_FREE_DENSITIES[name] for name in species])
+    cooling = float(network.cooling_terms(abundances, temperature)["cooling_free_free"])
+    assert cooling == pytest.approx(expected, rel=1e-13)
+
+    # Off by default: the network then has the terms, and so the right-hand side, that it had without the option.
+    plain, _ = build_krome_network(path)
+    assert plain.free_free_charges == () and "cooling_free_free" not in plain.cooling_terms(abundances, temperature)
+    # In the temperature equation the term is part of the cooling, also of the cooling at the floor temperature
+    # (2.73 K, the first row of the table) that KROME subtracts.
+    with_term = float(network.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7))
+    without = float(plain.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7))
+    net_cooling = expected - KROME_FREE_FREE_COOLING[0][1]
+    change = (5.0 / 3.0 - 1.0) * net_cooling / (1.380648e-16 * sum(FREE_FREE_DENSITIES.values()))
+    assert without - with_term == pytest.approx(change, rel=1e-9, abs=1e-20)
 
 
 # KROME's database of automatic reactions and two cross section files in the formats of the Leiden and SwRI

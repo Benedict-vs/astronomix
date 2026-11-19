@@ -363,12 +363,14 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   of both: `"DEFAULT"` (`1.87e21 (n / 1e3)^(2/3)` cm^-2) or `"JEANS"` (half a Jeans length).
 - **Heating and cooling.** With `thermochemistry=True` a KROME network is heated and cooled
   as in KROME (`_krome_thermochemistry.py`), not by the terms of the section above. Cooling:
-  H and He (Cen 1992: collisional ionisation and excitation, recombination; their
-  bremsstrahlung is not part of it, as in KROME, where it is the build option `-cooling=FF`:
-  `krome_free_free=True` adds it for all atomic ions, and gas above 1e7 K needs it),
-  the H2 lines (Glover & Abel 2008, Glover 2015), the lines of the metals below 1e4 K from
-  two- and three-level systems, the metal cooling table of Shen et al. (2013) above, and
-  Compton cooling. Heating: the photoelectric effect on dust net of the recombination
+  H and He (Cen 1992: collisional ionisation and excitation, recombination), the H2 lines
+  (Glover & Abel 2008, Glover 2015), the lines of the metals below 1e4 K from two- and
+  three-level systems, the metal cooling table of Shen et al. (2013) above, and Compton
+  cooling. None of these contains the bremsstrahlung of hydrogen and helium:
+  `krome_free_free_cooling=True` adds it as KROME's `-cooling=FF` does (off by default), for
+  every atomic ion of the network with its charge squared and a mean Gaunt factor of 1.5. In
+  a fully ionised gas of solar composition at n_H = 1 cm^-3 it is 32% of the cooling at
+  1e7 K and 87% at 1e8 K, so a run with gas that hot needs it. Heating: the photoelectric effect on dust net of the recombination
   cooling, with the dust abundance relative to solar (`dust_to_gas_ratio / 0.01`); the
   chemical term (formation and collisional dissociation of H2); the cosmic rays, through the
   reactions of the cosmic-ray block of the file (4.3 eV per ionisation of H and He, a fit in
@@ -380,7 +382,8 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   only.
 - **Build options of KROME and their counterparts.** `-useDustH2const`:
   `krome_h2_formation_on_dust`; `-photoBins`: `krome_photo_bins`; `-shieldHabingDust`,
-  `-shielding`, `-columnDensityMethod`: the three arguments above; `-gamma`: the adiabatic
+  `-shielding`, `-columnDensityMethod`: the three arguments above; `-cooling=FF`:
+  `krome_free_free_cooling`; `-gamma`: the adiabatic
   index of the simulation; `-RTOL`, `-ATOL`: `relative_tolerance`, `absolute_tolerance`.
   `-conserve` has no counterpart: the implicit solvers used here keep the nuclei and the
   charge to round-off. Not ported: dust grains as species, X-rays, the opacity that KROME
@@ -421,10 +424,13 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   temperature and in every abundance above 1e-12 n_H to 2e-7. The cross section tables
   derived here from the SwRI and Leiden files reproduce those that KROME writes to 5e-12.
   One place where KROME itself is undefined: its metal-line rates above 1e4 K are returned
-  unset; here they are zero.
+  unset; here they are zero. The bremsstrahlung, which that build does not have, agrees to
+  round-off with KROME's `cooling_ff` compiled with the sum over the ions that KROME's
+  generator writes for the network.
 - `examples/chemistry_krome_network.py --network <file>` runs a network file through both
   solvers with the thermochemistry on (`--krome-data <folder>` for KROME's metal cooling,
-  `--draine`, `--shield-habing-dust`, `--shielding` for the radiation and the shielding);
+  `--draine`, `--shield-habing-dust`, `--shielding` for the radiation and the shielding,
+  `--free-free` for the bremsstrahlung);
   `pytests/chemistry/test_krome_network.py` tests the reader, the photo bins, the shielding
   and the heating and cooling on small networks and data files written in the test, and a
   full file when `ASTRONOMIX_TEST_KROME_NETWORK` (and `ASTRONOMIX_TEST_KROME_DATA`) point at

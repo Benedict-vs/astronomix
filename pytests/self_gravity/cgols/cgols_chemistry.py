@@ -198,7 +198,7 @@ def build_chemistry(
             krome_metal_table=True,
             krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10, scale=draine_field),
             krome_shield_habing_dust=True,
-            krome_free_free=free_free,
+            krome_free_free_cooling=free_free,
             # all particles of the gas are species of the network
             temperature_from_species=True,
         )

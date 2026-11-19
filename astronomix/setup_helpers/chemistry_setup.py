@@ -116,7 +116,7 @@ def build_chemistry_from_network_file(
     krome_shield_habing_dust: bool = False,
     krome_column_density_method: str = "DEFAULT",
     krome_floor_temperature: float = 2.73,
-    krome_free_free: bool = False,
+    krome_free_free_cooling: bool = False,
     temperature_from_species: bool = False,
     conserve_elements_in_transport: bool = True,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
@@ -157,11 +157,12 @@ def build_chemistry_from_network_file(
     ``krome_shielding`` selects the H2 self-shielding that ``krome_fshield``
     returns in the rate expressions of the file (``-shielding``: ``"DB96"``,
     ``"WG11"`` or ``"R14"``), ``krome_column_density_method`` the column density
-    of both (``-columnDensityMethod``: ``"DEFAULT"`` or ``"JEANS"``), and
+    of both (``-columnDensityMethod``: ``"DEFAULT"`` or ``"JEANS"``),
     ``krome_floor_temperature`` is KROME's ``phys_Tfloor``, at which the cooling
-    is subtracted from itself, and ``krome_free_free`` adds the bremsstrahlung
-    of the atomic ions (``-cooling=FF``), which KROME's atomic cooling of H and
-    He does not contain: switch it on for gas above 1e7 K.
+    is subtracted from itself, and ``krome_free_free_cooling`` adds the
+    bremsstrahlung of the atomic ions (``-cooling=FF``; off by default), which
+    the other cooling terms do not contain and which dominates in ionised gas
+    above about 1e7 K.
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -225,7 +226,7 @@ def build_chemistry_from_network_file(
             shield_habing_dust=krome_shield_habing_dust,
             column_density_method=krome_column_density_method,
             floor_temperature=krome_floor_temperature,
-            free_free=krome_free_free,
+            free_free_cooling=krome_free_free_cooling,
         )
         if krome_photo_bins is not None:
             # the Habing flux in use is the one of the binned spectrum

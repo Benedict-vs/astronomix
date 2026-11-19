@@ -30,7 +30,7 @@ field with dust shielding (``--cpu``):
   to 1.0 from 1.8e4 K to 3e6 K, 0.014 at 1e4 K (few free electrons at
   equilibrium, hence little Lyman alpha) and falling to 0.2 at 1e8 K (without
   bremsstrahlung, which is an option as in KROME: ``--free-free`` builds the
-  network with ``krome_free_free=True``; with it the ratio is 0.86 to 1.5
+  network with ``krome_free_free_cooling=True``; with it the ratio is 0.86 to 1.5
   from 1e5 K up. The tables below print that ratio in a column of its own
   either way);
 * disk gas: with the cosmic-ray block of the file commented out (as the file
@@ -171,7 +171,7 @@ def build(thermochemistry, chunk=0, metal_table=True):
             krome_metal_table=metal_table,
             krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10),
             krome_shield_habing_dust=True,
-            krome_free_free=arguments.free_free,
+            krome_free_free_cooling=arguments.free_free,
         )
     return chemistry_config._replace(reaction_chunk_size=chunk), chemistry_params, tuple(names)
 
