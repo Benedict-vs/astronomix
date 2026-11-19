@@ -28,9 +28,11 @@ field with dust shielding (``--cpu``):
 
 * cooling at equilibrium over cooling of model B: 0.7 to 1.9 below 6000 K, 0.8
   to 1.0 from 1.8e4 K to 3e6 K, 0.014 at 1e4 K (few free electrons at
-  equilibrium, hence little Lyman alpha) and falling to 0.2 at 1e8 K (the port
-  has no bremsstrahlung of H and He; with KROME's ``cooling_ff`` added the ratio
-  is 0.86 to 1.5 from 1e5 K up);
+  equilibrium, hence little Lyman alpha) and falling to 0.2 at 1e8 K (without
+  bremsstrahlung, which is an option as in KROME: ``--free-free`` builds the
+  network with ``krome_free_free=True``; with it the ratio is 0.86 to 1.5
+  from 1e5 K up. The tables below print that ratio in a column of its own
+  either way);
 * disk gas: with the cosmic-ray block of the file commented out (as the file
   stands) gas of 1 cm^-3 cools to 360 K, with the block on it settles at 4200 K
   (model B: 5000 K);
@@ -76,6 +78,7 @@ parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 parser.add_argument("--network", required=True, help="network file in the KROME format")
 parser.add_argument("--krome-data", required=True, help="the data folder of a KROME installation")
 parser.add_argument("--cpu", action="store_true", help="run on the CPU (default: one free GPU through autocvd)")
+parser.add_argument("--free-free", action="store_true", help="build the network with the bremsstrahlung of the ions (KROME's -cooling=FF)")
 parser.add_argument("--gpu-timeout", type=int, default=None, help="give up waiting for a free GPU after this many seconds")
 parser.add_argument("--step-myr", type=float, default=1.0e-3, help="length of the hydro-sized step [Myr]")
 parser.add_argument("--timing-cells", type=int, nargs="*", default=[], help="cell counts for the timing of update_chemistry")
@@ -166,6 +169,7 @@ def build(thermochemistry, chunk=0, metal_table=True):
             krome_metal_table=metal_table,
             krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10),
             krome_shield_habing_dust=True,
+            krome_free_free=arguments.free_free,
         )
     return chemistry_config._replace(reaction_chunk_size=chunk), chemistry_params, tuple(names)
 
@@ -260,8 +264,11 @@ else:
     heating_per_nucleus = (sum(np.asarray(term) for term in heating.values()) / grid_n).reshape(SHAPE)
     lambda_model_b = MODEL_B.cooling_lambda(10.0**LOG_T)
     of = lambda name: equilibrium[NAMES.index(name)].reshape(SHAPE) if name in NAMES else np.zeros(SHAPE)
-    # KROME's cooling_ff (-cooling=FF, mean Gaunt factor 1.5), which the port does not have
+    # KROME's cooling_ff of H and He (-cooling=FF, mean Gaunt factor 1.5), for the column "with ff"; with
+    # --free-free it is part of the network already and the column is the network alone
     free_free = 1.42e-27 * 1.5 * np.sqrt(10.0**LOG_T)[:, None] * (of("H+") + of("He+") + 4.0 * of("He++")) * of("E")
+    if arguments.free_free:
+        free_free = 0.0 * free_free
 
     print("\n1. Cooling at ionisation equilibrium, Lambda = cooling / n_H^2 [erg cm^3 / s]")
     print("   The last three columns are for n_H = 0.1: network over model B, the same with bremsstrahlung, electrons per H.")

@@ -116,6 +116,7 @@ def build_chemistry_from_network_file(
     krome_shield_habing_dust: bool = False,
     krome_column_density_method: str = "DEFAULT",
     krome_floor_temperature: float = 2.73,
+    krome_free_free: bool = False,
     temperature_from_species: bool = False,
     conserve_elements_in_transport: bool = True,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
@@ -158,7 +159,9 @@ def build_chemistry_from_network_file(
     ``"WG11"`` or ``"R14"``), ``krome_column_density_method`` the column density
     of both (``-columnDensityMethod``: ``"DEFAULT"`` or ``"JEANS"``), and
     ``krome_floor_temperature`` is KROME's ``phys_Tfloor``, at which the cooling
-    is subtracted from itself.
+    is subtracted from itself, and ``krome_free_free`` adds the bremsstrahlung
+    of the atomic ions (``-cooling=FF``), which KROME's atomic cooling of H and
+    He does not contain: switch it on for gas above 1e7 K.
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -222,6 +225,7 @@ def build_chemistry_from_network_file(
             shield_habing_dust=krome_shield_habing_dust,
             column_density_method=krome_column_density_method,
             floor_temperature=krome_floor_temperature,
+            free_free=krome_free_free,
         )
         if krome_photo_bins is not None:
             # the Habing flux in use is the one of the binned spectrum
@@ -392,6 +396,7 @@ def equilibrium_abundances(
     temperature_kelvin,
     start_abundances,
     total_time_seconds=3.15576e17,
+    return_last_change=False,
 ):
     """The abundances a network settles at when the temperature is held: ionisation equilibrium.
 
@@ -413,10 +418,17 @@ def equilibrium_abundances(
             ``[species, cells]``. They fix the atoms of every element; the
             equilibrium does not otherwise depend on them.
         total_time_seconds: How long the gas is held.
+        return_last_change: Also return how much every cell still changed over
+            the last of the six steps (59% of the time): the largest
+            ``|d log10 x|`` among its species above 1e-10 per hydrogen nucleus.
+            A cell that has settled shows none; thin, cold gas whose
+            recombination time exceeds the hold has not, and its abundances
+            then depend on ``start_abundances``.
 
     Returns:
         The abundances per hydrogen nucleus at the end, a numpy array of shape
-        ``[species, cells]``.
+        ``[species, cells]``; with ``return_last_change`` a tuple of it and the
+        change of every cell in dex, shape ``[cells]``.
     """
     from astronomix._modules._chemistry._chemistry import update_chemistry
     from astronomix._modules._cooling._cooling import get_pressure_from_temperature
@@ -473,7 +485,9 @@ def equilibrium_abundances(
         axis=0,
     )
     params = SimulationParams(chemistry_params=chemistry_params)
+    before_last = None
     for fraction in (1e-4, 1e-3, 1e-2, 1e-1, 0.3, 0.5889):
+        before_last = np.asarray(state[3:] / density[None, :])
         state = update_chemistry(
             state,
             registered_variables,
@@ -481,7 +495,12 @@ def equilibrium_abundances(
             params,
             fraction * total_time_seconds / chemistry_params.time_unit_seconds,
         )
-    return np.asarray(state[3:] / density[None, :])
+    abundances = np.asarray(state[3:] / density[None, :])
+    if not return_last_change:
+        return abundances
+    relevant = np.maximum(abundances, before_last) > 1e-10
+    change = np.abs(np.log10(np.maximum(abundances, 1e-300)) - np.log10(np.maximum(before_last, 1e-300)))
+    return abundances, np.where(relevant, change, 0.0).max(axis=0)
 
 
 def species_composition(species_names):

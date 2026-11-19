@@ -97,6 +97,7 @@ def build(arguments, use_kernel):
         krome_shield_habing_dust=arguments.shield_habing_dust,
         krome_shielding=arguments.shielding,
         krome_column_density_method=arguments.column_density_method,
+        krome_free_free=arguments.free_free,
     )
 
     if use_kernel:
@@ -118,7 +119,7 @@ def build(arguments, use_kernel):
                 "example-krome-network", arguments.network, arguments.thermochemistry, arguments.krome_data,
                 arguments.no_metal_table, arguments.draine, arguments.shield_habing_dust, arguments.shielding,
                 arguments.column_density_method, arguments.habing_field, arguments.no_h2_on_dust,
-                tuple(arguments.user_variable),
+                arguments.free_free, tuple(arguments.user_variable),
             ),
         )
         chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
@@ -224,6 +225,7 @@ def main():
     parser.add_argument("--no-metal-table", action="store_true", help="without the tabulated metal cooling above 1e4 K, "
                         "which the Warp kernel cannot evaluate")
     parser.add_argument("--no-h2-on-dust", action="store_true", help="without the H2 formation on dust (Jura)")
+    parser.add_argument("--free-free", action="store_true", help="add the bremsstrahlung of the ions (KROME's -cooling=FF)")
     parser.add_argument("--rtol", type=float, default=1.0e-6)
     parser.add_argument("--atol", type=float, default=1.0e-12)
     parser.add_argument("--no-kernel", action="store_true", help="skip the Warp kernel (gradsolve, warp-lang)")

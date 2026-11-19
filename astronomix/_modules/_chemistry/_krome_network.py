@@ -142,6 +142,18 @@ def _elements_and_charge(name):
     return counts, charge
 
 
+def _free_free_weights(species):
+    """The square of the charge of every atomic ion of ``species``, zero for the
+    other species: the ions KROME sums for its bremsstrahlung (positive ions of
+    one atom; molecular ions and the electron do not enter)."""
+    weights = []
+    for name in species:
+        counts, charge = _elements_and_charge(name)
+        atomic = sum(counts.values()) == 1
+        weights.append(float(charge * charge) if atomic and charge > 0 else 0.0)
+    return tuple(weights)
+
+
 def _species_mass(name):
     """Mass of a species [g] as KROME computes it: protons, neutrons and electrons of its atoms."""
     counts, charge = _elements_and_charge(name)
@@ -466,6 +478,8 @@ class KromeNetwork(eqx.Module):
     cooling_floor_temperature: float = eqx.field(static=True)
     # the metal table without a look-up (for the per-cell Warp kernel), see ``build_krome_network``
     metal_table_without_lookup: bool = eqx.field(static=True, default=False)
+    # bremsstrahlung: the square of the charge of every atomic ion (zero for the other species), or () without it
+    free_free_weights: tuple = eqx.field(static=True, default=())
 
     def _single(self, value):
         # a real constant that KROME's Fortran writes without a ``d`` exponent
@@ -645,6 +659,10 @@ class KromeNetwork(eqx.Module):
             ),
             "cooling_compton": thermo.compton_cooling(temperature, electrons),
         }
+        if self.free_free_weights:
+            terms["cooling_free_free"] = thermo.free_free_cooling(
+                temperature, electrons, jnp.dot(jnp.asarray(self.free_free_weights, dtype=n.dtype), n)
+            )
         if self.metal_lines:
             variables, upper_limit, metals = self.metal_lines
             lines = thermo.metal_line_cooling(
@@ -731,7 +749,7 @@ def build_krome_network(
     path, photo_rates=None, user_variables=None, dust_to_gas_relative=1.0, h2_formation_on_dust=False,
     data_folder=None, metal_table=True, metallicity=None, ortho_para_ratio=3.0, single_precision_literals=False,
     photo_bins=None, xsec_folder=None, shielding=None, shield_habing_dust=False, column_density_method="DEFAULT",
-    floor_temperature=MINIMUM_TEMPERATURE_KELVIN,
+    floor_temperature=MINIMUM_TEMPERATURE_KELVIN, free_free=False,
 ):
     """Build the right-hand side of a KROME network file.
 
@@ -786,6 +804,10 @@ def build_krome_network(
             ``-columnDensityMethod``), for the two shielding terms.
         floor_temperature: Temperature [K] at which the cooling is subtracted
             from itself (KROME's ``phys_Tfloor``).
+        free_free: Add the bremsstrahlung of the atomic ions of the network
+            (KROME's ``-cooling=FF``; ``free_free_cooling``). KROME's atomic
+            cooling of H and He does not contain it, so without it gas of solar
+            composition cools five times too little at 1e8 K.
 
     Returns:
         The network (a :class:`KromeNetwork`) and the species names.
@@ -954,5 +976,6 @@ def build_krome_network(
         column_density_method=column_density_method,
         cooling_floor_temperature=float(floor_temperature),
         metal_table_without_lookup=without_lookup,
+        free_free_weights=_free_free_weights(species) if free_free else (),
     )
     return network, species

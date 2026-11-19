@@ -363,7 +363,9 @@ chemistry_config, chemistry_params, species_names = build_chemistry_from_network
   of both: `"DEFAULT"` (`1.87e21 (n / 1e3)^(2/3)` cm^-2) or `"JEANS"` (half a Jeans length).
 - **Heating and cooling.** With `thermochemistry=True` a KROME network is heated and cooled
   as in KROME (`_krome_thermochemistry.py`), not by the terms of the section above. Cooling:
-  H and He (Cen 1992: collisional ionisation and excitation, recombination, bremsstrahlung),
+  H and He (Cen 1992: collisional ionisation and excitation, recombination; their
+  bremsstrahlung is not part of it, as in KROME, where it is the build option `-cooling=FF`:
+  `krome_free_free=True` adds it for all atomic ions, and gas above 1e7 K needs it),
   the H2 lines (Glover & Abel 2008, Glover 2015), the lines of the metals below 1e4 K from
   two- and three-level systems, the metal cooling table of Shen et al. (2013) above, and
   Compton cooling. Heating: the photoelectric effect on dust net of the recombination

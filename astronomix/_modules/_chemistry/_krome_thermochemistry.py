@@ -171,6 +171,23 @@ def compton_cooling(temperature, electrons):
     return 5.65e-36 * (temperature - CMB_TEMPERATURE_KELVIN) * electrons
 
 
+#: The mean Gaunt factor of KROME's ``cooling_ff``.
+FREE_FREE_GAUNT_FACTOR = 1.5
+
+
+def free_free_cooling(temperature, electrons, charge_squared_ions):
+    """Bremsstrahlung of the ions [erg cm^-3 s^-1] (KROME's ``cooling_ff``, build option ``-cooling=FF``).
+
+    ``1.42e-27 g sqrt(T) n_e sum_i Z_i^2 n_i`` with the mean Gaunt factor
+    ``g = 1.5``; ``charge_squared_ions`` is the sum over the atomic ions of the
+    network of the square of their charge times their density. Above 1e7 K it
+    is the main cooling of gas of solar composition.
+    """
+    return jnp.maximum(
+        1.42e-27 * FREE_FREE_GAUNT_FACTOR * jnp.sqrt(temperature) * charge_squared_ions * electrons, 0.0
+    )
+
+
 def metal_line_cooling(temperature, density, metals, variables, upper_limit, evaluate, syntax_tree, ortho_para_ratio):
     """Line cooling of the metals below ``upper_limit`` [erg cm^-3 s^-1] (KROME's ``cooling_Z``).
 

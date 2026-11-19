@@ -487,6 +487,44 @@ def test_heating_and_cooling_terms(network_file, data_folder, temperature):
     assert float(warm.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)) == pytest.approx(expected, rel=1e-12)
 
 
+@pytest.mark.parametrize("temperature", [3.0e3, 2.0e4, 3.0e6, 2.0e8])
+def test_free_free_cooling(network_file, data_folder, temperature):
+    """KROME's ``cooling_ff`` (``-cooling=FF``): 1.42e-27 g sqrt(T) n_e sum Z^2 n_ion with g = 1.5, over the
+    atomic ions; an option, and nothing else changes with it."""
+    arguments = dict(user_variables={"user_flux": 0.0}, h2_formation_on_dust=True, data_folder=data_folder)
+    without, species = build_krome_network(network_file, **arguments)
+    network, _ = build_krome_network(network_file, free_free=True, **arguments)
+    assert without.free_free_weights == ()
+    # H+, He+ and C+ are the atomic ions of the test network; H2+ is a molecule
+    assert dict(zip(species, network.free_free_weights)) == {
+        "H": 0.0, "E": 0.0, "H+": 1.0, "He+": 1.0, "He": 0.0, "H2": 0.0, "H2+": 0.0, "C": 0.0, "C+": 1.0,
+    }
+    fractions = {"H": 0.1, "E": 0.95, "H+": 0.9, "He+": 0.05, "He": 0.03, "H2": 1e-6, "H2+": 1e-7, "C": 1e-5, "C+": 1e-4}
+    hydrogen_nuclei = 0.02
+    abundances = jnp.asarray([fractions[name] * hydrogen_nuclei for name in species])
+    terms = {name: float(value) for name, value in network.cooling_terms(abundances, temperature).items()}
+    plain = {name: float(value) for name, value in without.cooling_terms(abundances, temperature).items()}
+    ions = (fractions["H+"] + fractions["He+"] + fractions["C+"]) * hydrogen_nuclei
+    expected = 1.42e-27 * 1.5 * np.sqrt(temperature) * ions * fractions["E"] * hydrogen_nuclei
+    assert terms["cooling_free_free"] == pytest.approx(expected, rel=1e-12)
+    assert set(terms) == set(plain) | {"cooling_free_free"}
+    for name, value in plain.items():
+        assert terms[name] == value, name
+    # it enters the temperature derivative like every other cooling term (the cooling at the floor is subtracted)
+    floor = 1.42e-27 * 1.5 * np.sqrt(2.73) * ions * fractions["E"] * hydrogen_nuclei
+    difference = float(
+        without.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)
+        - network.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)
+    )
+    assert difference == pytest.approx(
+        (5.0 / 3.0 - 1.0) * (expected - floor) / (1.380648e-16 * float(abundances.sum())), rel=1e-6
+    )
+    # a doubly charged ion counts four times
+    from astronomix._modules._chemistry._krome_network import _free_free_weights
+
+    assert _free_free_weights(("He++", "Si++", "O+", "H-", "H2+", "E", "CO+")) == (4.0, 4.0, 1.0, 0.0, 0.0, 0.0, 0.0)
+
+
 def test_metals_without_krome_data(network_file):
     """Without KROME's data folder the metals cool through the two lines of the chemistry module."""
     network, species = build_krome_network(network_file, user_variables={"user_flux": 0.0})

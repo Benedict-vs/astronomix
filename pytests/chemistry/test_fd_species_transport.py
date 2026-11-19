@@ -667,6 +667,39 @@ def test_density_floor_and_the_species(solver_mode):
         assert bool((floored[start : start + 4] == state[start : start + 4]).all())
 
 
+def test_equilibrium_abundances_of_a_linear_network():
+    """``equilibrium_abundances`` holds every cell at its temperature until the network has
+    settled: A <-> B ends at B / (A + B) = forward / (forward + backward), whatever the start,
+    and reports that nothing changes any more; a hold much shorter than the reaction time
+    reports the change."""
+    from astronomix.setup_helpers import equilibrium_abundances
+
+    forward, backward = 3.0e-15, 1.0e-15  # per second: settles within ~1e15 s
+    chemistry_config, chemistry_params = _chemistry(
+        ("A", "B"), Linear(jnp.asarray(forward), jnp.asarray(backward)), composition=False
+    )
+    hydrogen = np.array([1.0e-3, 1.0, 50.0])
+    temperature = np.array([1.0e6, 8.0e3, 100.0])
+    abundances, change = equilibrium_abundances(
+        chemistry_config, chemistry_params, hydrogen, temperature, np.array([1.0, 1.0e-20]), return_last_change=True
+    )
+    assert abundances.shape == (2, 3)
+    np.testing.assert_allclose(abundances[1] / abundances.sum(axis=0), 0.75, rtol=1e-6)
+    np.testing.assert_allclose(abundances.sum(axis=0), 1.0, rtol=1e-9)
+    assert change.max() < 1e-6
+    # a different start for every cell, the same end
+    start = np.array([[0.2, 0.9, 1e-20], [0.8, 0.1, 1.0]])
+    np.testing.assert_allclose(
+        equilibrium_abundances(chemistry_config, chemistry_params, hydrogen, temperature, start)[1], 0.75, rtol=1e-6
+    )
+    # held for a hundredth of the reaction time: not settled, and the function says so
+    _, change = equilibrium_abundances(
+        chemistry_config, chemistry_params, hydrogen, temperature, np.array([1.0, 1.0e-20]),
+        total_time_seconds=2.5e12, return_last_change=True,
+    )
+    assert change.min() > 0.1
+
+
 # -----------------------------------------------------------------------------
 # ============================ ↓ 8. Pallas backend ↓ ===========================
 # -----------------------------------------------------------------------------
