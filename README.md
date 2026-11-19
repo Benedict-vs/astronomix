@@ -474,6 +474,14 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
   hold the others up: in a galaxy box every column through the disk does that. The results are
   the same bit for bit. On the 256 x 256 x 512 galaxy run below, with a cold disk under a hot
   halo, a step took 21 s with the ordering against 45 to 60 s without.
+- `solver.with_steps(y0, dt)` also returns the trial steps of every cell: what a cell costs,
+  and which cells ran out of steps (`steps == solver.max_steps`). Count steps to find the
+  cost; the wall time of single calls is not a measure of it on a busy machine. On frames of
+  that run nine cells in ten are halo gas that takes the minimum of four steps, which the
+  first trial step sets (`first_step_fraction`, default 0.01 of the interval, growing at most
+  fivefold per step): with the whole interval as the first trial step the mean falls from 4.4
+  to 1.6 steps per cell at the same accuracy against a tight-tolerance solve. A cell mix of
+  gas that all evolves gains nothing from it.
 - Without an emulator, `update_chemistry` then advances **every cell** with the kernel. With
   the emulator and `stiff_core_capacity > 0`, the kernel solves the gathered dense cells and
   the emulator the rest. A cell that returns a non-finite state keeps its previous one, as

@@ -110,6 +110,53 @@ def test_robertson_keeps_the_linear_invariant(robertson):
     np.testing.assert_allclose(result.sum(axis=1), 1.0, rtol=0.0, atol=1.0e-12)
 
 
+def test_step_counts(robertson):
+    """``with_steps`` returns the same states and the trial steps of every cell: more for a longer
+    interval, none for a zero one, and the limit for a cell that runs out of steps."""
+    solver, initial, end_time, result = robertson
+    states, steps = solver.with_steps(initial, end_time)
+    np.testing.assert_array_equal(np.asarray(states), result)
+    steps = np.asarray(steps)
+    assert steps.dtype == np.int32 and steps.shape == (initial.shape[0],)
+    interval = np.asarray(end_time)
+    assert (steps[interval == 0.0] == 0).all()
+    # the first trial step is a hundredth of the interval and grows fivefold at most
+    assert steps[interval > 0.0].min() >= 4
+    assert steps.max() < solver.max_steps
+    assert (np.diff(steps[np.argsort(interval)]) >= 0).all()  # a longer interval takes more steps
+    _, none = solver.with_steps(initial, jnp.zeros(initial.shape[0]))
+    assert int(np.asarray(none).max()) == 0
+    short = build_fused_core_solver(_robertson, 3, rtol=RTOL, atol=ATOL, max_steps=5, cache_key="pytest-robertson-short")
+    _, exhausted = short.with_steps(initial, end_time)
+    assert int(np.asarray(exhausted).max()) == 5 == short.max_steps
+
+
+def _decay_under_a_root(time, state, args):
+    """A fast linear decay and a slow variable that sees its square root. The Rosenbrock stages overshoot a
+    stiff decay to below zero (the stage value is -0.65 of the start for a step of 100 decay times), where
+    the root is not a number."""
+    return jnp.stack([-state[0] * jnp.sqrt(state[1]), -1.0e3 * state[1]])
+
+
+def test_a_step_without_an_error_estimate_is_shortened():
+    """A trial step whose stages leave the domain of the field has a not-a-number error. It has to be
+    rejected and shortened; lengthened (what a not-a-number did to the controller before 2026-11-19), the
+    cell repeats it until it has used all its steps and comes back unchanged."""
+    solver = build_fused_core_solver(
+        _decay_under_a_root, 2, rtol=1.0e-6, atol=1.0e-12, max_steps=4096, cache_key="pytest-root", first_step_fraction=1.0
+    )
+    interval = jnp.asarray([1.0e-4, 1.0e-2, 0.3])  # a tenth of a decay time, ten of them, three hundred
+    initial = jnp.ones((3, 2))
+    states, steps = solver.with_steps(initial, interval)
+    states, steps = np.asarray(states), np.asarray(steps)
+    assert np.isfinite(states).all()
+    assert steps.max() < solver.max_steps
+    decayed = np.exp(-1.0e3 * np.asarray(interval))
+    slow = np.exp(-(2.0 / 1.0e3) * (1.0 - np.exp(-0.5e3 * np.asarray(interval))))
+    np.testing.assert_allclose(states[:, 0], slow, rtol=1.0e-5)
+    np.testing.assert_allclose(states[:, 1], decayed, rtol=1.0e-3, atol=1.0e-9)
+
+
 def test_zero_step_returns_the_state(robertson):
     # update_chemistry relies on it under the density gate: a cell that is not due is untouched
     _, initial, _, result = robertson

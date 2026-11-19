@@ -319,7 +319,9 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
 
     ``vector_field(t, state, args)`` is the diffrax-style right-hand side with CONCRETE closed-over parameters (it is
     traced once here, at build time). A cell whose ``max_steps`` are exhausted returns its last accepted state, like
-    diffrax with ``throw=False``. ``first_step_fraction`` is the first trial step of every cell as a fraction of its
+    diffrax with ``throw=False``. ``fn.with_steps(y0, dt)`` returns ``(y1, steps)`` with the trial steps of every cell,
+    which is what a cell costs (a timing of single calls is not a measure of it on a busy machine) and shows the
+    cells that ran out of steps (``steps == fn.max_steps``). ``first_step_fraction`` is the first trial step of every cell as a fraction of its
     step length: the controller grows a step by at most a factor of five, so with the default of 0.01 a cell that
     hardly changes still takes four steps; with 1 it takes the whole step at once when the error estimate allows it,
     and is otherwise cut back as after any rejected step.
@@ -384,13 +386,15 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
 
     @wp.kernel
     def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), tables: wp.array(dtype=wp.float64),
-                           y_out: wp.array(dtype=vecD)):
+                           y_out: wp.array(dtype=vecD), steps_out: wp.array(dtype=wp.int32)):
         jt = wp.tid()
         t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
+        taken = int(0)   # trial steps of this cell, accepted or not; MAXS means the cell ran out of steps
         for _ in range(MAXS):
             if t >= t1:
                 break
+            taken = taken + 1
             h = wp.min(dt, t1 - t)
             J = jac(t, y, pj, tables)
             W = matDD()
@@ -413,18 +417,34 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
                 comp = err_vec[i] / sc
                 ssum = ssum + comp * comp
             err = wp.sqrt(ssum / wp.float64(D))
+            if not wp.isfinite(err):
+                # A trial step that left the domain of the field (a fast decay overshoots below zero in a stage,
+                # and a root or a logarithm of it is not a number) has no error estimate. It is a rejected step
+                # like any other and must shorten the next one: a not-a-number would pass the max() below as the
+                # error floor, the step would be lengthened fivefold, and the cell would repeat the same step
+                # until it ran out of steps.
+                err = wp.float64(1.0e30)
             if err <= wp.float64(1.0):
                 t = t + h; y = ynew
             fac = wp.float64(SAFETY) * wp.pow(wp.max(err, wp.float64(ERR_FLOOR)), wp.float64(ORDER_EXP))
             dt = h * wp.clamp(fac, wp.float64(FAC_MIN), wp.float64(FAC_MAX))
         y_out[jt] = y
+        steps_out[jt] = taken
 
-    kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=1)   # one thread per row of the first argument
+    kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=2)   # one thread per row of the first argument
     import jax.numpy as jnp
     tables = jnp.asarray(table_values)
 
-    def fn(*args):   # jax_kernel returns a list of outputs; hand back the single array
-        out = kernel_fn(*args, tables)
-        return out[0] if isinstance(out, (list, tuple)) else out
+    def fn(*args):   # the states alone
+        return kernel_fn(*args, tables)[0]
+
+    def with_steps(*args):
+        """``(y1, steps)``: the states and the trial steps every cell took (accepted or rejected). A cell
+        with ``max_steps`` of them ran out of steps before the end of its interval."""
+        y1, steps = kernel_fn(*args, tables)
+        return y1, steps
+
+    fn.with_steps = with_steps
+    fn.max_steps = MAXS
     _CACHE[key] = fn
     return fn

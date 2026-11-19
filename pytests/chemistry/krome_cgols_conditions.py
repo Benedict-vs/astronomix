@@ -66,7 +66,9 @@ The per-cell kernel (``--kernel``) on the same H200, the metal table looked up
   cost is the number of steps: without the metal table (``--kernel-table
   none``), where the hot gas cools more slowly, 4.7 and 23 at 1e-6;
 * a first trial step of the whole step (``--kernel-first-step 1``) changes
-  nothing: 5.4 and 24 without the table at 1e-6.
+  nothing on this plane, where every cell evolves: 5.4 and 24 without the table
+  at 1e-6. (On frames of a CGOLS run, where nine cells in ten are quiet halo
+  gas, it cuts the steps per cell from 4.4 to 1.6; see the README.)
 """
 
 import argparse
