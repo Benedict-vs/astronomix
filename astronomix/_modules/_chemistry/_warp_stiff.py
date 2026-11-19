@@ -310,6 +310,10 @@ def _extend_translator(JF):
 # Kernel: adaptive Rosenbrock23 per cell with a per-cell step length (gradsolve's scheme, constants and controller)
 # ---------------------------------------------------------------------------------------------------------------------
 _CACHE = {}
+#: A cell whose step has shrunk below this fraction of its interval has stalled: about forty rejections in a row,
+#: far below any time scale of a network (the shortest are 1e-15 of a hydro step). No step, however short, has an
+#: acceptable error then, which means that the right-hand side or its Jacobian is not finite at the state itself.
+STALL_FRACTION = 1.0e-30
 _TABLE_STORE = None   # the tables of the build in progress: {"values": [...], "offsets": {content: offset}}, see ``_element``
 
 
@@ -318,10 +322,13 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     """Return ``fn(y0[n, dim], dt[n]) -> y1[n, dim]`` (float64), a JAX primitive running one Warp thread per cell.
 
     ``vector_field(t, state, args)`` is the diffrax-style right-hand side with CONCRETE closed-over parameters (it is
-    traced once here, at build time). A cell whose ``max_steps`` are exhausted returns its last accepted state, like
-    diffrax with ``throw=False``. ``fn.with_steps(y0, dt)`` returns ``(y1, steps)`` with the trial steps of every cell,
-    which is what a cell costs (a timing of single calls is not a measure of it on a busy machine) and shows the
-    cells that ran out of steps (``steps == fn.max_steps``). ``first_step_fraction`` is the first trial step of every cell as a fraction of its
+    traced once here, at build time). A cell that does not reach the end of its interval returns its last accepted
+    state, like diffrax with ``throw=False``: it has used up ``max_steps``, or its step has collapsed (below
+    ``STALL_FRACTION`` of the interval), in which case it stops at once instead of using up its steps. On a GPU a
+    launch lasts as long as its slowest cell, so one cell that runs to ``max_steps`` costs every call the time of
+    ``max_steps`` steps. ``fn.with_steps(y0, dt)`` returns ``(y1, steps)`` with the trial steps of every cell, which
+    is what a cell costs (a timing of single calls is not a measure of it on a busy machine); the count is NEGATIVE
+    for a cell that did not reach the end of its interval. ``first_step_fraction`` is the first trial step of every cell as a fraction of its
     step length: the controller grows a step by at most a factor of five, so with the default of 0.01 a cell that
     hardly changes still takes four steps; with 1 it takes the whole step at once when the error estimate allows it,
     and is otherwise cut back as after any rejected step.
@@ -353,6 +360,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     dcoef = float(GR._D_COEF); e32 = float(GR._E32)
     SAFETY, ERR_FLOOR, FAC_MIN, FAC_MAX, ORDER_EXP = float(GR.SAFETY), float(GR.ERR_FLOOR), float(GR.FAC_MIN), float(GR.FAC_MAX), float(GR.ORDER_EXP)
     RTOL, ATOL, MAXS, FIRST = float(rtol), float(atol), int(max_steps), float(first_step_fraction)
+    STALL = float(STALL_FRACTION)
 
     @wp.func
     def _gauss_solve(A: matDD, b: vecD):
@@ -390,7 +398,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
         jt = wp.tid()
         t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
-        taken = int(0)   # trial steps of this cell, accepted or not; MAXS means the cell ran out of steps
+        taken = int(0)   # trial steps of this cell, accepted or not
         for _ in range(MAXS):
             if t >= t1:
                 break
@@ -428,7 +436,14 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
                 t = t + h; y = ynew
             fac = wp.float64(SAFETY) * wp.pow(wp.max(err, wp.float64(ERR_FLOOR)), wp.float64(ORDER_EXP))
             dt = h * wp.clamp(fac, wp.float64(FAC_MIN), wp.float64(FAC_MAX))
+            if dt < t1 * wp.float64(STALL):
+                # The step has collapsed: no step from this state is accepted, however short (a right-hand side or
+                # a Jacobian that is not finite at the state itself). The cell stops here with its last accepted
+                # state. Going on would use up all its steps on nothing, and hold up the launch for that long.
+                break
         y_out[jt] = y
+        if t < t1:
+            taken = -taken   # the cell did not reach the end of its interval: out of steps, or stalled
         steps_out[jt] = taken
 
     kernel_fn = wp.jax_kernel(rosenbrock23_cells, num_outputs=2)   # one thread per row of the first argument
@@ -446,8 +461,9 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
         return kernel_fn(*args, tables)[0]
 
     def with_steps(*args):
-        """``(y1, steps)``: the states and the trial steps every cell took (accepted or rejected). A cell
-        with ``max_steps`` of them ran out of steps before the end of its interval."""
+        """``(y1, steps)``: the states and the trial steps every cell took (accepted or rejected). The count
+        is negative for a cell that did not reach the end of its interval (it ran out of steps, or its step
+        collapsed); such a cell returns its last accepted state."""
         y1, steps = kernel_fn(*args, tables)
         return y1, steps
 

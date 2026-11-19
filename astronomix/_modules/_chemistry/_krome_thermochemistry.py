@@ -382,14 +382,40 @@ def cosmic_ray_heat_per_h2_ionisation(molecular_hydrogen, polynomial, linear):
 
 
 def thermalised_fraction(temperature, hydrogen, molecular_hydrogen, hydrogen_nuclei):
-    """Fraction of the H2 formation energy that heats the gas (KROME's ``h2heatfac``)."""
-    safe_nuclei = jnp.maximum(hydrogen_nuclei, 1e-30)
-    critical_density = 1.0e6 * temperature ** (-0.5) / (
-        1.6 * jnp.exp(-((4.0e2 / temperature) ** 2)) * hydrogen / safe_nuclei
-        + 1.4 * jnp.exp(-1.2e4 / (temperature + 1.2e3)) * molecular_hydrogen / safe_nuclei
-        + 1e-300
+    """Fraction of the H2 formation energy that heats the gas (KROME's ``h2heatfac``).
+
+    KROME writes it with the critical density ``n_cr``,
+
+        n_cr = 1e6 T^-1/2 / (a x_H + b x_H2),    h2heatfac = 1 / (1 + n_cr / n),
+
+    ``x = n_i / n`` with the hydrogen nuclei ``n``, ``a = 1.6 exp(-(400/T)^2)``
+    and ``b = 1.4 exp(-12000/(T + 1200))``. The nuclei cancel:
+
+        h2heatfac = q / (q + 1e6 T^-1/2),        q = a n_H + b n_H2,
+
+    and that is what is evaluated here. It is the same number, and it has a
+    finite derivative when the gas holds neither H nor H2 (``q = 0``: fully
+    ionised gas in which the solver has taken the last neutral atoms to zero).
+    The first form has not: its value is 0 there, but its derivative is 0 times
+    infinity, which made the Jacobian of the temperature equation not-a-number,
+    and a stiff solver cannot take a step with that.
+
+    Args:
+        temperature: Gas temperature [K].
+        hydrogen: Number density of H [cm^-3].
+        molecular_hydrogen: Number density of H2 [cm^-3].
+        hydrogen_nuclei: Number density of the hydrogen nuclei [cm^-3]; it
+            cancels and is not used.
+
+    Returns:
+        The fraction, between 0 and 1.
+    """
+    del hydrogen_nuclei
+    colliders = (
+        1.6 * jnp.exp(-((4.0e2 / temperature) ** 2)) * hydrogen
+        + 1.4 * jnp.exp(-1.2e4 / (temperature + 1.2e3)) * molecular_hydrogen
     )
-    return 1.0 / (1.0 + critical_density / safe_nuclei)
+    return colliders / (colliders + 1.0e6 * temperature ** (-0.5))
 
 
 # -------------------------------------------------------------

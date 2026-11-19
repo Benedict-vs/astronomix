@@ -112,7 +112,7 @@ def test_robertson_keeps_the_linear_invariant(robertson):
 
 def test_step_counts(robertson):
     """``with_steps`` returns the same states and the trial steps of every cell: more for a longer
-    interval, none for a zero one, and the limit for a cell that runs out of steps."""
+    interval, none for a zero one, and a negative count for a cell that runs out of steps."""
     solver, initial, end_time, result = robertson
     states, steps = solver.with_steps(initial, end_time)
     np.testing.assert_array_equal(np.asarray(states), result)
@@ -121,14 +121,17 @@ def test_step_counts(robertson):
     interval = np.asarray(end_time)
     assert (steps[interval == 0.0] == 0).all()
     # the first trial step is a hundredth of the interval and grows fivefold at most
-    assert steps[interval > 0.0].min() >= 4
+    assert steps[interval > 0.0].min() >= 4  # positive: every cell reached the end of its interval
     assert steps.max() < solver.max_steps
     assert (np.diff(steps[np.argsort(interval)]) >= 0).all()  # a longer interval takes more steps
     _, none = solver.with_steps(initial, jnp.zeros(initial.shape[0]))
     assert int(np.asarray(none).max()) == 0
     short = build_fused_core_solver(_robertson, 3, rtol=RTOL, atol=ATOL, max_steps=5, cache_key="pytest-robertson-short")
     _, exhausted = short.with_steps(initial, end_time)
-    assert int(np.asarray(exhausted).max()) == 5 == short.max_steps
+    exhausted = np.asarray(exhausted)
+    # the cells that need more than five steps come back unfinished, marked by the sign
+    assert short.max_steps == 5 and int(exhausted.min()) == -5 and int(exhausted.max()) <= 0
+    assert (exhausted[interval > 0.0] == -5).all() and (exhausted[interval == 0.0] == 0).all()
 
 
 def _decay_under_a_root(time, state, args):
@@ -150,11 +153,42 @@ def test_a_step_without_an_error_estimate_is_shortened():
     states, steps = solver.with_steps(initial, interval)
     states, steps = np.asarray(states), np.asarray(steps)
     assert np.isfinite(states).all()
-    assert steps.max() < solver.max_steps
+    assert steps.min() > 0 and steps.max() < solver.max_steps  # every cell finished
     decayed = np.exp(-1.0e3 * np.asarray(interval))
     slow = np.exp(-(2.0 / 1.0e3) * (1.0 - np.exp(-0.5e3 * np.asarray(interval))))
     np.testing.assert_allclose(states[:, 0], slow, rtol=1.0e-5)
     np.testing.assert_allclose(states[:, 1], decayed, rtol=1.0e-3, atol=1.0e-9)
+
+
+def _decay_with_a_singular_derivative(time, state, args):
+    """A decay, and a second variable that gains through a factor ``1 / (1 + 1 / (x + 1e-300))``: finite at
+    ``x = 0`` (1e-300), but its derivative there is 1e-600 times 1e600, zero times infinity in double
+    precision. This is the form the chemical heating of a KROME network had (the fraction of the H2 formation
+    energy that heats the gas, through a critical density that is infinite in gas without H and H2)."""
+    return jnp.stack([-state[0], state[0] / (1.0 + 1.0 / (state[1] + 1.0e-300))])
+
+
+def test_a_cell_that_cannot_advance_stops_at_once():
+    """A cell whose Jacobian is not finite at its state has no acceptable step, however short. It must stop
+    after the few rejections that collapse its step, with its state unchanged and a negative step count, and
+    not use up ``max_steps``: on a GPU one such cell makes every launch last as long as ``max_steps`` steps
+    (seen in a galaxy run: 1838 of 33 million cells, 8192 steps each, made a step seven times slower)."""
+    solver = build_fused_core_solver(
+        _decay_with_a_singular_derivative, 2, rtol=1.0e-6, atol=1.0e-12, max_steps=4096, cache_key="pytest-stall",
+        first_step_fraction=1.0,
+    )
+    initial = jnp.asarray([[1.0, 1.0e-3], [1.0, 0.0], [1.0, 4.0]])  # the second cell has the singular derivative
+    interval = jnp.asarray([1.0, 1.0, 1.0])
+    states, steps = solver.with_steps(initial, interval)
+    states, steps = np.asarray(states), np.asarray(steps)
+    # the regular cells decay, and their second variable grows
+    assert steps[0] > 0 and steps[2] > 0
+    np.testing.assert_allclose(states[[0, 2], 0], np.exp(-1.0), rtol=1.0e-4)
+    assert (states[[0, 2], 1] > np.asarray(initial)[[0, 2], 1]).all()
+    # the singular cell comes back as it was, marked unfinished, after the rejections that take its step from
+    # the whole interval to below 1e-30 of it (a factor of five at most per rejection: 43 of them)
+    np.testing.assert_array_equal(states[1], np.asarray(initial)[1])
+    assert -60 <= steps[1] < 0
 
 
 def test_zero_step_returns_the_state(robertson):

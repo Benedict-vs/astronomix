@@ -487,6 +487,42 @@ def test_heating_and_cooling_terms(network_file, data_folder, temperature):
     assert float(warm.temperature_derivative(abundances, temperature, 5.0 / 3.0, 3e-17, 1.7)) == pytest.approx(expected, rel=1e-12)
 
 
+def test_jacobian_is_finite_without_hydrogen_atoms_and_molecules(network_file, data_folder):
+    """Fully ionised gas in which the solver has taken H and H2 to exactly zero. The fraction of the H2
+    formation energy that heats the gas is zero there; written as KROME writes it (through a critical density
+    that is infinite without colliders) its derivative is zero times infinity, the temperature row of the
+    Jacobian is not a number, and a stiff solver cannot take a step. In a galaxy run such cells used up their
+    8192 steps in every hydro step and came back unchanged."""
+    from astronomix._modules._chemistry import _krome_thermochemistry as thermo
+
+    # the same number as KROME's form where that is regular
+    for temperature in (10.0, 1.0e2, 1.0e3, 1.0e4, 1.0e6):
+        for hydrogen, molecular in ((1.0, 1.0e-3), (1.0e-8, 1.0e2), (30.0, 5.0), (1.0e-20, 1.0e-25)):
+            nuclei = hydrogen + 2.0 * molecular + 0.3
+            critical = 1.0e6 * temperature ** (-0.5) / (
+                1.6 * np.exp(-((4.0e2 / temperature) ** 2)) * hydrogen / nuclei
+                + 1.4 * np.exp(-1.2e4 / (temperature + 1.2e3)) * molecular / nuclei
+            )
+            krome = 1.0 / (1.0 + critical / nuclei)
+            assert float(thermo.thermalised_fraction(temperature, hydrogen, molecular, nuclei)) == pytest.approx(krome, rel=1e-13)
+    # zero, with finite derivatives, without colliders
+    value, gradient = jax.value_and_grad(lambda x: thermo.thermalised_fraction(x[0], x[1], x[2], 1.0))(jnp.asarray([2.5e6, 0.0, 0.0]))
+    assert float(value) == 0.0 and np.isfinite(np.asarray(gradient)).all()
+
+    network, species = build_krome_network(
+        network_file, user_variables={"user_flux": 0.0}, h2_formation_on_dust=True, data_folder=data_folder, free_free_cooling=True
+    )
+    fractions = {"H": 0.0, "E": 1.0, "H+": 1.0, "He+": 1.0e-5, "He": 0.0, "H2": 0.0, "H2+": 0.0, "C": 0.0, "C+": 1.4e-4}
+    for temperature in (10.0, 1.0e4, 2.5e6, 1.0e8):
+        abundances = jnp.asarray([fractions[name] * 1.0e-3 for name in species])
+        rate = lambda n, t: network.temperature_derivative(n, t, 5.0 / 3.0, 3e-17, 1.7)
+        assert np.isfinite(float(rate(abundances, temperature)))
+        assert np.isfinite(np.asarray(jax.jacfwd(rate, argnums=0)(abundances, temperature))).all(), temperature
+        assert np.isfinite(float(jax.jacfwd(rate, argnums=1)(abundances, temperature))), temperature
+        rates = lambda n: network.reaction_fluxes(n, temperature) if hasattr(network, "reaction_fluxes") else n
+        assert np.isfinite(np.asarray(jax.jacfwd(rates)(abundances))).all()
+
+
 def test_metals_without_krome_data(network_file):
     """Without KROME's data folder the metals cool through the two lines of the chemistry module."""
     network, species = build_krome_network(network_file, user_variables={"user_flux": 0.0})

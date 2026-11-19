@@ -481,7 +481,12 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
   the same bit for bit. On the 256 x 256 x 512 galaxy run below, with a cold disk under a hot
   halo, a step took 21 s with the ordering against 45 to 60 s without.
 - `solver.with_steps(y0, dt)` also returns the trial steps of every cell: what a cell costs,
-  and which cells ran out of steps (`steps == solver.max_steps`). Count steps to find the
+  and which cells did not reach the end of their interval (a negative count: the cell ran out
+  of `max_steps`, or its step collapsed because no step from its state is accepted, and it
+  then stops at once). Such cells return their last accepted state. Watch for them: on a GPU a
+  launch lasts as long as its slowest cell, so a single cell that runs to `max_steps` costs
+  every call that many steps (in a 256 x 256 x 512 galaxy run, 1838 cells with a Jacobian
+  that was not finite made a hydro step seven times slower). Count steps to find the
   cost; the wall time of single calls is not a measure of it on a busy machine. On frames of
   that run nine cells in ten are halo gas that takes the minimum of four steps, which the
   first trial step sets (`first_step_fraction`, default 0.01 of the interval, growing at most
