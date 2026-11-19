@@ -48,7 +48,8 @@ are arguments of :func:`build_krome_network`:
   ``krome_fshield`` returns;
 * ``-columnDensityMethod=DEFAULT | JEANS``: how a number density becomes the
   column density of the two shielding terms;
-* ``-photoBins``: the binned spectrum.
+* ``-photoBins``: the binned spectrum;
+* ``-cooling=FF``: the bremsstrahlung of the atomic ions (off by default).
 
 The heating and cooling of a KROME network are KROME's too (see
 ``_krome_thermochemistry.py``): the network carries its own temperature
@@ -140,6 +141,24 @@ def _elements_and_charge(name):
     for element, number in re.findall(r"([A-Z][a-z]?)(\d*)", name.replace("+", "").replace("-", "")):
         counts[element] = counts.get(element, 0) + (int(number) if number else 1)
     return counts, charge
+
+
+def _free_free_charge_squared(name):
+    """Weight of a species in the bremsstrahlung, as KROME's generator sets it.
+
+    KROME sums the charge squared times the density over the species that are
+    single atoms with a positive charge (``bms_ions``); molecular ions, anions
+    and the electrons do not radiate in it.
+
+    Args:
+        name: The species name.
+
+    Returns:
+        The charge squared of an atomic ion, zero for every other species.
+    """
+    counts, charge = _elements_and_charge(name)
+    is_atom = sum(counts.values()) == 1
+    return float(charge * charge) if is_atom and charge > 0 else 0.0
 
 
 def _species_mass(name):
@@ -464,6 +483,8 @@ class KromeNetwork(eqx.Module):
     shield_habing_dust: bool = eqx.field(static=True)
     column_density_method: str = eqx.field(static=True)
     cooling_floor_temperature: float = eqx.field(static=True)
+    # charge squared of every species in the bremsstrahlung (KROME's bms_ions), or () without that term
+    free_free_charges: Tuple[float, ...] = eqx.field(static=True)
 
     def _single(self, value):
         # a real constant that KROME's Fortran writes without a ``d`` exponent
@@ -643,6 +664,14 @@ class KromeNetwork(eqx.Module):
             ),
             "cooling_compton": thermo.compton_cooling(temperature, electrons),
         }
+        if self.free_free_charges:
+            # The term exists only in a network built with it, so that a network
+            # built without it keeps the right-hand side (and the kernel) it had.
+            terms["cooling_free_free"] = thermo.free_free_cooling(
+                temperature,
+                electrons,
+                jnp.dot(jnp.asarray(self.free_free_charges), n),
+            )
         if self.metal_lines:
             variables, upper_limit, metals = self.metal_lines
             lines = thermo.metal_line_cooling(
@@ -727,6 +756,7 @@ def build_krome_network(
     data_folder=None, metal_table=True, metallicity=None, ortho_para_ratio=3.0, single_precision_literals=False,
     photo_bins=None, xsec_folder=None, shielding=None, shield_habing_dust=False, column_density_method="DEFAULT",
     floor_temperature=MINIMUM_TEMPERATURE_KELVIN,
+    free_free_cooling=False,
 ):
     """Build the right-hand side of a KROME network file.
 
@@ -777,6 +807,10 @@ def build_krome_network(
             ``-columnDensityMethod``), for the two shielding terms.
         floor_temperature: Temperature [K] at which the cooling is subtracted
             from itself (KROME's ``phys_Tfloor``).
+        free_free_cooling: Add the bremsstrahlung of the atomic ions of the
+            network (KROME's ``-cooling=FF``), which dominates the cooling of
+            ionised gas above about 1e7 K. Off by default, as in a KROME build
+            without that option.
 
     Returns:
         The network (a :class:`KromeNetwork`) and the species names.
@@ -942,5 +976,8 @@ def build_krome_network(
         shield_habing_dust=bool(shield_habing_dust),
         column_density_method=column_density_method,
         cooling_floor_temperature=float(floor_temperature),
+        free_free_charges=(
+            tuple(_free_free_charge_squared(name) for name in species) if free_free_cooling else ()
+        ),
     )
     return network, species

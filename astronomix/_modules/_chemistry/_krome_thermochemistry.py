@@ -5,12 +5,14 @@ The terms follow KROME's ``krome_cooling.f90`` and ``krome_heating.f90`` (Grassi
 al. 2014) as built with ``-cooling=H2,ATOMIC,CHEM,Z_CIENOUV,COMPTON`` and
 ``-heating=CHEM,PHOTO,PHOTODUSTNET,CR``:
 
-* cooling: the collisional excitation, ionisation, recombination and
-  bremsstrahlung of H and He (Cen 1992); the fine-structure and metastable
-  lines of the metals below 1e4 K, from the statistical equilibrium of two- and
-  three-level systems; the tabulated metal cooling of Shen et al. (2013) above
-  1e4 K; Compton cooling on the CMB; and the H2 lines (Glover & Abel 2008,
-  Glover 2015), with the low-density limit summed over the colliders;
+* cooling: the collisional excitation, ionisation and recombination of H and
+  He (Cen 1992; KROME's ``cooling_Atomic`` has no bremsstrahlung); the
+  fine-structure and metastable lines of the metals below 1e4 K, from the
+  statistical equilibrium of two- and three-level systems; the tabulated metal
+  cooling of Shen et al. (2013) above 1e4 K; Compton cooling on the CMB; the H2
+  lines (Glover & Abel 2008, Glover 2015), with the low-density limit summed
+  over the colliders; and, as an option (KROME's ``-cooling=FF``), the
+  bremsstrahlung of the atomic ions;
 * heating: the photoelectric effect on dust net of the recombination cooling
   (Bakes & Tielens 1994), with the dust abundance relative to solar and the
   density of hydrogen nuclei as in KROME; the chemical term (formation and
@@ -34,6 +36,11 @@ import numpy as np
 BOLTZMANN_ERG = 1.380648e-16
 ELECTRON_VOLT_TO_ERG = 1.60217646e-12
 CMB_TEMPERATURE_KELVIN = 2.73
+
+# Bremsstrahlung (KROME's cooling_ff): the coefficient of Cen (1992)
+# [erg cm^3 s^-1 K^-1/2] and the mean Gaunt factor that KROME uses with it.
+FREE_FREE_COEFFICIENT = 1.42e-27
+FREE_FREE_GAUNT_FACTOR = 1.5
 
 METAL_LINES_FILE = "coolZ.dat"
 METAL_TABLE_FILE = "coolZ_CIE2012NOUV.dat"
@@ -169,6 +176,32 @@ def atomic_cooling(temperature, electrons, hydrogen, helium, ionized_hydrogen, i
 def compton_cooling(temperature, electrons):
     """Compton cooling on the CMB at redshift zero [erg cm^-3 s^-1]."""
     return 5.65e-36 * (temperature - CMB_TEMPERATURE_KELVIN) * electrons
+
+
+def free_free_cooling(temperature, electrons, charge_squared_ions):
+    """Bremsstrahlung of the atomic ions (KROME's ``cooling_ff``, ``-cooling=FF``).
+
+    KROME's ``cooling_Atomic`` leaves the bremsstrahlung of Cen (1992) out; this
+    is the separate term that a KROME build adds with ``-cooling=FF``, with a
+    constant mean Gaunt factor.
+
+    Args:
+        temperature: Gas temperature [K].
+        electrons: Number density of the electrons [cm^-3].
+        charge_squared_ions: Sum over the atomic ions of their charge squared
+            times their number density [cm^-3] (KROME's ``bms_ions``).
+
+    Returns:
+        The cooling rate [erg cm^-3 s^-1].
+    """
+    cool = (
+        FREE_FREE_COEFFICIENT
+        * FREE_FREE_GAUNT_FACTOR
+        * jnp.sqrt(temperature)
+        * charge_squared_ions
+        * electrons
+    )
+    return jnp.maximum(cool, 0.0)
 
 
 def metal_line_cooling(temperature, density, metals, variables, upper_limit, evaluate, syntax_tree, ortho_para_ratio):

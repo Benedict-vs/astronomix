@@ -1,5 +1,5 @@
 CHEMISTRY WITH ASTRONOMIX: OUR CARBOX VERSION, GRADSOLVE AND THE 16-SPECIES NETWORK
-Setup instructions, 17 November 2026 (section 7 added 18 November 2026)
+Setup instructions, 17 November 2026 (section 7 added 18 November, extended 19 November 2026)
 ==================================================================================
 
 What you get
@@ -137,11 +137,20 @@ minutes on a CPU; it is cached afterwards. Add "--no-kernel" to skip it.
   without --no-metal-table    the metals also cool above 1e4 K (KROME's table);
                               only Kvaerno5 runs, the kernel cannot use a table
   --draine X                  radiation field: Draine's times X
+  --free-free                 add the bremsstrahlung of the ions (KROME's
+                              -cooling=FF); needed for gas above about 1e7 K
   --help                      everything else
 
 Warnings like "wrong format for reaction 36 ... line skipped as in KROME" are
 expected with react_galaxy_ism_plus: three lines of that file do not fit their
 layout, KROME skips them, and so do we.
+
+Cosmic rays: react_galaxy_ism_plus has its cosmic-ray block commented out, so
+nothing ionises or heats shielded gas. react_galaxy_ism_plus_cr is the same
+file with the block on (six reactions, rate 3e-17 per second in the example);
+use it when the diffuse gas matters. Followed for 200 Myr under the Draine
+field with KROME's metal table, a cell at n_H = 1 cm^-3 ends at about 4200 K
+with the block and at about 360 K without it. The same warnings appear.
 
 Details: README.md, section "Networks in the KROME format" (how to use it in
 a simulation, the options of a KROME build and their counterparts here).
