@@ -5,7 +5,8 @@ The manifest is the contract with the ASGARD writing repository: every
 simulation number and every figure a paper uses is listed here with its
 provenance, and the writing side pulls the manifest and the listed figures at a
 tag ``<paper>-results-vN``. Format: ``docs/manifest_spec.md`` of the writing
-repository. Entries are appended or replaced by ``key``.
+repository. Entries are appended or replaced by ``key``; ``prune`` removes the
+keys an exporter no longer writes.
 
 Usage, in an analysis script::
 
@@ -160,6 +161,25 @@ def _update(paper, section, entry, commit):
         ordered = {key: manifest[key] for key in ("paper", "generated", "astronomix_commit", "numbers", "figures")}
         ordered.update({key: value for key, value in manifest.items() if key not in ordered})
         write(ordered)
+
+
+def prune(paper, section, keep, script):
+    """
+    Remove the entries of ``section`` written by ``script`` whose key is not in ``keep``.
+
+    For an exporter that regenerates all its entries: a key it no longer
+    produces (e.g. after a rename) would otherwise stay in the manifest.
+    Entries written by other scripts are left alone. Returns the removed keys.
+    """
+    script = Path(script).absolute()
+    script_rel = str(script.relative_to(_repo_root(script)))
+    with _locked_manifest(paper) as (manifest, write):
+        items = manifest.get(section) or []
+        removed = [item["key"] for item in items if item.get("script") == script_rel and item["key"] not in keep]
+        if removed:
+            manifest[section] = [item for item in items if item["key"] not in removed]
+            write(manifest)
+    return removed
 
 
 def export_number(paper, key, value, *, unit, status, description, runs, data=None,

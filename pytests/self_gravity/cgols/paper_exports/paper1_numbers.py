@@ -45,7 +45,7 @@ HERE = Path(__file__).resolve().parent
 CGOLS = HERE.parent
 sys.path.insert(0, str(CGOLS))
 
-from paper_exports.export import export_figure, export_number
+from paper_exports.export import export_figure, export_number, prune
 
 PAPER = "paper1"
 STUDIES = CGOLS / "data" / "studies"
@@ -54,6 +54,7 @@ BOX_HEIGHT_KPC = 20.0  # z extent of the box, -10 ... 10 kpc
 CONVERGED_TOLERANCE = 0.05
 
 BURST = (15.0, 40.0)
+EARLY = (15.0, 30.0)  # before the 30-45 Myr episode
 RIM = (30.0, 45.0)
 SX_WINDOW = (50.0, 70.0)
 LATE = (60.0, 75.0)
@@ -280,27 +281,43 @@ def numbers():
             for tag in ("A512", "A1024", "A2048")
         }
         verdict, text = ladder(shell)
-        # The 5 kpc sphere passes the 5 % test only narrowly (+4.6 %, from a 30-45 Myr episode that grows with
-        # resolution), and the 1 kpc sphere moves without a trend: both stay provisional.
+        # The 5 kpc sphere passes the 5 % test only narrowly (+4.6 %), from a 30-45 Myr episode that grows with
+        # resolution, and the 1 kpc sphere moves without a trend: both not converged (decision 2026-11-19,
+        # asgard-papers #3); the converged 5 kpc loading is ShellMdotAfiveKpcEarly.
         yield key, dict(
-            value=shell["A-2048"], unit="Msun/yr", status="provisional", convergence=verdict,
+            value=shell["A-2048"], unit="Msun/yr", status="provisional", convergence="not_converged",
             uncertainty=value_range(shell),
             description=f"Net outflow through the full sphere r = {word} kpc (bin [r - 0.125, r) kpc), {burst}, "
                         f"A-2048, every checkpoint.{text}",
             runs=["A-2048"], data=STUDIES / "shells_v2_A2048.npz",
         )  # fmt: skip
+    early = {
+        LABEL[tag]: record_mean("shells_v2_", tag, EARLY, lambda r: np.sum(r["mdot_net"][:, shell_index(5.0)]))
+        for tag in ("A512", "A1024", "A2048")
+    }
+    verdict, text = ladder(early)
+    yield "ShellMdotAfiveKpcEarly", dict(
+        value=early["A-2048"], unit="Msun/yr", status=verdict, convergence=verdict, uncertainty=value_range(early),
+        description="Net outflow through the full sphere r = 5 kpc (bin [r - 0.125, r) kpc), 15-30 Myr (every "
+                    "snapshot after 15 Myr), before the 30-45 Myr episode, A-2048, every checkpoint; the "
+                    f"burst-inclusive 15-40 Myr value is ShellMdotAfiveKpc.{text}",
+        runs=["A-2048"], data=STUDIES / "shells_v2_A2048.npz",
+    )  # fmt: skip
 
-    # Model C (N = 16) against A.
+    # Model C (N = 16) against A. Keys carry the resolution (TenTwentyFour) until C-2048 is measured; the
+    # unsuffixed C keys are reserved for C-2048, as for A (decision 2026-11-19, asgard-papers #2).
     ladder_c = {LABEL[tag]: plane_mean(tag) for tag in ("C256", "C512", "C1024")}
     verdict, text = ladder(ladder_c)
-    yield "MdotCfiveKpc", dict(
-        value=ladder_c["C-1024"], unit="Msun/yr", status="provisional", convergence=verdict,
+    # -4.8 % passes the 5 % test only just, and the ladder still moves one way (-15 %, then -4.8 %): not
+    # converged until C-2048 closes it (decision 2026-11-19, asgard-papers #2).
+    yield "MdotCfiveKpcTenTwentyFour", dict(
+        value=ladder_c["C-1024"], unit="Msun/yr", status="provisional", convergence="not_converged",
         uncertainty=value_range(ladder_c),
         description=f"Mean net outflow through both |z| = 5 kpc planes, {burst}, C-1024 (N = 16), from the frames. "
-                    f"Provisional until C-2048.{text}",
+                    f"Not converged until C-2048 closes the ladder (one-way trend).{text}",
         runs=["C-1024"], data=frames_dir("C1024"),
     )  # fmt: skip
-    yield "RatioMdotCtoA", dict(
+    yield "RatioMdotCtoATenTwentyFour", dict(
         value=ladder_c["C-1024"] / ladder_a["A-1024"], unit="", status="provisional", convergence=None,
         description=f"Burst outflow through |z| = 5 kpc of C over A at 1024^3, {burst}, frames "
                     f"(C-512 / A-512: {ladder_c['C-512'] / ladder_a['A-512']:.2f}).",
@@ -308,7 +325,7 @@ def numbers():
     )  # fmt: skip
     shell_c = record_mean("shells_v2_", "C1024", BURST, lambda r: np.sum(r["mdot_net"][:, shell_index(5.0)]))
     plane_c = record_mean("convergence3d_v3_", "C1024", BURST, lambda r: np.sum(r["mdot_net"][h_index(5.0)]))
-    yield "ShellToPlaneC", dict(
+    yield "ShellToPlaneCTenTwentyFour", dict(
         value=shell_c / plane_c, unit="", status="provisional", convergence=None,
         description=f"Net outflow through the sphere r = 5 kpc over that through both |z| = 5 kpc planes, {burst}, "
                     f"C-1024 (N = 16), the same 2.5 Myr checkpoints ({shell_c:.2f} / {plane_c:.2f} Msun/yr).",
@@ -321,7 +338,7 @@ def numbers():
         cache, _ = emission(tag)
         lx[tag] = float(cache["per_snapshot__L_xray_cgols_xz"][at_time(cache, 60.0)])
     for key, tags, run in (("LxAsixtyMyr", ("A512", "A1024", "A2048"), "A-2048"),
-                           ("LxCsixtyMyr", ("C256", "C512", "C1024"), "C-1024")):  # fmt: skip
+                           ("LxCsixtyMyrTenTwentyFour", ("C256", "C512", "C1024"), "C-1024")):  # fmt: skip
         verdict, text = ladder({LABEL[t]: lx[t] for t in tags})
         yield key, dict(
             value=lx[tags[-1]], unit="erg/s", status="single_snapshot", convergence=verdict,
@@ -339,7 +356,7 @@ def numbers():
         sx_text = ("AtomDB 3.1.3 0.3-1.0 keV photons after TBabs absorption by N_H = 4e20 cm^-2 (Galactic, toward "
                    "M82), edge-on x-z projection, north")  # fmt: skip
         for key, tags, run in (("ScaleHeightA", ("A512", "A1024", "A2048"), "A-2048"),
-                               ("ScaleHeightC", ("C1024",), "C-1024")):  # fmt: skip
+                               ("ScaleHeightCTenTwentyFour", ("C1024",), "C-1024")):  # fmt: skip
             heights = {LABEL[t]: scale_height(photon[t][0]) for t in tags}
             verdict, text = ladder(heights)
             yield key, dict(
@@ -348,12 +365,12 @@ def numbers():
                             f"log S_X over 0.5-5 kpc, 60 Myr, {run}; {sx_text}. Strickland+04 north: 1.42 kpc.{text}",
                 runs=[run], data=photon[tags[-1]][1],
             )  # fmt: skip
-        for model, tags in (("A", ("A512", "A1024", "A2048")), ("C", ("C1024",))):
+        for model, tags, suffix in (("A", ("A512", "A1024", "A2048"), ""), ("C", ("C1024",), "TenTwentyFour")):
             for z0, word in ((2.0, "two"), (5.0, "five")):
                 ratios = {LABEL[t]: sx_ratio(photon[t][0], z0)[0] for t in tags}
                 count = sx_ratio(photon[tags[-1]][0], z0)[1]
                 verdict, text = ladder(ratios)
-                yield f"SXratio{model}{word}Kpc", dict(
+                yield f"SXratio{model}{word}Kpc{suffix}", dict(
                     value=ratios[LABEL[tags[-1]]], unit="", status="provisional", convergence=verdict,
                     description=f"S_X / Strickland+04 north fit (Sigma_0 = 29.16e-9 photons s^-1 cm^-2 arcsec^-2, "
                                 f"H = 1.42 kpc, no conversion factor) at |z| = {z0:g} kpc, geometric mean over "
@@ -468,17 +485,24 @@ def main():
     args = parser.parse_args()
     os.chdir(CGOLS)
 
+    keys = {"numbers": set(), "figures": set()}
     for key, entry in numbers():
+        keys["numbers"].add(key)
         print(f"{key:32s} {entry['value']:11.4g} {entry['unit']:8s} {entry['status']:15s} {entry['convergence']}")
         if not args.dry_run:
             export_number(PAPER, key, **entry)
     for key, path, entry in figures():
+        keys["figures"].add(key)
         if not path.is_file():
             print(f"{key:32s} MISSING {path}")
             continue
         print(f"{key:32s} {path.relative_to(CGOLS)}")
         if not args.dry_run:
             export_figure(PAPER, key, path, **entry)
+    if not args.dry_run:
+        for section, keep in keys.items():
+            for key in prune(PAPER, section, keep, script=__file__):
+                print(f"removed {section[:-1]} {key} (no longer exported)")
 
 
 if __name__ == "__main__":
