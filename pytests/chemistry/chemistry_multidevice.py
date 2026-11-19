@@ -46,19 +46,34 @@ after the short run. On 2026-11-19 with the finite-difference solver
 after one step and 7e-15 dex after the short run, react_galaxy_ism_plus with
 its cosmic-ray block (8^3 cells) 1.8e-15 dex and 2.5e-10 dex.
 
-On two real GPUs (2026-11-19, two H200, ``--kernel --solver fd``, carbox
-network; set ``NCCL_NVLS_ENABLE=0`` on this machine): the first run did not
-return, because the kernel was loaded on the second card from inside the jitted
-step (fixed in ``_warp_stiff.py``: the kernel is now loaded on every device when
-it is built). With that, one step agrees as on the CPU (1.8e-15 dex, density and
-pressure identical). The short adaptive run differs by 4e-7 dex in the species
-and 3e-7 to 5e-7 in the density, which is far above the 7e-15 of the emulated
-devices. One GPU twice, two GPUs twice, and one GPU with and without a
-one-device mesh are each bit-identical, and the order of the cells in the launch
-changes nothing, so the difference comes with the split over two real cards. Its
-origin is OPEN (time step, exchange between the cards, or the kernel on the
-second card): do not rely on a multi-GPU chemistry run before it is found. The
-KROME network has not been run on two real GPUs yet.
+On two real GPUs (2026-11-19, two H200, ``--kernel --solver fd``; set
+``NCCL_NVLS_ENABLE=0`` on this machine). The first run did not return, because
+the kernel was loaded on the second card from inside the jitted step (fixed in
+``_warp_stiff.py``: the kernel is now loaded on every device when it is built).
+With that:
+
+* without the reaction (hydro and species transport only) one and two GPUs are
+  bit-identical, for 1 to 20 fixed steps and for adaptive runs;
+* one step with the reaction: 1.8e-15 dex, density and pressure identical, for
+  both networks;
+* react_galaxy_ism_plus with its cosmic-ray block (16^3 cells): 3e-10 dex after
+  the short run and 2e-11 dex after five fixed steps (``--steps 5``), density
+  5e-14;
+* the carbox network at the default tolerance: 4e-7 dex after the short run and
+  8e-5 dex (density 8e-7) after five fixed steps. This is not the split. The
+  species of the two runs differ by a rounding unit after the first step, and
+  in this box (gas that cools fivefold within a step) the adaptive stiff solver
+  answers a rounding unit in its input with a change of the size of its
+  tolerance: on ONE device, moving the species by one unit in the last place
+  before the second step changes its result by 4e-7 in the density and 2e-5 dex.
+  With ``--rtol 1e-8 --atol 1e-14`` that response is 4e-15, and one GPU against
+  two agrees to 1e-14 dex after the short run and 5e-15 dex after five fixed
+  steps (density 2e-14 and 4e-15). Two launches of the same one-GPU run differ
+  in the same way at the default tolerance.
+
+So a multi-step comparison is a test of the split only at a tolerance tight
+enough for the solver not to amplify rounding; use ``--rtol 1e-8 --atol 1e-14
+--steps 5`` for the carbox network.
 """
 
 import argparse
@@ -73,6 +88,9 @@ parser.add_argument("--cells", type=int, default=16, help="cells per axis")
 parser.add_argument("--solver", choices=("fv", "fd"), default="fv", help="finite-volume (default) or finite-difference solver")
 parser.add_argument("--krome-network", default=None, help="a network file in the KROME format instead of the carbox network")
 parser.add_argument("--krome-data", default=None, help="the data folder of a KROME installation (with --krome-network)")
+parser.add_argument("--rtol", type=float, default=1.0e-6, help="relative tolerance of the stiff solver")
+parser.add_argument("--atol", type=float, default=1.0e-12, help="absolute tolerance of the stiff solver [cm^-3]")
+parser.add_argument("--steps", type=int, default=0, help="also compare after this many fixed steps")
 arguments = parser.parse_args()
 
 if arguments.cpu:
@@ -154,8 +172,8 @@ if KROME:
             cosmic_ray_rate=3.0e-17,
             thermochemistry=True,
             cooling_courant=10.0,
-            absolute_tolerance=1.0e-12,
-            relative_tolerance=1.0e-6,
+            absolute_tolerance=arguments.atol,
+            relative_tolerance=arguments.rtol,
             max_steps=2048,
             krome_h2_formation_on_dust=True,
             krome_data_folder=arguments.krome_data,
@@ -177,8 +195,8 @@ else:
         visual_extinction=2.0,
         thermochemistry=True,
         cooling_courant=10.0,
-        absolute_tolerance=1.0e-12,
-        relative_tolerance=1.0e-6,
+        absolute_tolerance=arguments.atol,
+        relative_tolerance=arguments.rtol,
         max_steps=2048,
     )
 species_names = tuple(species_names)
@@ -190,14 +208,14 @@ if arguments.kernel:
         chemistry_config,
         chemistry_params,
         GAMMA,
-        cache_key=("chemistry-multidevice", arguments.krome_network, arguments.krome_data),
+        cache_key=("chemistry-multidevice", arguments.krome_network, arguments.krome_data, arguments.rtol, arguments.atol),
     )
 
 periodic = BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY)
 HYDROGEN_MASS_FRACTION = chemistry_params.hydrogen_mass_fraction
 
 
-def setup(t_end, one_step):
+def setup(t_end, fixed_steps):
     """The box, its configuration and parameters."""
     config = SimulationConfig(
         dimensionality=3,
@@ -209,7 +227,7 @@ def setup(t_end, one_step):
         boundary_settings=BoundarySettings(periodic, periodic, periodic),
         progress_bar=False,
         chemistry_config=chemistry_config,
-        **(dict(fixed_timestep=True, num_timesteps=1) if one_step else {}),
+        **(dict(fixed_timestep=True, num_timesteps=fixed_steps) if fixed_steps else {}),
     )
     params = SimulationParams(t_end=t_end, gamma=GAMMA, chemistry_params=chemistry_params)
     registered_variables = get_registered_variables(config)
@@ -249,9 +267,10 @@ def setup(t_end, one_step):
     return state, config, params, registered_variables
 
 
-def compare(label, t_end, one_step):
-    """Run on one device and on the mesh; print the differences."""
-    state, config, params, registered_variables = setup(t_end, one_step)
+def compare(label, t_end, fixed_steps):
+    """Run on one device and on the mesh, adaptively or (``fixed_steps`` > 0) with that many
+    fixed steps; print the differences."""
+    state, config, params, registered_variables = setup(t_end, fixed_steps)
     single = np.asarray(time_integration(state, config, params, registered_variables))
 
     # Auto axis types, as cgols.py and pytests/_benchmark_utils.py build the mesh
@@ -274,7 +293,7 @@ def compare(label, t_end, one_step):
     hydrogen_nuclei = single[registered_variables.density_index] * HYDROGEN_MASS_FRACTION
     x_single = single[start : start + len(species_names)] / hydrogen_nuclei
     x_sharded = sharded[start : start + len(species_names)] / hydrogen_nuclei
-    # the solver works to rtol 1e-6 and atol 1e-12 cm^-3: species far below the
+    # the solver works to rtol 1e-6 and atol 1e-12 cm^-3 by default: species far below the
     # absolute tolerance are noise, so compare those above 1e-10 per H nucleus
     significant = x_single > 1e-10
     dlog = np.abs(np.log10(np.maximum(x_sharded, 1e-300)) - np.log10(np.maximum(x_single, 1e-300)))
@@ -304,8 +323,12 @@ solver_label += ", finite-difference solver" if arguments.solver == "fd" else ",
 if KROME:
     # the sound speed is nine times that of the cold box: steps and run are that much shorter
     solver_label += f", KROME network {os.path.basename(arguments.krome_network)}"
-    compare(f"one fixed step, {solver_label}", t_end=0.0002, one_step=True)
-    compare(f"short adaptive run, {solver_label}", t_end=0.002, one_step=False)
+    STEP = 0.0002
+    compare(f"one fixed step, {solver_label}", t_end=STEP, fixed_steps=1)
+    compare(f"short adaptive run, {solver_label}", t_end=0.002, fixed_steps=0)
 else:
-    compare(f"one fixed step, {solver_label}", t_end=0.002, one_step=True)
-    compare(f"short adaptive run, {solver_label}", t_end=0.02 if arguments.kernel else 0.01, one_step=False)
+    STEP = 0.002
+    compare(f"one fixed step, {solver_label}", t_end=STEP, fixed_steps=1)
+    compare(f"short adaptive run, {solver_label}", t_end=0.02 if arguments.kernel else 0.01, fixed_steps=0)
+if arguments.steps > 1:
+    compare(f"{arguments.steps} fixed steps, {solver_label}", t_end=STEP * arguments.steps, fixed_steps=arguments.steps)
