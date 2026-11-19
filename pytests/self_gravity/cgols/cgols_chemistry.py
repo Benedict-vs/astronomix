@@ -1,0 +1,430 @@
+"""
+Non-equilibrium chemistry of a CGOLS run (``CGOLS_CHEMISTRY=1`` in ``cgols.py``).
+
+The gas carries the species of a reaction network in the KROME format
+(``astronomix/_modules/_chemistry``; developed by Lorenzo Branca). Every hydro
+step the species are moved with the gas by the finite-difference solver
+(``_chemistry/_species_transport.py``) and reacted in every cell together with
+the temperature, so the network supplies the heating and cooling: the run takes
+no cooling curve. This file holds what is specific to CGOLS:
+
+* :func:`build_chemistry` - the chemistry containers in the code units of
+  ``cgols.py``, with the per-cell implicit solver (the gradsolve kernel);
+* :func:`equilibrium_table` and :func:`equilibrium_species` - the initial
+  composition: every cell starts in ionisation equilibrium at its own density
+  and temperature;
+* :func:`frame_products` - what a snapshot frame stores of the chemistry.
+
+``cgols.py`` imports this file only when the chemistry is on, so a run without
+it needs none of the chemistry packages (diffrax, gradsolve, warp-lang).
+
+The network file and the ``data`` folder of a KROME installation are not part of
+this repository (KROME is GPL): ``CGOLS_CHEM_NETWORK`` and
+``CGOLS_CHEM_KROME_DATA`` point at them.
+"""
+
+import hashlib
+import os
+import warnings
+from typing import NamedTuple
+
+import numpy as np
+
+import jax
+import jax.numpy as jnp
+
+from astronomix._modules._chemistry._krome_photo import photo_spectrum
+from astronomix._modules._chemistry._species_transport import restore_conserved_totals
+from astronomix._modules._chemistry.chemistry_options import KVAERNO5
+from astronomix.setup_helpers import (
+    attach_per_cell_kernel,
+    build_chemistry_from_network_file,
+    equilibrium_abundances,
+)
+
+#: Nuclei per hydrogen nucleus of the gas: helium, and carbon, oxygen and
+#: silicon in the gas phase of the solar neighbourhood (the values of KROME's
+#: tests and of ``examples/chemistry_krome_network.py``).
+ABUNDANCES = {"H": 1.0, "He": 8.5e-2, "C": 1.4e-4, "O": 3.2e-4, "Si": 1.8e-6}
+
+#: The species each element starts in for the equilibrium integration (the
+#: equilibrium does not depend on it; half-ionised hydrogen lets ionisation and
+#: recombination both run from the first step). Per nucleus of the element.
+_START = {
+    "H": {"H": 0.5, "H+": 0.5},
+    "He": {"He": 1.0},
+    "C": {"C+": 1.0},
+    "O": {"O": 1.0},
+    "Si": {"Si+": 1.0},
+}
+
+#: The grid of the equilibrium table: log10 of the temperature [K] and of the
+#: hydrogen nuclei [cm^-3]. A CGOLS box spans 10 K to a few 1e8 K and 1e-6 to a
+#: few 1e2 cm^-3; outside the grid the edge value is used.
+TABLE_LOG_TEMPERATURE = np.linspace(1.0, 9.0, 81)
+TABLE_LOG_HYDROGEN = np.linspace(-7.0, 4.0, 23)
+
+#: Bump when the set-up below changes what the equilibrium table holds, so that
+#: a cached table is not reused.
+_TABLE_VERSION = 1
+
+PROTON_MASS_CGS = 1.67262192e-24
+
+
+class ChemistrySetup(NamedTuple):
+    """The chemistry of a CGOLS run.
+
+    Attributes:
+        config: The chemistry configuration (static part).
+        params: The chemistry parameters.
+        species: The names of the species, in the order of the state.
+        start_abundances: The abundances per hydrogen nucleus the equilibrium
+            integration starts from, shape ``[species]``.
+        mass_per_hydrogen: The mass of the gas per hydrogen nucleus, in proton
+            masses (about 1.35).
+        key: A hash of everything that defines the network and its parameters.
+    """
+
+    config: object
+    params: object
+    species: tuple
+    start_abundances: np.ndarray
+    mass_per_hydrogen: float
+    key: str
+
+
+def build_chemistry(
+    network_path,
+    krome_data_folder,
+    *,
+    number_density_unit_cgs,
+    temperature_unit_kelvin,
+    time_unit_seconds,
+    adiabatic_index,
+    solver="kernel",
+    relative_tolerance=1e-4,
+    absolute_tolerance=1e-12,
+    max_steps=8192,
+    cosmic_ray_rate=3e-17,
+    draine_field=1.0,
+    step_target=0.0,
+    cooling_courant=0.0,
+    floor_temperature=10.0,
+    reaction_chunk_size=0,
+):
+    """The chemistry of a CGOLS run in the code units of ``cgols.py``.
+
+    Args:
+        network_path: The network file in the KROME format.
+        krome_data_folder: The ``data`` folder of a KROME installation (metal
+            lines, the metal cooling table, the photo cross sections).
+        number_density_unit_cgs: cm^-3 per code number-density unit; the species
+            of the state are number densities in this unit (code density over
+            the proton mass).
+        temperature_unit_kelvin: Kelvin per unit of ``P / n`` in code units.
+        time_unit_seconds: Seconds per code time unit.
+        adiabatic_index: The adiabatic index of the gas.
+        solver: ``"kernel"`` (the per-cell gradsolve kernel) or ``"kvaerno5"``
+            (the vmapped diffrax solver; many times slower on a grid).
+        relative_tolerance, absolute_tolerance: The tolerances of the solver
+            (the absolute one in cm^-3 and K).
+        max_steps: The most solver steps a cell may take in one reaction.
+        cosmic_ray_rate: The cosmic-ray ionisation rate [s^-1] (KROME's
+            ``user_crate``); it acts only if the file has a cosmic-ray block.
+        draine_field: The radiation field between 5 and 13.6 eV in units of the
+            Draine field, the same in every cell and attenuated by dust.
+        step_target: React once the hydro time since the last reaction has
+            reached this many code time units; 0 reacts every hydro step.
+        cooling_courant: The largest fractional change of the temperature per
+            reaction; 0 for no limit.
+        floor_temperature: The temperature floor of the reaction [K].
+        reaction_chunk_size: Cells per chunk of the vmapped solver (memory).
+
+    Returns:
+        A :class:`ChemistrySetup`.
+    """
+    if solver not in ("kernel", "kvaerno5"):
+        raise ValueError(f"solver must be 'kernel' or 'kvaerno5', got {solver!r}")
+    for path, what in ((network_path, "network file"), (krome_data_folder, "KROME data folder")):
+        if not path or not os.path.exists(path):
+            raise FileNotFoundError(
+                f"chemistry: the {what} {path!r} does not exist (CGOLS_CHEM_NETWORK / "
+                "CGOLS_CHEM_KROME_DATA; neither is part of the repository)"
+            )
+
+    with warnings.catch_warnings():
+        # lines that KROME skips too (react_galaxy_ism_plus has three)
+        warnings.simplefilter("ignore", UserWarning)
+        chemistry_config, chemistry_params, species = build_chemistry_from_network_file(
+            network_path,
+            "krome",
+            number_density_unit_cgs=number_density_unit_cgs,
+            temperature_unit_kelvin=temperature_unit_kelvin,
+            time_unit_seconds=time_unit_seconds,
+            cosmic_ray_rate=cosmic_ray_rate,
+            thermochemistry=True,
+            # a limit on the temperature change per reaction slows the cooling
+            # of a radiative shock down by the number of steps it then takes
+            cooling_courant=cooling_courant if cooling_courant > 0.0 else 1.0e3,
+            floor_temperature=floor_temperature,
+            absolute_tolerance=absolute_tolerance,
+            relative_tolerance=relative_tolerance,
+            max_steps=max_steps,
+            reaction_chunk_size=reaction_chunk_size,
+            solver=KVAERNO5,
+            krome_h2_formation_on_dust=True,
+            krome_data_folder=krome_data_folder,
+            krome_metal_table=True,
+            krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10, scale=draine_field),
+            krome_shield_habing_dust=True,
+            # all particles of the gas are species of the network
+            temperature_from_species=True,
+        )
+    species = tuple(species)
+    chemistry_config = chemistry_config._replace(chemistry_step_target=float(step_target))
+
+    missing = [
+        name for element in _START.values() for name in element if name not in species
+    ]
+    if missing or "E" not in species:
+        raise ValueError(
+            f"chemistry: the network {network_path} lacks the species {missing or ['E']}; the CGOLS "
+            "set-up needs H, H+, He, C+, O, Si+ and E (KROME's react_galaxy_ism_plus)"
+        )
+    start = {name: 1.0e-20 for name in species}
+    for element, shares in _START.items():
+        for name, share in shares.items():
+            start[name] = ABUNDANCES[element] * share
+    charge = np.asarray(chemistry_config.species_charges, dtype=np.float64)
+    start["E"] = 0.0
+    start["E"] = float(sum(q * start[name] for q, name in zip(charge, species) if name != "E"))
+    start_abundances = np.asarray([start[name] for name in species])
+
+    masses = np.asarray(chemistry_params.network.masses, dtype=np.float64) / PROTON_MASS_CGS
+    mass_per_hydrogen = float(np.dot(masses, start_abundances))
+
+    with open(network_path, "rb") as file:
+        network_hash = hashlib.sha1(file.read()).hexdigest()
+    key = hashlib.sha1(
+        repr(
+            (
+                network_hash, os.path.abspath(krome_data_folder), species, tuple(ABUNDANCES.items()),
+                float(number_density_unit_cgs), float(temperature_unit_kelvin), float(time_unit_seconds),
+                float(adiabatic_index), float(cosmic_ray_rate), float(draine_field), float(floor_temperature),
+                float(cooling_courant),
+            )
+        ).encode()
+    ).hexdigest()  # fmt: skip
+
+    if solver == "kernel":
+        chemistry_config = attach_per_cell_kernel(
+            chemistry_config,
+            chemistry_params,
+            adiabatic_index,
+            cache_key=("cgols", key),
+        )
+
+    return ChemistrySetup(
+        config=chemistry_config,
+        params=chemistry_params,
+        species=species,
+        start_abundances=start_abundances,
+        mass_per_hydrogen=mass_per_hydrogen,
+        key=key,
+    )
+
+
+# -----------------------------------------------------------------------------
+# ======================== ↓ Initial composition ↓ =============================
+# -----------------------------------------------------------------------------
+
+def equilibrium_table(setup, cache_path=None, verbose=print):
+    """Ionisation equilibrium of the network on a grid of temperature and density.
+
+    Every point is held at its temperature and density of hydrogen nuclei for
+    10 Gyr (``equilibrium_abundances``). The table depends on the network, the
+    abundances and the radiation and cosmic-ray parameters only, so it is
+    computed once and kept in ``cache_path`` (an ``.npz`` file).
+
+    Args:
+        setup: The chemistry of the run.
+        cache_path: Where the table is kept; ``None`` computes it every time.
+        verbose: Called with one line of progress (``None``: silent).
+
+    Returns:
+        ``log10`` of the abundances per hydrogen nucleus, a numpy array of
+        shape ``[species, density, temperature]`` on ``TABLE_LOG_HYDROGEN`` and
+        ``TABLE_LOG_TEMPERATURE``.
+    """
+    say = verbose if verbose is not None else (lambda *args, **kwargs: None)
+    table_key = hashlib.sha1(
+        repr(
+            (setup.key, _TABLE_VERSION, TABLE_LOG_TEMPERATURE.tolist(), TABLE_LOG_HYDROGEN.tolist())
+        ).encode()
+    ).hexdigest()
+    if cache_path is not None and os.path.exists(cache_path):
+        with np.load(cache_path) as cached:
+            if str(cached["key"]) == table_key:
+                say(f"[chemistry] equilibrium table read from {cache_path}")
+                return cached["log_abundances"]
+        say(f"[chemistry] {cache_path} belongs to another set-up: recomputing")
+
+    say(
+        f"[chemistry] computing the equilibrium table ({len(TABLE_LOG_HYDROGEN)} densities x "
+        f"{len(TABLE_LOG_TEMPERATURE)} temperatures, held for 10 Gyr each)"
+    )
+    grid_hydrogen, grid_temperature = (
+        grid.ravel()
+        for grid in np.meshgrid(10.0**TABLE_LOG_HYDROGEN, 10.0**TABLE_LOG_TEMPERATURE, indexing="ij")
+    )
+    abundances = equilibrium_abundances(
+        setup.config, setup.params, grid_hydrogen, grid_temperature, setup.start_abundances
+    )
+    if not np.isfinite(abundances).all():
+        raise RuntimeError(
+            "chemistry: the equilibrium integration left non-finite abundances in "
+            f"{int((~np.isfinite(abundances).all(axis=0)).sum())} of {abundances.shape[1]} table points"
+        )
+    log_abundances = np.log10(np.maximum(abundances, 1.0e-30)).reshape(
+        len(setup.species), len(TABLE_LOG_HYDROGEN), len(TABLE_LOG_TEMPERATURE)
+    )
+    if cache_path is not None:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        np.savez(
+            cache_path,
+            key=table_key,
+            log_abundances=log_abundances,
+            log_hydrogen=TABLE_LOG_HYDROGEN,
+            log_temperature=TABLE_LOG_TEMPERATURE,
+            species=np.asarray(setup.species),
+        )
+        say(f"[chemistry] equilibrium table written to {cache_path}")
+    return log_abundances
+
+
+def _bilinear(table, log_hydrogen, log_temperature):
+    """Bilinear interpolation of ``table[density, temperature]`` on the grid of
+    the equilibrium table; outside the grid the edge value."""
+    def position(values, grid):
+        spacing = grid[1] - grid[0]
+        scaled = jnp.clip((values - grid[0]) / spacing, 0.0, len(grid) - 1.0)
+        lower = jnp.clip(jnp.floor(scaled).astype(jnp.int32), 0, len(grid) - 2)
+        return lower, scaled - lower
+
+    i, u = position(log_hydrogen, TABLE_LOG_HYDROGEN)
+    j, v = position(log_temperature, TABLE_LOG_TEMPERATURE)
+    return (
+        (1.0 - u) * (1.0 - v) * table[i, j]
+        + u * (1.0 - v) * table[i + 1, j]
+        + (1.0 - u) * v * table[i, j + 1]
+        + u * v * table[i + 1, j + 1]
+    )
+
+
+def equilibrium_species(density, pressure, log_abundances, setup):
+    """
+    The species of gas in ionisation equilibrium at its own density and temperature.
+
+    The temperature of a cell is ``T = P / (k n)`` with ``n`` the particles of
+    the network, and those depend on the ionisation, hence on the temperature:
+    neutral disk gas has half the particles of ionised gas, so at a given
+    pressure it is twice as hot. ``T`` is therefore found by bisection of
+    ``T S(T, n_H) = P / (k n_H)``, where ``S`` is the number of particles per
+    hydrogen nucleus of the equilibrium table (``T S`` rises with ``T``). The
+    interpolated abundances are then scaled so that every element has exactly
+    its abundance and the gas is neutral.
+
+    Pure and jittable (it runs inside the sharded build of the initial state).
+
+    Args:
+        density: The density in code units.
+        pressure: The pressure in code units.
+        log_abundances: The equilibrium table (:func:`equilibrium_table`).
+        setup: The chemistry of the run.
+
+    Returns:
+        ``(species, temperature)``: the species block in code number densities,
+        shape ``(num_species,) + grid``, and the temperature [K].
+    """
+    params = setup.params
+    log_abundances = jnp.asarray(log_abundances, dtype=density.dtype)
+    hydrogen = density / setup.mass_per_hydrogen  # hydrogen nuclei, code units
+    log_hydrogen = jnp.log10(hydrogen * params.number_density_unit_cgs)
+    # T S = P / n_H in Kelvin
+    target = jnp.log10(pressure / hydrogen * params.temperature_unit_kelvin)
+    log_particles = jnp.log10(jnp.sum(10.0**log_abundances, axis=0))
+
+    def bisect(_, bounds):
+        lower, upper = bounds
+        middle = 0.5 * (lower + upper)
+        too_cold = middle + _bilinear(log_particles, log_hydrogen, middle) < target
+        return jnp.where(too_cold, middle, lower), jnp.where(too_cold, upper, middle)
+
+    lower, upper = jax.lax.fori_loop(
+        0,
+        48,
+        bisect,
+        (
+            jnp.full_like(density, TABLE_LOG_TEMPERATURE[0]),
+            jnp.full_like(density, TABLE_LOG_TEMPERATURE[-1]),
+        ),
+    )
+    log_temperature = 0.5 * (lower + upper)
+
+    abundances = jnp.stack(
+        [
+            10.0 ** _bilinear(log_abundances[index], log_hydrogen, log_temperature)
+            for index in range(len(setup.species))
+        ]
+    )
+    # exactly the abundance of every element, and neutral
+    grid_axes = (1,) * density.ndim
+    element_totals = jnp.asarray(
+        [ABUNDANCES[element] for element in setup.config.species_element_names], dtype=density.dtype
+    ).reshape((-1,) + grid_axes) * jnp.ones_like(density)[None, ...]
+    abundances = restore_conserved_totals(
+        abundances, element_totals, jnp.zeros_like(density), setup.config
+    )
+    species = abundances * hydrogen[None, ...]
+    temperature = pressure / jnp.sum(species, axis=0) * params.temperature_unit_kelvin
+    return species, temperature
+
+
+# -----------------------------------------------------------------------------
+# ======================== ↑ Initial composition ↑ =============================
+# -----------------------------------------------------------------------------
+
+
+def frame_name(species_name):
+    """The key of a species in a frame file: ``H+`` -> ``x_Hp_xz``, ``H-`` -> ``x_Hm_xz``."""
+    return "x_" + species_name.replace("+", "p").replace("-", "m") + "_xz"
+
+
+def frame_products(species_plane, pressure_plane, setup):
+    """
+    What a frame stores of the chemistry on the edge-on plane.
+
+    Args:
+        species_plane: The species on the plane, shape ``(num_species, x, z)``,
+            code number densities.
+        pressure_plane: The pressure on the plane, code units.
+        setup: The chemistry of the run.
+
+    Returns:
+        ``(temperature, products)``: the temperature [K] from the particles of
+        the network, and a dictionary with the abundance per hydrogen nucleus of
+        every species (:func:`frame_name`) and ``n_H_xz``, the hydrogen nuclei
+        per cm^3.
+    """
+    particles = jnp.maximum(jnp.sum(jnp.maximum(species_plane, 0.0), axis=0), 1.0e-300)
+    temperature = pressure_plane / particles * setup.params.temperature_unit_kelvin
+    hydrogen_row = setup.config.species_element_names.index("H")
+    hydrogen_atoms = jnp.asarray(
+        setup.config.species_element_matrix[hydrogen_row], dtype=species_plane.dtype
+    )
+    hydrogen = jnp.maximum(jnp.tensordot(hydrogen_atoms, species_plane, axes=1), 1.0e-300)
+    products = {"n_H_xz": hydrogen * setup.params.number_density_unit_cgs}
+    for index, name in enumerate(setup.species):
+        # float32 on disk: keep the trace species above its smallest number
+        products[frame_name(name)] = jnp.maximum(species_plane[index] / hydrogen, 1.0e-30)
+    return temperature, products

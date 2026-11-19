@@ -1149,6 +1149,61 @@ KI02_DISK_T_OVER_MU = float(os.environ.get("CGOLS_KI02_DISK_T_OVER_MU", "6000"))
 if KI02 and "CGOLS_IC_TAG" not in os.environ:
     IC_TAG += f"_ki{KI02_DISK_T_OVER_MU:g}"  # never reuse a paper-disk IC file
 
+# ---- Non-equilibrium chemistry (CGOLS_CHEMISTRY=1) ----
+# The gas carries the species of a reaction network in the KROME format
+# (astronomix/_modules/_chemistry; Lorenzo Branca's chemistry module). Every
+# hydro step the finite-difference solver moves the species with the gas and
+# the network is integrated in every cell together with the temperature, so the
+# network supplies the heating and cooling: the run takes no cooling curve
+# (CGOLS_COOLING stays 0). The set-up is in cgols_chemistry.py. It needs
+# CGOLS_X64=1 (the chemistry is double precision), CGOLS_SOLVER=fd, and
+#   CGOLS_CHEM_NETWORK     the network file (KROME's react_galaxy_ism_plus;
+#                          with its cosmic-ray block uncommented the disk
+#                          settles at ~4000 K at 1 cm^-3, without it at ~400 K)
+#   CGOLS_CHEM_KROME_DATA  the data folder of a KROME installation
+# neither of which is part of the repository (KROME is GPL).
+#   CGOLS_CHEM_SOLVER      kernel (default; the per-cell gradsolve kernel) or
+#                          kvaerno5 (the vmapped diffrax solver, ~10x slower)
+#   CGOLS_CHEM_RTOL/_ATOL  solver tolerances (1e-4, KROME's default; 1e-12 in
+#                          cm^-3 and K)
+#   CGOLS_CHEM_STEP_MYR    react once the hydro time since the last reaction
+#                          reaches this [Myr]; 0 (default) reacts every step
+#   CGOLS_CHEM_CR_RATE     cosmic-ray ionisation rate [1/s] (3e-17)
+#   CGOLS_CHEM_DRAINE      radiation field in units of the Draine field (1),
+#                          the same in every cell, attenuated by dust
+#   CGOLS_CHEM_COOLING_COURANT  largest fractional temperature change per
+#                          reaction; 0 (default) = no limit
+#   CGOLS_CHEM_DISK_T_OVER_MU   thermal support of the disk IC as T / mu [K].
+#                          Default 6000, the disk of the ki02gf12 model B, so
+#                          that the two can be compared. It is not an
+#                          equilibrium of the network: disk gas denser than
+#                          ~1 cm^-3 cools further.
+CHEMISTRY = os.environ.get("CGOLS_CHEMISTRY", "0") == "1"
+CHEM_NETWORK = os.environ.get("CGOLS_CHEM_NETWORK", "")
+CHEM_KROME_DATA = os.environ.get("CGOLS_CHEM_KROME_DATA", "")
+CHEM_SOLVER = os.environ.get("CGOLS_CHEM_SOLVER", "kernel")
+CHEM_RTOL = float(os.environ.get("CGOLS_CHEM_RTOL", "1e-4"))
+CHEM_ATOL = float(os.environ.get("CGOLS_CHEM_ATOL", "1e-12"))
+CHEM_STEP_MYR = float(os.environ.get("CGOLS_CHEM_STEP_MYR", "0"))
+CHEM_CR_RATE = float(os.environ.get("CGOLS_CHEM_CR_RATE", "3e-17"))
+CHEM_DRAINE = float(os.environ.get("CGOLS_CHEM_DRAINE", "1"))
+CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
+CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
+if CHEMISTRY:
+    if not X64:
+        raise SystemExit("CGOLS_CHEMISTRY=1 needs CGOLS_X64=1: the chemistry is double precision")
+    if COOLING:
+        raise SystemExit(
+            "CGOLS_CHEMISTRY=1 with CGOLS_COOLING=1 would cool the gas twice: the network "
+            "supplies the heating and cooling"
+        )
+    if CHEM_SOLVER not in ("kernel", "kvaerno5"):
+        raise SystemExit(f"CGOLS_CHEM_SOLVER must be 'kernel' or 'kvaerno5', got {CHEM_SOLVER!r}")
+    if jax.process_count() > 1:
+        raise SystemExit("CGOLS_CHEMISTRY=1 is not wired for multi-process runs yet")
+    if "CGOLS_IC_TAG" not in os.environ:
+        IC_TAG += f"_chem{CHEM_DISK_T_OVER_MU:g}"  # the IC file holds the species too
+
 # Positivity and the energy recovery (upstream astronomix, Oct 2026). Positivity
 # of the finite-difference scheme comes from the positivity-preserving WENO
 # reconstruction (Zhang & Shu 2012; SimulationConfig.weno_positivity_preserving):
@@ -1230,6 +1285,9 @@ else:
 # is used verbatim (pick one that differs from the float32 run's).
 if X64:
     _DEFAULT_RUN_TAG += "_x64"
+# A chemistry run (always float64) is its model's tag plus "_chem".
+if CHEMISTRY:
+    _DEFAULT_RUN_TAG = _DEFAULT_RUN_TAG.replace("_x64", "") + "_chem"
 RUN_TAG = os.environ.get("CGOLS_RUN_TAG", _DEFAULT_RUN_TAG)
 # A cold start clears its tag's frames and checkpoints, so the two model-B
 # variants must never take each other's tags: plain _B / _B<dim> (_x64) are the
@@ -1292,7 +1350,10 @@ CALLBACK_PARTITIONED = (
 # default) the frame jit runs between TO_DISK segments, a separate program from
 # the solver, so the maps cannot touch the solver state and add no peak
 # memory; their cost is a few fused reductions once per frame.
-EMISSION_FRAMES = os.environ.get("CGOLS_EMISSION_FRAMES", "xy")
+# A chemistry run stores none by default: the recipes take the temperature and
+# the ionisation from P / rho at mu = 0.6 (collisional equilibrium), which is
+# not the state of the gas the network evolves.
+EMISSION_FRAMES = os.environ.get("CGOLS_EMISSION_FRAMES", "0" if CHEMISTRY else "xy")
 if EMISSION_FRAMES not in ("0", "y", "xy"):
     raise SystemExit(
         f"CGOLS_EMISSION_FRAMES must be '0', 'y' or 'xy', got {EMISSION_FRAMES!r}"
@@ -1315,6 +1376,12 @@ if SOLVER not in ("fd", "fv"):
 # CGOLS_MHD=1 IC and frame products do not apply to it.
 if MHD and SOLVER != "fd":
     raise ValueError("CGOLS_MHD=1 requires CGOLS_SOLVER=fd (constrained-transport HOW-MHD)")
+# The species are moved by the finite-difference solver; the VL2 scheme has no
+# transport for them. Chemistry with MHD has not been run.
+if CHEMISTRY and SOLVER != "fd":
+    raise ValueError("CGOLS_CHEMISTRY=1 requires CGOLS_SOLVER=fd")
+if CHEMISTRY and MHD:
+    raise ValueError("CGOLS_CHEMISTRY=1 with CGOLS_MHD=1 is untested; run them separately")
 
 # Runtime numerics knobs (defaults are the production values).
 # CGOLS_CFL: 0.9 is production-proven for fd, whose dt = C dx / sum_d(|v_d| + c)
@@ -1491,6 +1558,52 @@ def _kelvin_to_code_temperature(T_K):
     )
 
 
+_CHEMISTRY_SETUP = None
+
+
+def chemistry_setup():
+    """The chemistry of this run (cgols_chemistry.ChemistrySetup), built once.
+
+    Units: a species of the state is a number density in units of the code
+    density over the proton mass, so the species of a cell add up to its
+    density when weighted with their masses in proton masses; ``P / n`` in code
+    units times ``m_p code_velocity^2 / k_B`` (= T_factor / mu) is the
+    temperature in Kelvin.
+    """
+    global _CHEMISTRY_SETUP
+    if _CHEMISTRY_SETUP is None:
+        import cgols_chemistry
+
+        _CHEMISTRY_SETUP = cgols_chemistry.build_chemistry(
+            CHEM_NETWORK,
+            CHEM_KROME_DATA,
+            number_density_unit_cgs=(code_units.code_density / m_p).to(u.cm**-3).value,
+            temperature_unit_kelvin=T_factor / mu,
+            time_unit_seconds=(1 * code_units.code_time).to(u.s).value,
+            adiabatic_index=gamma,
+            solver=CHEM_SOLVER,
+            relative_tolerance=CHEM_RTOL,
+            absolute_tolerance=CHEM_ATOL,
+            cosmic_ray_rate=CHEM_CR_RATE,
+            draine_field=CHEM_DRAINE,
+            step_target=(CHEM_STEP_MYR * u.Myr).to(code_units.code_time).value,
+            cooling_courant=CHEM_COOLING_COURANT,
+        )
+    return _CHEMISTRY_SETUP
+
+
+def chemistry_equilibrium_table():
+    """The equilibrium table of this run's network (cached next to the ICs)."""
+    import cgols_chemistry
+
+    setup = chemistry_setup()
+    return cgols_chemistry.equilibrium_table(
+        setup,
+        cache_path=_data_initial(f"cgols_chem_equilibrium_{setup.key[:12]}.npz"),
+        verbose=rprint,
+    )
+
+
 # Cooling-curve parameters in code units (the published Eq. A4 coefficients plus
 # the two log10 unit shifts). Cheap to build, so do it unconditionally.
 _CIE_COOLING_PARAMS = cie_parabolic_cooling(code_units)
@@ -1650,6 +1763,20 @@ def _cooling_params_kwargs():
 # Schedule: no feedback for the first 5 Myr (equilibration), then the low
 # state, a 5 Myr linear ramp up, 30 Myr in the high state, a 5 Myr ramp back
 # down, and the low state for the remaining 30 Myr (75 Myr total).
+def _disk_ic_temperature():
+    """The mu = 0.6 temperature [K] that sets the thermal support of the disk IC.
+
+    The paper's 1e4 K disk for the adiabatic and CIE runs; a given T / mu for
+    the runs whose cooling reaches below 1e4 K (ki02gf12, chemistry), where the
+    paper's disk is far from thermal balance.
+    """
+    if KI02:
+        return KI02_DISK_T_OVER_MU * mu
+    if CHEMISTRY:
+        return CHEM_DISK_T_OVER_MU * mu
+    return T_disk.to(u.K).value
+
+
 def circular_angular_velocity(R):
     """Mid-plane circular angular velocity of the static potential, code units.
 
@@ -1918,7 +2045,7 @@ def _ic_gas_density_rz(R, z):
     phi_mid = Phi_disk_function(Rg[:, :1], 0.0) + Phi_halo_function(jnp.maximum(Rg[:, :1], 1e-3))
     k_B_code = k_B.to(code_units.code_energy / u.K).value
     m_p_code = m_p.to(code_units.code_mass).value
-    T_disk_code = KI02_DISK_T_OVER_MU * mu if KI02 else T_disk.to(u.K).value
+    T_disk_code = _disk_ic_temperature()
     c2_disk = k_B_code * T_disk_code / (mu * m_p_code)
     M_gas_code = M_gas.to(code_units.code_mass).value
     R_gas_code = R_gas.to(code_units.code_length).value
@@ -2289,6 +2416,16 @@ def build_config():
             )
             + f"; outputs tagged {RUN_TAG!r}"
         )
+    elif CHEMISTRY:
+        _setup = chemistry_setup()
+        rprint(
+            f"Chemistry ON: {os.path.basename(CHEM_NETWORK)} ({len(_setup.species)} species: "
+            f"{' '.join(_setup.species)}), solver {CHEM_SOLVER} (rtol {CHEM_RTOL:g}, atol {CHEM_ATOL:g}), "
+            + (f"reacting every {CHEM_STEP_MYR:g} Myr" if CHEM_STEP_MYR > 0 else "reacting every hydro step")
+            + f", Draine field x {CHEM_DRAINE:g}, cosmic-ray rate {CHEM_CR_RATE:g} /s "
+            f"({len(_setup.params.network.cosmic_ray_terms)} cosmic-ray reactions in the file), "
+            f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
+        )
     elif COOLING:
         rprint(
             f"Radiative cooling ON (B-series): CIE parabolic curve, n^2 Lambda at "
@@ -2484,6 +2621,9 @@ def build_config():
             if COOLING
             else {}
         ),
+        # Non-equilibrium chemistry (CGOLS_CHEMISTRY=1). Conditional kwarg: the
+        # config of every other run stays byte-identical.
+        **(dict(chemistry_config=chemistry_setup().config) if CHEMISTRY else {}),
     )
     # Derive the scalar grid spacing HERE. finalize_config does it too, but only
     # once the state shape is known - until then the field still holds the
@@ -2582,7 +2722,7 @@ def build_external_potential(config, sharding=None):
     )()
 
 
-def _build_ic_fields(config, registered_variables, Phi_total, sharding):
+def _build_ic_fields(config, registered_variables, Phi_total, sharding, chemistry_table=None):
     """Assemble the initial primitive state and the IC diagnostics.
 
     ``Phi_total`` is passed in rather than recomputed so that the potential a
@@ -2591,6 +2731,10 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
     same expression get fused differently by XLA and agree only to ~1e-7, which
     would silently break "a resumed run reproduces an uninterrupted one".
     Splitting the build in two also keeps either jit's live set smaller.
+
+    ``chemistry_table`` is the equilibrium table of the network of a chemistry
+    run (:func:`chemistry_equilibrium_table`). It is computed on the host, so
+    the driver builds it before this function is traced.
 
     Pure and jittable: no prints, no plots, no host syncs — every diagnostic is
     returned as a (replicated) array instead, so this whole function can run
@@ -2642,7 +2786,7 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
 
     # ---- Constants needed for both gas components ----
     k_B_code = k_B.to(code_units.code_energy / u.K).value
-    T_disk_code = KI02_DISK_T_OVER_MU * mu if KI02 else T_disk.to(u.K).value
+    T_disk_code = _disk_ic_temperature()
     m_p_code = m_p.to(code_units.code_mass).value
     c_s_d = jnp.sqrt(k_B_code * T_disk_code / (mu * m_p_code))  # isothermal disk
 
@@ -2896,6 +3040,22 @@ def _build_ic_fields(config, registered_variables, Phi_total, sharding):
         **magnetic_kwargs,
     )
     del magnetic_kwargs
+    if CHEMISTRY:
+        # Every cell starts in ionisation equilibrium at its own density and
+        # temperature (cgols_chemistry.equilibrium_species). The temperature
+        # profiles of the IC figure are then the ones the chemistry sees.
+        import cgols_chemistry
+
+        species, temperature = cgols_chemistry.equilibrium_species(
+            rho_total, P_total, chemistry_table, chemistry_setup()
+        )
+        species_start = registered_variables.chemistry_species_index
+        initial_state = initial_state.at[
+            species_start : species_start + registered_variables.num_chemical_species
+        ].set(species)
+        diagnostics["T_midplane"] = _replicate(temperature[mid_x:, mid_y, mid_z], sharding)
+        diagnostics["T_zaxis"] = _replicate(temperature[mid_x, mid_y, mid_z:], sharding)
+        del species, temperature
     del rho_total, ux, uy, uz, P_total
 
     return initial_state, diagnostics
@@ -3054,6 +3214,7 @@ def build_simulation_params(Phi_total):
         gravitational_potential=Phi_total,
         cgols_wind_params=build_cgols_wind_params(),
         **_cooling_params_kwargs(),
+        **(dict(chemistry_params=chemistry_setup().params) if CHEMISTRY else {}),
     )
 
 
@@ -3077,8 +3238,11 @@ def build_initial_conditions(sharding=None, save_potential=None):
     # out of its own (identically-compiled) build.
     Phi_total = build_external_potential(config, sharding)
 
+    # Host side, before the build is traced; cached on disk after the first run.
+    chemistry_table = chemistry_equilibrium_table() if CHEMISTRY else None
+
     def _build(Phi):
-        return _build_ic_fields(config, registered_variables, Phi, sharding)
+        return _build_ic_fields(config, registered_variables, Phi, sharding, chemistry_table)
 
     if sharding is None:
         initial_state, diagnostics = _build(Phi_total)
@@ -3248,7 +3412,7 @@ def make_snapshot_callable(
         emission_unit_conversions = emission_conversions(code_units, mu)
         xray_table = load_xray_emissivity_table()
 
-    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz, emission, magnetic):
+    def _save_frame(time, n_xz, T_xz, n_xy, mdot_z, vr_xz, emission, extras):
         # jax.debug.callback fires on every process with the same (explicitly
         # all-gathered, see _replicated below) global planes; one writer only,
         # or 32 ranks race on frame_NNNN.npz.
@@ -3270,9 +3434,10 @@ def make_snapshot_callable(
                 f"emission_{name}": np.asarray(emission_map, dtype=np.float32)
                 for name, emission_map in emission.items()
             },
+            # MHD and chemistry products, by name
             **{
                 name: np.asarray(value, dtype=np.float32)
-                for name, value in magnetic.items()
+                for name, value in extras.items()
             },
         )
 
@@ -3317,6 +3482,8 @@ def make_snapshot_callable(
         )
 
     field_to_microgauss = _code_field_to_microgauss()
+    if CHEMISTRY:
+        import cgols_chemistry
 
     def _magnetic_frame_products(state, registered_variables, P_xz, my, g, hi):
         """The MHD frame entries (see the note in ``snapshot_callable``)."""
@@ -3384,6 +3551,17 @@ def make_snapshot_callable(
         T_xz = P_xz / rho_xz * T_factor
         n_xy = rho_xy * n_factor
 
+        # Chemistry run: the temperature is the one of the particles the
+        # network carries (not the mu = 0.6 one), and the frame also stores the
+        # abundance of every species on the edge-on plane.
+        chemistry = {}
+        if CHEMISTRY:
+            species_start = registered_variables.chemistry_species_index
+            species_stop = species_start + registered_variables.num_chemical_species
+            T_xz, chemistry = cgols_chemistry.frame_products(
+                state[species_start:species_stop, g:hi, my, g:hi], P_xz, chemistry_setup()
+            )
+
         # Edge-on radial velocity v_r = v . r_hat in km/s (paper Figs 1/2
         # middle panels).
         vr_xz = (
@@ -3441,7 +3619,10 @@ def make_snapshot_callable(
             _replicated(mdot_z),
             _replicated(vr_xz),
             {name: _replicated(emission_map) for name, emission_map in emission.items()},
-            {name: _replicated(value) for name, value in magnetic.items()},
+            {
+                name: _replicated(value)
+                for name, value in {**magnetic, **chemistry}.items()
+            },
             partitioned=CALLBACK_PARTITIONED,
         )
 
