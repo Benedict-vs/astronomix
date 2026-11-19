@@ -1,11 +1,15 @@
 """Chemistry on a multi-device mesh against the same run on one device.
 
 The 16-species carbox network (``external/carbox/data/simple_latent_tgas.csv``)
-with thermochemistry in a small periodic finite-volume box with a moving
-over-dense blob, once on one device and once split along x over ``N`` devices
-with the mesh ``time_integration`` is given through ``sharding`` (the mesh
-context of ``_pallas_helpers``; the reaction then runs in a ``shard_map`` over
-that mesh, see ``_iteration_level_updates``).
+with thermochemistry in a small periodic box with a moving over-dense blob,
+once on one device and once split along x over ``N`` devices with the mesh
+``time_integration`` is given through ``sharding`` (the mesh context of
+``_pallas_helpers``; the reaction then runs in a ``shard_map`` over that mesh,
+see ``_iteration_level_updates``). ``--solver fv`` (default) is the
+finite-volume solver, ``--solver fd`` the finite-difference solver, which moves
+the species as abundances per unit mass (``_species_transport.py``; its
+stencils cross the device boundaries through the same halo exchange as the
+hydro).
 
 Two comparisons, each for the chosen solver:
 
@@ -25,6 +29,7 @@ gradsolve and warp-lang, see ``requirements-chemistry.txt``)::
 
     python pytests/chemistry/chemistry_multidevice.py --cpu 2 --kernel   # 2 emulated CPU devices
     python pytests/chemistry/chemistry_multidevice.py 2 --kernel         # 2 free GPUs (autocvd)
+    python pytests/chemistry/chemistry_multidevice.py --cpu 2 --kernel --solver fd
     python pytests/chemistry/chemistry_multidevice.py --cpu 2 --cells 8 \\
         --krome-network /path/to/react_galaxy_ism_plus --krome-data /path/to/krome/data
 
@@ -36,7 +41,11 @@ react_galaxy_ism_plus with the vmapped Kvaerno5 on 2 emulated devices and 8^3
 cells: 4e-9 dex and 2e-13 in the pressure after one step, 1.5e-10 dex after the
 short run; the same network with the Warp kernel (``--kernel``, the metal table
 handed to the kernel as an array): 9e-16 dex and 6e-16 after one step, 2e-10 dex
-after the short run. Not yet run on GPUs.
+after the short run. On 2026-11-19 with the finite-difference solver
+(``--solver fd --kernel``, 2 emulated devices): the carbox network 1.8e-15 dex
+after one step and 7e-15 dex after the short run, react_galaxy_ism_plus with
+its cosmic-ray block (8^3 cells) 1.8e-15 dex and 2.5e-10 dex. Not yet run on
+GPUs.
 """
 
 import argparse
@@ -48,6 +57,7 @@ parser.add_argument("devices", type=int, help="number of devices the box is spli
 parser.add_argument("--cpu", action="store_true", help="emulate the devices on the CPU")
 parser.add_argument("--kernel", action="store_true", help="gradsolve Warp kernel instead of the vmapped Kvaerno5")
 parser.add_argument("--cells", type=int, default=16, help="cells per axis")
+parser.add_argument("--solver", choices=("fv", "fd"), default="fv", help="finite-volume (default) or finite-difference solver")
 parser.add_argument("--krome-network", default=None, help="a network file in the KROME format instead of the carbox network")
 parser.add_argument("--krome-data", default=None, help="the data folder of a KROME installation (with --krome-network)")
 arguments = parser.parse_args()
@@ -86,10 +96,10 @@ from astronomix import (
     get_registered_variables,
     time_integration,
 )
-from astronomix._modules._chemistry._chemistry import make_vector_field
 from astronomix._modules._cooling._cooling import get_pressure_from_temperature
 from astronomix.option_classes.simulation_config import (
     DOUBLE_PRECISION,
+    FINITE_DIFFERENCE,
     FINITE_VOLUME,
     NATIVE_JAX,
     PERIODIC_BOUNDARY,
@@ -101,7 +111,7 @@ from astronomix.option_classes.simulation_config import (
     BoundarySettings,
     BoundarySettings1D,
 )
-from astronomix.setup_helpers import build_chemistry_from_network_file
+from astronomix.setup_helpers import attach_per_cell_kernel, build_chemistry_from_network_file
 
 REPOSITORY_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 NETWORK = os.path.join(REPOSITORY_ROOT, "external", "carbox", "data", "simple_latent_tgas.csv")
@@ -163,23 +173,12 @@ species_names = tuple(species_names)
 TEMPERATURE = 8000.0 if KROME else 100.0
 HYDROGEN_NUCLEI = 0.3 if KROME else 30.0
 if arguments.kernel:
-    from astronomix._modules._chemistry._warp_stiff import build_fused_core_solver
-
-    cc, cp = chemistry_config, chemistry_params
-    vector_field = make_vector_field(
-        cp.network, cp.rate_modifier_a, cp.rate_modifier_b, cp.cosmic_ray_rate, cp.fuv_field,
-        cp.visual_extinction, cc.thermochemistry, GAMMA, cp.dust_to_gas_ratio,
-        cp.hydrogen_molecule_formation_rate_coefficient, cc.hydrogen_index,
-        cc.molecular_hydrogen_index, cc.electron_index, cc.atomic_oxygen_index,
-        cc.ionized_hydrogen_index, cc.helium_index, cc.ionized_carbon_index, cc.co_cooling,
-        cc.carbon_monoxide_index, cp.co_cooling_table, cp.co_cooling_bounds,
-    )  # fmt: skip
-    solver = build_fused_core_solver(
-        vector_field, cc.number_of_chemical_species + 1,
-        rtol=float(cp.rtol), atol=float(cp.atol), max_steps=cc.max_steps,
+    chemistry_config = attach_per_cell_kernel(
+        chemistry_config,
+        chemistry_params,
+        GAMMA,
         cache_key=("chemistry-multidevice", arguments.krome_network, arguments.krome_data),
-    )  # fmt: skip
-    chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
+    )
 
 periodic = BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY)
 HYDROGEN_MASS_FRACTION = chemistry_params.hydrogen_mass_fraction
@@ -191,7 +190,7 @@ def setup(t_end, one_step):
         dimensionality=3,
         box_size=1.0,
         num_cells=NUM_CELLS,
-        solver_mode=FINITE_VOLUME,
+        solver_mode=FINITE_DIFFERENCE if arguments.solver == "fd" else FINITE_VOLUME,
         backend_config=BackendConfig(backend=NATIVE_JAX),
         numerical_precision=DOUBLE_PRECISION,
         boundary_settings=BoundarySettings(periodic, periodic, periodic),
@@ -288,6 +287,7 @@ def compare(label, t_end, one_step):
 
 
 solver_label = "gradsolve Warp kernel" if arguments.kernel else "vmapped Kvaerno5"
+solver_label += ", finite-difference solver" if arguments.solver == "fd" else ", finite-volume solver"
 if KROME:
     # the sound speed is nine times that of the cold box: steps and run are that much shorter
     solver_label += f", KROME network {os.path.basename(arguments.krome_network)}"

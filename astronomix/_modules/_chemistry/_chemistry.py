@@ -22,8 +22,9 @@ When ``chemistry_config.thermochemistry`` is enabled the temperature is evolved
 *together* with the abundances (an extra ODE variable per cell), and the evolved
 temperature is converted back into the pressure field — so chemistry and hydro
 exchange energy. When it is disabled the species react at a fixed temperature and
-the energy field is left untouched. The finite-difference source-term path is a
-deliberate follow-up.
+the energy field is left untouched. The reaction is the same in both solvers;
+what differs is how they move the species between two reactions (the
+finite-difference solver: ``_species_transport.py``).
 
 WARNING: The network integration uses Diffrax, which is an optional dependency.
 It is imported lazily inside the driver so that ``import astronomix`` does not
@@ -556,6 +557,60 @@ def _emulate_single_cell(
     return jnp.where(hydrogen_nuclei >= threshold, dense, diffuse)
 
 
+#: Upper end [K] of the temperature the reaction is given (the rate expressions
+#: are not fitted beyond it).
+MAXIMUM_TEMPERATURE_KELVIN = 1.0e9
+
+
+def _particle_density(species_code_units):
+    """The particles the network carries per code number-density unit: the sum of
+    the species, negative abundances (noise of the solver) not counted."""
+    return jnp.maximum(
+        jnp.sum(jnp.maximum(species_code_units, 0.0), axis=0),
+        jnp.finfo(species_code_units.dtype).tiny,
+    )
+
+
+def chemistry_code_temperature(
+    primitive_state, registered_variables, chemistry_config, chemistry_params
+):
+    """
+    The rescaled code temperature ``P / n`` that the chemistry reads from a state.
+
+    With ``chemistry_config.temperature_from_species`` the particle density
+    ``n`` is the sum of the species of the state; otherwise it is ``rho / mu``
+    with the mean molecular weight of a fully ionised gas of the composition in
+    ``chemistry_params``. Multiply by ``chemistry_params.temperature_unit_kelvin``
+    for Kelvin (:func:`chemistry_temperature_kelvin`).
+    """
+    density = primitive_state[registered_variables.density_index]
+    pressure = primitive_state[registered_variables.pressure_index]
+    if chemistry_config.temperature_from_species:
+        species_start = registered_variables.chemistry_species_index
+        species_stop = species_start + registered_variables.num_chemical_species
+        return pressure / _particle_density(primitive_state[species_start:species_stop])
+    return get_temperature_from_pressure(
+        density,
+        pressure,
+        chemistry_params.hydrogen_mass_fraction,
+        chemistry_params.metal_mass_fraction,
+    )
+
+
+def chemistry_temperature_kelvin(
+    primitive_state, registered_variables, chemistry_config, chemistry_params
+):
+    """The gas temperature [K] as the chemistry reads it from a state, before
+    the clamp to the range of the rate expressions (for diagnostics and
+    initial conditions; see :func:`chemistry_code_temperature`)."""
+    return (
+        chemistry_code_temperature(
+            primitive_state, registered_variables, chemistry_config, chemistry_params
+        )
+        * chemistry_params.temperature_unit_kelvin
+    )
+
+
 @partial(jax.jit, static_argnames=("chemistry_config", "registered_variables"))
 def update_chemistry(
     primitive_state: STATE_TYPE,
@@ -636,15 +691,13 @@ def update_chemistry(
     # -------------------------------------------------------------
 
     density = primitive_state[registered_variables.density_index]
-    pressure = primitive_state[registered_variables.pressure_index]
 
-    # The pressure-to-temperature relation returns the rescaled code temperature;
-    # scale it into Kelvin for the rate expressions.
-    code_temperature = get_temperature_from_pressure(
-        density,
-        pressure,
-        chemistry_params.hydrogen_mass_fraction,
-        chemistry_params.metal_mass_fraction,
+    # The pressure-to-temperature relation returns the rescaled code temperature
+    # (from the particles of the network with ``temperature_from_species``, else
+    # from a fixed mean molecular weight); scale it into Kelvin for the rate
+    # expressions.
+    code_temperature = chemistry_code_temperature(
+        primitive_state, registered_variables, chemistry_config, chemistry_params
     )
     temperature_kelvin = code_temperature * chemistry_params.temperature_unit_kelvin
 
@@ -653,8 +706,9 @@ def update_chemistry(
     # non-physical P/rho (hence T); starting the solver from a sane value keeps
     # the reaction network well-posed (the thermochemistry rate expressions apply
     # their own internal clamp too).
+    read_temperature_kelvin = temperature_kelvin
     temperature_kelvin = jnp.clip(
-        temperature_kelvin, chemistry_params.floor_temperature, 1.0e9
+        temperature_kelvin, chemistry_params.floor_temperature, MAXIMUM_TEMPERATURE_KELVIN
     )
 
     time_step_seconds = time_step * chemistry_params.time_unit_seconds
@@ -921,12 +975,28 @@ def update_chemistry(
         reacted_code_temperature = (
             reacted_temperature_kelvin / chemistry_params.temperature_unit_kelvin
         )
-        new_pressure = get_pressure_from_temperature(
-            density,
-            reacted_code_temperature,
-            chemistry_params.hydrogen_mass_fraction,
-            chemistry_params.metal_mass_fraction,
-        )
+        if chemistry_config.temperature_from_species:
+            # P = n T with the particles the reaction left: gas that recombined
+            # at a given temperature has fewer of them, hence less pressure.
+            new_pressure = _particle_density(reacted_species_code_units) * reacted_code_temperature
+        else:
+            new_pressure = get_pressure_from_temperature(
+                density,
+                reacted_code_temperature,
+                chemistry_params.hydrogen_mass_fraction,
+                chemistry_params.metal_mass_fraction,
+            )
+        if chemistry_config.temperature_from_species:
+            # Gas hotter than the range of the rate expressions was reacted as
+            # gas at the upper end of that range. Writing its pressure back at
+            # that temperature would take its excess thermal energy away in one
+            # step (the hottest cells of a wind cavity); it keeps the factor by
+            # which it was hotter instead. Every other cell: unchanged.
+            new_pressure = jnp.where(
+                read_temperature_kelvin > MAXIMUM_TEMPERATURE_KELVIN,
+                new_pressure * (read_temperature_kelvin / MAXIMUM_TEMPERATURE_KELVIN),
+                new_pressure,
+            )
         primitive_state = primitive_state.at[
             registered_variables.pressure_index
         ].set(new_pressure)

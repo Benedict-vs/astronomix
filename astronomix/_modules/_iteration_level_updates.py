@@ -23,6 +23,7 @@ from jax.sharding import PartitionSpec
 
 # astronomix constants
 from astronomix.option_classes.simulation_config import (
+    FINITE_DIFFERENCE,
     FINITE_VOLUME,
     IDEAL_GAS,
     POSITIVITY_HARD_FLOOR,
@@ -238,6 +239,22 @@ def _apply_density_floor(
     primitive_state = primitive_state.at[density_index].set(floored_density)
     for index in velocity_indices:
         primitive_state = primitive_state.at[index].multiply(momentum_ratio)
+
+    # Chemical species in the finite-difference solver: that solver moves them
+    # as abundances per unit mass, so the mass the floor adds has to come with
+    # the composition of its cell, or the species of a floored cell would stop
+    # adding up to its density for good. (Cells above the floor: a factor of
+    # exactly 1.) The finite-volume solver carries the species as densities of
+    # their own, and its floor leaves them as they are.
+    if (
+        registered_variables.chemistry_species_active
+        and config.solver_mode == FINITE_DIFFERENCE
+    ):
+        species_start = registered_variables.chemistry_species_index
+        species_stop = species_start + registered_variables.num_chemical_species
+        primitive_state = primitive_state.at[species_start:species_stop].multiply(
+            (floored_density / density)[None, ...]
+        )
     return primitive_state
 
 
@@ -338,9 +355,11 @@ def _iteration_level_updates(
             helper_data=helper_data, time=current_time - 0.5 * dt,
         )
 
-    # Astrochemistry. The species advect with the flow (handled by the solver);
-    # here they are reacted per cell. Finite-volume only for now.
-    if config.chemistry_config.chemistry and config.solver_mode == FINITE_VOLUME:
+    # Astrochemistry. The species advect with the flow (handled by the solver:
+    # with a flux of their own in the finite-volume solver, as abundances per
+    # unit mass in the finite-difference solver, see
+    # ``_chemistry/_species_transport.py``); here they are reacted per cell.
+    if config.chemistry_config.chemistry:
         # Multi-GPU (cgols-chemistry): the fork runs the reaction inside its own
         # finite-volume shard_map (``fv_sharding_context``), which this branch
         # does not activate. The multi-GPU path here is the mesh context of
@@ -452,6 +471,23 @@ def _iteration_level_updates(
                 lambda state: _react(state, chemistry_dt),
                 lambda state: state,
                 primitive_state,
+            )
+
+        # With thermochemistry the reaction writes the pressure row. Under dual
+        # energy (finite-difference solver) the carried internal-energy density
+        # g must follow, as after the cooling step: the pressure of the cells
+        # where the switch is active (kinetic energy dominates, e.g. a fast
+        # wind) is recovered from g, and a stale g would give them back the
+        # pressure they had before the reaction.
+        if (
+            config.chemistry_config.thermochemistry
+            and registered_variables.internal_energy_active
+        ):
+            primitive_state = primitive_state.at[
+                registered_variables.internal_energy_index
+            ].set(
+                primitive_state[registered_variables.pressure_index]
+                / (params.gamma - 1.0)
             )
 
     # Neural-network body force.

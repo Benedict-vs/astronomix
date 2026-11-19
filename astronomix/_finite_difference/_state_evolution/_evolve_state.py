@@ -11,7 +11,9 @@ are handled around that update by operator splitting: the passive-scalar block
 and the dual-energy internal-energy density ``g`` are split off first and
 advected with the pre-step flow (``g`` also enters the coupled pressure
 recovery), then ``g`` is re-synced from the recovered pressure, the shock
-history is updated against the new state, and both are reattached.
+history is updated against the new state, and both are reattached. The block
+of the chemical species, the last rows of the state, is split off before
+everything else and moved the same way (``_modules/_chemistry/_species_transport.py``).
 """
 
 # general
@@ -69,6 +71,10 @@ from astronomix._finite_difference._time_integrators._ssprk import (
     _ssprk4_with_ct,
 )
 from astronomix._geometry.boundaries import _boundary_handler
+from astronomix._modules._chemistry._species_transport import (
+    advect_chemical_species,
+    species_from_abundances,
+)
 
 
 @partial(
@@ -108,6 +114,39 @@ def _evolve_state_fd(
     Returns:
         The primitive state after one time step.
     """
+
+    # -------------------------------------------------------------
+    # ========== ↓ Split off and advect the chemical species ↓ =====
+    # -------------------------------------------------------------
+
+    # The chemical species are the last rows of the state, behind the passive
+    # scalars. They are split off before anything else, so the rest of this
+    # function sees the state it was written for, and advected operator-split
+    # with the pre-step flow as abundances per unit mass; at the end of the
+    # step they become number densities again with the updated density.
+    chemistry_species_active = registered_variables.chemistry_species_active
+    species_abundances = None
+    if chemistry_species_active:
+        chemistry_species_index = registered_variables.chemistry_species_index
+        chemical_species = primitive_state[chemistry_species_index:]
+        primitive_state = primitive_state[:chemistry_species_index]
+        registered_variables = registered_variables._replace(
+            num_vars=chemistry_species_index,
+            chemistry_species_index=-1,
+            num_chemical_species=0,
+            chemistry_species_active=False,
+        )
+        species_abundances = advect_chemical_species(
+            chemical_species,
+            primitive_state,
+            dt,
+            config,
+            registered_variables,
+        )
+
+    # -------------------------------------------------------------
+    # ========== ↑ Split off and advect the chemical species ↑ =====
+    # -------------------------------------------------------------
 
     # -------------------------------------------------------------
     # ============= ↓ Split off and advect passive scalars ↓ =======
@@ -411,6 +450,30 @@ def _evolve_state_fd(
 
     # -------------------------------------------------------------
     # ========= ↑ Shock history and reattaching the scalars ↑ ======
+    # -------------------------------------------------------------
+
+    # -------------------------------------------------------------
+    # ============ ↓ Reattaching the chemical species ↓ ============
+    # -------------------------------------------------------------
+
+    # Number densities again, with the density of the updated state: gas that a
+    # source term added within the step takes the composition of its cell.
+    if chemistry_species_active:
+        if config.boundary_handling == GHOST_CELLS:
+            species_abundances = _fill_scalar_ghost_cells(species_abundances, config)
+        primitive_state = jnp.concatenate(
+            [
+                primitive_state,
+                species_from_abundances(
+                    species_abundances,
+                    primitive_state[registered_variables.density_index],
+                ),
+            ],
+            axis=0,
+        )
+
+    # -------------------------------------------------------------
+    # ============ ↑ Reattaching the chemical species ↑ ============
     # -------------------------------------------------------------
 
     return primitive_state

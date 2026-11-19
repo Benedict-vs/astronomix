@@ -128,6 +128,7 @@ from astronomix.option_classes.simulation_config import (
     AD_REMAT_NONE,
     BACKWARDS,
     OPEN_BOUNDARY,
+    OPEN_BOUNDARY_DIODE,
     PERIODIC_BOUNDARY,
     REFLECTIVE_BOUNDARY,
     STATE_TYPE,
@@ -942,8 +943,9 @@ def _fill_scalar_ghost_cells(scalars, config: SimulationConfig):
     index equals the axis (the normal velocity), which for a scalar block would
     silently flip a composition field. Passive scalars are true scalars, so all
     three boundary types reduce to a copy (mirrored for reflective, wrapped for
-    periodic, edge-extended for open) with no sign change anywhere. Other
-    boundary types leave the ghost cells untouched.
+    periodic, edge-extended for open and for the outflow-only "diode", whose
+    only difference from open is in the normal velocity) with no sign change
+    anywhere. Other boundary types leave the ghost cells untouched.
 
     Args:
         scalars: The scalar block, shape ``(n_scalars,) + padded grid``.
@@ -986,7 +988,7 @@ def _fill_scalar_ghost_cells(scalars, config: SimulationConfig):
             )
             continue
 
-        if left == OPEN_BOUNDARY:
+        if left in (OPEN_BOUNDARY, OPEN_BOUNDARY_DIODE):
             scalars = scalars.at[axis_slice(0, num_ghost)].set(
                 scalars[axis_slice(num_ghost, num_ghost + 1)]
             )
@@ -995,7 +997,7 @@ def _fill_scalar_ghost_cells(scalars, config: SimulationConfig):
                 jnp.flip(scalars[axis_slice(num_ghost, 2 * num_ghost)], axis=array_axis)
             )
 
-        if right == OPEN_BOUNDARY:
+        if right in (OPEN_BOUNDARY, OPEN_BOUNDARY_DIODE):
             scalars = scalars.at[axis_slice(-num_ghost, None)].set(
                 scalars[axis_slice(-num_ghost - 1, -num_ghost)]
             )

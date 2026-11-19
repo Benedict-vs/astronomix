@@ -182,6 +182,24 @@ class ChemistryConfig(NamedTuple):
     # build_fused_core_solver) and carried here as a static callable.
     stiff_core_solver: str = "diffrax"
     stiff_core_fn: Any = None
+    # --- composition of the species (``build_chemistry_from_network_file`` fills these from the species names) ---
+    # The elements of the network, the atoms of every element in every species (one row per element, one column per
+    # species) and the charge of every species. Static, because the finite-difference transport of the species
+    # (``_species_transport.py``) builds its conserved totals from them at trace time. Empty = unknown: the transport
+    # then moves the species without restoring the totals.
+    species_element_names: Tuple[str, ...] = ()
+    species_element_matrix: Tuple[Tuple[int, ...], ...] = ()
+    species_charges: Tuple[int, ...] = ()
+    # Finite-difference solver: after the advection of the species, restore the atoms of every element and the charge
+    # per unit mass to their own advected values (see ``_species_transport.py``). Needs the composition above.
+    conserve_elements_in_transport: bool = True
+    # Temperature from the particles the network carries: T = P / (k sum_i n_i) on the way in and
+    # P = k T sum_i n_i (the reacted species) on the way out, as KROME and the codes coupled to it do. With False (the
+    # default, and the behaviour before 2026-11-19) the particle density is rho / (mu m_p) with the mean molecular
+    # weight of a fully ionised gas of the composition ``hydrogen_mass_fraction`` / ``metal_mass_fraction``, whatever
+    # the species say: in neutral gas that temperature is about half the true one. Set it only for a network whose
+    # species (electrons included) are all the particles of the gas, helium among them.
+    temperature_from_species: bool = False
 
 
 class ChemistryParams(NamedTuple):

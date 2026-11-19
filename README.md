@@ -169,7 +169,9 @@ layer, stellar wind, cooling — live in [`examples/gallery/`](examples/gallery)
 ## Chemistry and the neural chemistry emulator (this fork)
 
 This fork (`lorenzobranca/astronomix`, branch `feature/multi-gpu-sharding`) adds a
-chemistry module to the finite-volume solver and the multi-GPU plumbing it needs.
+chemistry module to the finite-volume solver and the multi-GPU plumbing it needs. On the
+branch `cgols-chemistry` the chemistry also runs in the finite-difference solver (see
+"Chemistry in the finite-difference solver" below).
 It was developed for a molecular-cloud-collision ground truth with MHD + self-gravity +
 stiff chemistry; the design notes and every measured number live in that project's
 `CONTEXT.md`.
@@ -462,6 +464,8 @@ solver = build_fused_core_solver(
 chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
 ```
 
+- The same in one call: `chemistry_config = attach_per_cell_kernel(chemistry_config,
+  chemistry_params, gamma)` (`astronomix.setup_helpers`).
 - Without an emulator, `update_chemistry` then advances **every cell** with the kernel. With
   the emulator and `stiff_core_capacity > 0`, the kernel solves the gathered dense cells and
   the emulator the rest. A cell that returns a non-finite state keeps its previous one, as
@@ -475,6 +479,57 @@ chemistry_config = chemistry_config._replace(stiff_core_solver="warp", stiff_cor
   carbox-like network against JAX, and `update_chemistry` with the kernel against the
   vmapped Kvaerno5 on the carbox network of `external/carbox` (skipped when carbox is not
   installed or the network file is not found).
+
+### Chemistry in the finite-difference solver
+
+The chemistry runs in the finite-difference solver (WENO5) as well: set
+`solver_mode=FINITE_DIFFERENCE` and build the chemistry as above. The species are the last
+block of the state, number densities as in the finite-volume solver, and the reaction step is
+the same function. What differs is how the species are moved between two reactions
+(`astronomix/_modules/_chemistry/_species_transport.py`).
+
+- **Transport.** The WENO flux of that solver is characteristic-wise and has no place for a
+  species. They are moved operator-split, as abundances per unit mass `X_i = n_i / rho`, with
+  the machinery of the solver's passive scalars (WENO5 in space, SSP-RK3 in time, sub-cycled
+  as the flow requires), and turned back into number densities with the density at the end of
+  the step. Gas that a source term adds within the step takes the composition of its cell.
+  The transport is not in flux form: the total of a species in the box is kept to the accuracy
+  of the scheme (1e-5 in the test below), not to round-off.
+- **Atoms and charge.** WENO gives every species its own nonlinear weights, so where three or
+  more species of an element have a front in the same cells their atoms stop adding up: 1.4 %
+  of the helium after 0.1 crossing times in the test with He, He+ and He++. The atoms of every
+  element and the charge per unit mass are therefore advected as further scalars, and the
+  species are scaled back onto them after every step. With species of one element each this is
+  exact (3e-15 in the same test); a species of several elements (CO) leaves about 1/300 of the
+  mismatch. The composition of the species is read from their names by
+  `build_chemistry_from_network_file`; `conserve_elements_in_transport=False` switches the
+  restoration off.
+- **Temperature.** `temperature_from_species=True` takes the temperature from the particles
+  the network carries, `T = P / (k sum_i n_i)`, and writes the pressure back with the particles
+  the reaction left, as KROME and the codes coupled to it do. The default (`False`, the
+  behaviour of the module so far) uses the mean molecular weight of a fully ionised gas
+  whatever the species say; in neutral gas that temperature is about half the true one. Use it
+  for a network whose species are all the particles of the gas (helium and the electrons
+  among them), in either solver. Gas hotter than 1e9 K, the upper end of the rate
+  expressions, is reacted at 1e9 K and keeps its excess.
+- **Other pieces.** The density floor of the finite-difference solver adds mass with the
+  composition of its cell. Open and "diode" boundaries copy the abundances into the ghost
+  cells. On several devices the stencils of the transport cross the device boundaries through
+  the halo exchange of the hydro, and the reaction runs per device. The Pallas backend is
+  untouched: the species are split off before its kernels run.
+- **Helpers** (`astronomix.setup_helpers`): `attach_per_cell_kernel` (above),
+  `equilibrium_abundances` (the abundances a network settles at when the temperature is held:
+  initial conditions in ionisation equilibrium) and `species_composition`.
+- **Tests**: `pytest pytests/chemistry/test_fd_species_transport.py` (on the CPU, three
+  minutes): the layout of the state, the transport with and without the restoration, a linear
+  network against its exact solution, a two-body network against the finite-volume solver
+  (the product agrees to 0.07 % on average and 0.8 % at most on 64^2 cells), open boundaries,
+  both temperature conventions on a recombining gas with an exact solution, the density floor,
+  and the Pallas backend against native JAX. `pytests/chemistry/chemistry_multidevice.py
+  --solver fd` compares one device with several.
+- **In a galaxy run**: `pytests/self_gravity/cgols/cgols.py` with `CGOLS_CHEMISTRY=1` (see the
+  comment block at that knob and `cgols_chemistry.py`): the network replaces the cooling
+  curve, and every cell starts in ionisation equilibrium at its own density and temperature.
 
 ### Multi-GPU (sharded) finite volume
 

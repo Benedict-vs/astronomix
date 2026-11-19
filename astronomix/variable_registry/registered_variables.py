@@ -179,6 +179,10 @@ class RegisteredVariables(NamedTuple):
     # spanning ``num_chemical_species`` slots (ordered as the reaction network's
     # species list). They are advected as passive volumetric densities by the
     # finite-volume solver, exactly like the cosmic-ray and wind-density tracers.
+    # In the finite-difference solver the block is the very end of the state,
+    # behind the passive scalars; ``_evolve_state_fd`` splits it off before
+    # everything else and moves the species operator-split as abundances per
+    # unit mass (``_modules/_chemistry/_species_transport.py``).
     chemistry_species_index: int = -1
     num_chemical_species: int = 0
     chemistry_species_active: bool = False
@@ -297,7 +301,8 @@ def get_registered_variables(config: SimulationConfig) -> RegisteredVariables:
             )
             registered_variables = registered_variables._replace(cosmic_ray_n_active=True)
 
-        # NOTE: CURRENTLY ONLY IMPLEMENTED FOR FINITE VOLUME MODE
+        # (for the finite-difference solver the block is registered below,
+        # behind the passive scalars)
         # The chemical species occupy one contiguous block; the base index marks
         # its start and the block spans ``number_of_chemical_species`` slots.
         if config.chemistry_config.chemistry:
@@ -411,6 +416,18 @@ def get_registered_variables(config: SimulationConfig) -> RegisteredVariables:
                 passive_scalars_active=True,
                 shock_history_index=shock_history_index,
                 shock_history_active=bool(config.track_shock_history),
+            )
+
+        # Chemical species: the last block of the state, behind the passive
+        # scalars, so that stripping it off first leaves the layout above.
+        # Number densities, as in the finite-volume solver.
+        if config.chemistry_config.chemistry:
+            number_of_species = int(config.chemistry_config.number_of_chemical_species)
+            registered_variables = registered_variables._replace(
+                chemistry_species_index=registered_variables.num_vars,
+                num_chemical_species=number_of_species,
+                num_vars=registered_variables.num_vars + number_of_species,
+                chemistry_species_active=True,
             )
 
     elif config.num_passive_scalars > 0 or config.track_shock_history:

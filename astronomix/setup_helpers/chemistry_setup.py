@@ -116,6 +116,8 @@ def build_chemistry_from_network_file(
     krome_shield_habing_dust: bool = False,
     krome_column_density_method: str = "DEFAULT",
     krome_floor_temperature: float = 2.73,
+    temperature_from_species: bool = False,
+    conserve_elements_in_transport: bool = True,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
     """Assemble the chemistry containers from a network file.
 
@@ -185,6 +187,14 @@ def build_chemistry_from_network_file(
         co_cooling: When True, add tabulated CO rotational cooling (loads the
             Neufeld & Kaufman table from ``co_cooling_table_path``).
         co_cooling_table_path: Path to KROME's ``coolCO.dat``.
+        temperature_from_species: Take the temperature from the particles of the
+            network, ``T = P / (k sum_i n_i)``, instead of from the mean
+            molecular weight of a fully ionised gas. For a network whose species
+            are all the particles of the gas (helium and the electrons among
+            them). See ``ChemistryConfig.temperature_from_species``.
+        conserve_elements_in_transport: Finite-difference solver: restore the
+            atoms of every element and the charge per unit mass after the
+            advection of the species. See ``_species_transport.py``.
 
     Returns:
         A tuple ``(chemistry_config, chemistry_params, species_names)``. The
@@ -268,6 +278,9 @@ def build_chemistry_from_network_file(
         ionized_carbon_index=species_index("C+"),
         co_cooling=co_cooling,
         carbon_monoxide_index=species_index("CO"),
+        temperature_from_species=temperature_from_species,
+        conserve_elements_in_transport=conserve_elements_in_transport,
+        **species_composition(species_names),
     )
 
     chemistry_params = ChemistryParams(
@@ -308,6 +321,187 @@ def _species_elements_and_charge(name):
         if element:
             counts[element] = counts.get(element, 0) + (int(number) if number else 1)
     return counts, charge
+
+
+def attach_per_cell_kernel(
+    chemistry_config,
+    chemistry_params,
+    adiabatic_index,
+    cache_key=None,
+    first_step_fraction=0.01,
+):
+    """Attach the per-cell implicit solver (the gradsolve Warp kernel) to a chemistry configuration.
+
+    Builds the right-hand side of the network with the parameters as they are
+    in ``chemistry_params`` (the kernel closes over them: rebuild it after
+    changing a rate, a field or a tolerance), translates it into one Warp
+    kernel with one thread per cell (``_warp_stiff.build_fused_core_solver``)
+    and returns the configuration with the kernel as its solver. The reaction
+    of ``update_chemistry`` then runs the kernel in every cell in place of the
+    vmapped Kvaerno5. Needs ``thermochemistry`` and float64 (the kernel
+    integrates the temperature with the abundances, in double precision), and
+    the packages gradsolve and warp-lang.
+
+    Args:
+        chemistry_config: The chemistry configuration (``thermochemistry=True``).
+        chemistry_params: The chemistry parameters; the tolerances of the kernel
+            are its ``rtol`` and ``atol``.
+        adiabatic_index: The adiabatic index of the gas (``SimulationParams.gamma``).
+        cache_key: Anything hashable that identifies the network and its
+            parameters; a second call with the same key and tolerances returns
+            the kernel already built in this process instead of building it
+            again. ``None``: no reuse.
+        first_step_fraction: The first trial step of every cell as a fraction
+            of its step (see ``build_fused_core_solver``).
+
+    Returns:
+        The chemistry configuration with ``stiff_core_solver="warp"`` and the
+        kernel in ``stiff_core_fn``.
+    """
+    if not chemistry_config.thermochemistry:
+        raise ValueError("the per-cell kernel needs thermochemistry=True (it integrates the temperature too)")
+
+    from astronomix._modules._chemistry._chemistry import make_vector_field
+    from astronomix._modules._chemistry._warp_stiff import build_fused_core_solver
+
+    cc, cp = chemistry_config, chemistry_params
+    vector_field = make_vector_field(
+        cp.network, cp.rate_modifier_a, cp.rate_modifier_b, cp.cosmic_ray_rate, cp.fuv_field,
+        cp.visual_extinction, cc.thermochemistry, adiabatic_index, cp.dust_to_gas_ratio,
+        cp.hydrogen_molecule_formation_rate_coefficient, cc.hydrogen_index,
+        cc.molecular_hydrogen_index, cc.electron_index, cc.atomic_oxygen_index,
+        cc.ionized_hydrogen_index, cc.helium_index, cc.ionized_carbon_index, cc.co_cooling,
+        cc.carbon_monoxide_index, cp.co_cooling_table, cp.co_cooling_bounds,
+    )  # fmt: skip
+    solver = build_fused_core_solver(
+        vector_field,
+        cc.number_of_chemical_species + 1,
+        rtol=float(cp.rtol),
+        atol=float(cp.atol),
+        max_steps=cc.max_steps,
+        cache_key=cache_key,
+        first_step_fraction=first_step_fraction,
+    )
+    return chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
+
+
+def equilibrium_abundances(
+    chemistry_config,
+    chemistry_params,
+    hydrogen_nuclei_cgs,
+    temperature_kelvin,
+    start_abundances,
+    total_time_seconds=3.15576e17,
+):
+    """The abundances a network settles at when the temperature is held: ionisation equilibrium.
+
+    Every cell is integrated at its own fixed temperature and density of
+    hydrogen nuclei with the vmapped Kvaerno5, in six steps of growing length
+    that add up to ``total_time_seconds`` (default 10 Gyr: longer than the
+    recombination time at 1e-3 cm^-3). Meant for initial conditions (gas that
+    starts in equilibrium at its own temperature) and for tables of them. With
+    the radiation field and the cosmic rays of ``chemistry_params`` this is the
+    equilibrium with those, not the collisional one.
+
+    Args:
+        chemistry_config: The chemistry configuration of the network.
+        chemistry_params: The chemistry parameters of the network.
+        hydrogen_nuclei_cgs: Hydrogen nuclei per cm^3 of every cell, shape ``[cells]``.
+        temperature_kelvin: The temperature [K] of every cell, shape ``[cells]``.
+        start_abundances: The abundances per hydrogen nucleus the integration
+            starts from, shape ``[species]`` (the same in every cell) or
+            ``[species, cells]``. They fix the atoms of every element; the
+            equilibrium does not otherwise depend on them.
+        total_time_seconds: How long the gas is held.
+
+    Returns:
+        The abundances per hydrogen nucleus at the end, a numpy array of shape
+        ``[species, cells]``.
+    """
+    from astronomix._modules._chemistry._chemistry import update_chemistry
+    from astronomix._modules._cooling._cooling import get_pressure_from_temperature
+    from astronomix.option_classes.simulation_params import SimulationParams
+    from astronomix.variable_registry.registered_variables import RegisteredVariables
+
+    hydrogen_nuclei = jnp.asarray(hydrogen_nuclei_cgs, dtype=jnp.float64)
+    temperature = jnp.asarray(temperature_kelvin, dtype=jnp.float64)
+    number_of_cells = hydrogen_nuclei.shape[0]
+    number_of_species = chemistry_config.number_of_chemical_species
+    start = np.asarray(start_abundances, dtype=np.float64)
+    if start.ndim == 1:
+        start = np.repeat(start[:, None], number_of_cells, axis=1)
+    if start.shape != (number_of_species, number_of_cells):
+        raise ValueError(
+            f"start_abundances has shape {start.shape}; expected ({number_of_species},) "
+            f"or ({number_of_species}, {number_of_cells})"
+        )
+
+    # The temperature is held: no thermochemistry, the vmapped Kvaerno5, and
+    # the temperature read from the pressure with the fixed mean molecular
+    # weight (so that the pressure below gives exactly ``temperature_kelvin``).
+    isothermal = chemistry_config._replace(
+        thermochemistry=False,
+        solver=KVAERNO5,
+        stiff_core_solver="diffrax",
+        stiff_core_fn=None,
+        temperature_from_species=False,
+        chemistry_step_target=0.0,
+        chemistry_subcycle_density_threshold_cgs=0.0,
+    )
+    # a row of cells: density, velocity, pressure, species
+    registered_variables = RegisteredVariables(
+        density_index=0,
+        velocity_index=1,
+        pressure_index=2,
+        num_vars=3 + number_of_species,
+        chemistry_species_index=3,
+        num_chemical_species=number_of_species,
+        chemistry_species_active=True,
+    )
+    density = hydrogen_nuclei / chemistry_params.number_density_unit_cgs
+    pressure = get_pressure_from_temperature(
+        density,
+        temperature / chemistry_params.temperature_unit_kelvin,
+        chemistry_params.hydrogen_mass_fraction,
+        chemistry_params.metal_mass_fraction,
+    )
+    state = jnp.concatenate(
+        [
+            jnp.stack([density, jnp.zeros_like(density), pressure]),
+            jnp.asarray(start) * density[None, :],
+        ],
+        axis=0,
+    )
+    params = SimulationParams(chemistry_params=chemistry_params)
+    for fraction in (1e-4, 1e-3, 1e-2, 1e-1, 0.3, 0.5889):
+        state = update_chemistry(
+            state,
+            registered_variables,
+            isothermal,
+            params,
+            fraction * total_time_seconds / chemistry_params.time_unit_seconds,
+        )
+    return np.asarray(state[3:] / density[None, :])
+
+
+def species_composition(species_names):
+    """The composition fields of ``ChemistryConfig`` for a list of species names.
+
+    Returns a dictionary with ``species_element_names`` (the elements of the
+    network, sorted), ``species_element_matrix`` (the atoms of every element in
+    every species, one row per element) and ``species_charges``, ready to be
+    passed to ``ChemistryConfig(...)`` or ``chemistry_config._replace(...)``.
+    The electron is ``"E"`` (no element, charge -1).
+    """
+    parsed = [_species_elements_and_charge(name) for name in species_names]
+    elements = tuple(sorted({element for counts, _ in parsed for element in counts}))
+    return dict(
+        species_element_names=elements,
+        species_element_matrix=tuple(
+            tuple(int(counts.get(element, 0)) for counts, _ in parsed) for element in elements
+        ),
+        species_charges=tuple(int(charge) for _, charge in parsed),
+    )
 
 
 def _species_hydrogen_and_charge(name):
