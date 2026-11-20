@@ -191,7 +191,8 @@ def main():
     axis.grid(alpha=0.3)
     axis.legend(fontsize=7.5, loc="lower right")
 
-    figure.suptitle(f"Model C, adiabatic, {DIM}$^3$: same total injected mass, energy and volume, split into N regions")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        figure.suptitle(f"Model C, adiabatic, {DIM}$^3$: same total injected mass, energy and volume, split into N regions")
     figure.tight_layout()
     os.makedirs(FIG_DIR, exist_ok=True)
     out = os.path.join(FIG_DIR, f"model_c_cluster_number_scaling_{DIM}.png")

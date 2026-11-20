@@ -450,7 +450,8 @@ def plot(runs, prefix="a_series"):
         for ax in axes[row]:
             ax.axhline(0, color="0.6", lw=0.8)
     axes[0, 0].legend(fontsize=7)
-    fig.suptitle("Outflow rates through spherical shells (time means; faint: the shell leaves the box)")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("Outflow rates through spherical shells (time means; faint: the shell leaves the box)")
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{prefix}_shells_profiles.png"), dpi=130)
     plt.close(fig)

@@ -4069,7 +4069,8 @@ def plot_paper_slices(
 
     fig.colorbar(im_n, ax=axes[0, :].tolist(), label=r"$n$ [cm$^{-3}$]", shrink=0.85)
     fig.colorbar(im_T, ax=axes[1, :].tolist(), label="T [K]", shrink=0.85)
-    fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS wind - x-z slices (cf. Schneider & Robertson 2018)")
     plt.savefig(out, dpi=dpi)
     plt.close(fig)
     used = ", ".join(f"{tt:.0f}->{t[i]:.1f}" for tt, i in zip(target_times_myr, idxs))

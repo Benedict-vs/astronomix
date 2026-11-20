@@ -637,11 +637,12 @@ def plot_profiles(records, metadata, tag, figure_directory):
         if photon_mode
         else r"$S_X$ [erg s$^{-1}$ cm$^{-2}$ arcmin$^{-2}$]"
     )
-    axis.set_title(
-        f"{tag.lstrip('_')}: minor-axis profile, |x| < 5 kpc, t = "
-        f"{float(record['time_myr']):.2f} Myr",
-        fontsize=10,
-    )
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        axis.set_title(
+            f"{tag.lstrip('_')}: minor-axis profile, |x| < 5 kpc, t = "
+            f"{float(record['time_myr']):.2f} Myr",
+            fontsize=10,
+        )
     axis.text(
         0.02,
         0.02,

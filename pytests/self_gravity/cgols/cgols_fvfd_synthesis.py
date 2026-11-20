@@ -974,8 +974,9 @@ def fig_significance(st):
                  fontsize=10)
     ax_k.set_title("(b) equivalent resolution k (16-84% over sigma);\nblank: no FV run or FD ladder not monotone there",
                    fontsize=10)
-    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-2048",
-                 fontsize=12)
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-2048",
+                     fontsize=12)
     fig.tight_layout()
     path = f"{FIG_DIR}/fvfd_summary_significance.png"
     fig.savefig(path, dpi=110)

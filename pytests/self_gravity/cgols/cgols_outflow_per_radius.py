@@ -96,10 +96,11 @@ def main():
             if col == 0:
                 axis.set_ylabel(r"net $\dot M$ through both planes [M$_\odot$ yr$^{-1}$]")
     axes[0, -1].legend(fontsize=8, ncol=2)
-    figure.suptitle(
-        "Where the outflow crosses |z| = 1 and 5 kpc: net mass flux per cylindrical radius (A: blue, C: orange)",
-        fontsize=11,
-    )
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        figure.suptitle(
+            "Where the outflow crosses |z| = 1 and 5 kpc: net mass flux per cylindrical radius (A: blue, C: orange)",
+            fontsize=11,
+        )
     os.makedirs(os.path.dirname(FIGURE), exist_ok=True)
     figure.savefig(FIGURE, dpi=200)
     print(f"\nwrote {FIGURE}")

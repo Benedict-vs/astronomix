@@ -586,9 +586,10 @@ def fig_families(result, tols):
     for ax in axes[:, 0]:
         ax.set_ylabel("|error| vs 2048 reference [%]")
     axes.flat[0].legend(fontsize=6.5, loc="lower left")
-    fig.suptitle("CGOLS A: worst and median error per quantity family against cost; dotted verticals: cost of "
-                 "FD-2048 (blue) / FV-2048 (red); dash-dot: tolerances " + ", ".join(f"{t:g}%" for t in tols)
-                 + f"; up-arrows: error > {FAM_YMAX:g}%")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS A: worst and median error per quantity family against cost; dotted verticals: cost of "
+                     "FD-2048 (blue) / FV-2048 (red); dash-dot: tolerances " + ", ".join(f"{t:g}%" for t in tols)
+                     + f"; up-arrows: error > {FAM_YMAX:g}%")
     fig.tight_layout()
     path = os.path.join(FIG_DIR, "cost_accuracy_families.png")
     fig.savefig(path, dpi=115)
