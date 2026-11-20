@@ -457,6 +457,7 @@ def numbers():
 
     yield from numbers_v5()
     yield from numbers_v6()
+    yield from numbers_v7()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -936,6 +937,218 @@ def numbers_v6():
                     f"FV-512 is already as rough as FD-2048. {ladder_text}",
         runs=["FV-2048", "FV-1024", "FV-512"], data=None, script=CGOLS / "cgols_cost_accuracy.py",
     )  # fmt: skip
+
+
+# --------------------------------------------------------------------------- numbers, v7 (asgard-papers #11, 20 Nov)
+RIM_ONSET_MDOT = 1.0  # Msun/yr: mixed-entropy outflow through |z| = 1 kpc that marks the onset of rim mixing
+
+
+def rim_onset(tag):
+    """First checkpoint after the 15-25 Myr minimum where the mixed outflow at |z| = 1 kpc exceeds RIM_ONSET_MDOT,
+    and the checkpoint before it (the onset lies in between)."""
+    times, recs, _ = records("convergence3d_v3_", tag)
+    times = np.round(times, 3)
+    y = np.array([r["mdot_out_K"][h_index(1.0), MIXED_ENTROPY_BIN] for r in recs])
+    early = (times > 15.0) & (times <= 25.0)
+    i_min = int(np.flatnonzero(early)[np.argmin(y[early])])
+    above = np.flatnonzero((np.arange(len(y)) > i_min) & (y > RIM_ONSET_MDOT))
+    return float(times[above[0]]), float(times[above[0] - 1])
+
+
+def numbers_v7():
+    """Yield (key, kwargs for export_number) for the Section 4 numbers of asgard-papers #11 (comment of 20 Nov)."""
+    import cgols_cost_accuracy as cost_accuracy
+    import cgols_fvfd_statistics as statistics
+    import cgols_scheme_convergence as scheme_convergence
+
+    sc_script = CGOLS / "cgols_scheme_convergence.py"
+    st_script = CGOLS / "cgols_fvfd_statistics.py"
+    runs_ca, data_ca, ex_ca, scal = cost_accuracy.collect()
+    rows = scheme_convergence.analyse(scal)
+
+    # self-convergence per scheme at 10 %
+    tol = 10.0
+    count = {"FD": 0, "FV": 0, "same": 0, "neither": 0}
+    for key, r in rows.items():
+        n_fd = scheme_convergence.self_convergence(key, r["cells"], "FD", tol)[0]
+        n_fv = scheme_convergence.self_convergence(key, r["cells"], "FV", tol)[0]
+        if n_fd is None and n_fv is None:
+            count["neither"] += 1
+        elif n_fd == n_fv:
+            count["same"] += 1
+        elif n_fv is None or (n_fd is not None and n_fd < n_fv):
+            count["FD"] += 1
+        else:
+            count["FV"] += 1
+    sc_common = (f"of the {len(rows)} cost-accuracy quantities (scalars; cgols_scheme_convergence.py item 1): lowest N "
+                 f"from which every run of a scheme up to 1024^3 stays within {tol:g} % of the same scheme at 2048^3 "
+                 f"(nominal, without the seed noise)")  # fmt: skip
+    for key, which, text in (
+        ("SelfConvFDEarlier", "FD", "Number for which FD self-converges at a lower N than FV"),
+        ("SelfConvFVEarlier", "FV", "Number for which FV self-converges at a lower N than FD"),
+        ("SelfConvSame", "same", "Number for which FD and FV self-converge at the same N below 2048^3"),
+        ("SelfConvNeither", "neither", "Number for which neither scheme self-converges below 2048^3"),
+    ):
+        yield key, dict(
+            value=count[which], unit="", status="provisional", convergence=None, digits=2,
+            description=f"{text}, {sc_common}. All four: FD earlier {count['FD']}, FV earlier {count['FV']}, same "
+                        f"{count['same']}, neither {count['neither']}.",
+            runs=["FD/FV 128-2048"], data=None, script=sc_script,
+        )  # fmt: skip
+    yield "NQuantitiesFDFV", dict(
+        value=len(rows), unit="", status="provisional", convergence=None, digits=2,
+        description="Number of scalar quantities in the FD/FV comparison of cgols_scheme_convergence.py (the "
+                    "cost-accuracy quantities without the time-series and n-T distribution distances).",
+        runs=["FD/FV 128-2048"], data=None, script=sc_script,
+    )  # fmt: skip
+    n_sig = sum(abs(r["z_top"]) > scheme_convergence.Z_AGREE for r in rows.values())
+    yield "NSigDiffFDFV", dict(
+        value=n_sig, unit="", status="provisional", convergence=None, digits=2,
+        description=f"Number of the {len(rows)} quantities for which FD-2048 and FV-2048 differ by more than "
+                    f"{scheme_convergence.Z_AGREE:g} sigma of the seed noise (sigma from FV-2048 seed 1 and FD-1024 "
+                    "seed 1; cgols_scheme_convergence.py item 3).",
+        runs=["A-2048", "FV-2048", "FV-2048 seed 1", "A-1024 seed 1"], data=None, script=sc_script,
+    )  # fmt: skip
+
+    # cheapest run per family (the cost-accuracy table)
+    result = cost_accuracy.analyse(runs_ca, data_ca, ex_ca, scal)
+    cases = {"nominal": [], "confident": []}
+    for t in (5.0, 10.0, 20.0):
+        for d in cost_accuracy.cheapest(result, t).values():
+            for kind, winners in cases.items():
+                if d[kind] is not None and d[kind][1] < cost_accuracy.REF_N:
+                    winners.append(d[kind][0])
+    n_fv, n_all = cases["nominal"].count("FV"), len(cases["nominal"])
+    c_fv, c_all = cases["confident"].count("FV"), len(cases["confident"])
+    for key, value, text in (
+        ("CheapestRunFVCount", n_fv, "Number of them in which the cheapest run is FV"),
+        ("CheapestRunCasesCount", n_all, "Number of family x tolerance cases"),
+    ):
+        yield key, dict(
+            value=value, unit="", status="provisional", convergence=None, digits=2,
+            description=f"{text}: of the 12 families x 3 tolerances (5, 10, 20 %) of the cost-accuracy table, the "
+                        f"cases whose cheapest run (nominal, worst quantity within the tolerance) lies below 2048^3: "
+                        f"{n_all}, of which FV {n_fv}. With the reference uncertainty counted (confident column): "
+                        f"{c_all}, of which FV {c_fv}.",
+            runs=["FD/FV 128-2048"], data=None, script=CGOLS / "cgols_cost_accuracy.py",
+        )  # fmt: skip
+
+    # higher-order statistics at 2048^3 (base runs FD-2048 and FV-2048 seed 0; seed noise from the seeds)
+    stats = statistics.collect()
+    table = statistics.scalar_table(stats)
+    comp = {name: statistics.compare(values) for name, values in table.items()}
+
+    def at2048(name):
+        return comp[name][2048]
+
+    def seed1(name):
+        return table[name][("FV", 2048)][1]
+
+    st_json = STUDIES / "fvfd_statistics.json"
+    widths = {f"{w} {phase} {var}": at2048(f"PDF {w}: {phase} width log {var}")
+              for w in statistics.WINDOWS for phase in ("mixed", "wind") for var in ("n", "T")}  # fmt: skip
+    dev = {k: 100.0 * abs(v["FV"] / v["FD"] - 1.0) for k, v in widths.items()}
+    worst = max(dev, key=dev.get)
+    yield "PDFWidthAgreement", dict(
+        value=dev[worst], unit="percent", status="provisional", convergence=None, digits=2,
+        description=f"Largest |FV / FD - 1| of the widths (mass-weighted std) of the log n and log T PDFs of the mixed- "
+                    f"and wind-entropy gas at |z| > 1 kpc, FD-2048 vs FV-2048, windows (30, 45] and (45, 75] Myr; the "
+                    f"largest is {worst} ({dev[worst]:.1f} %), the others " + ", ".join(
+                        f"{k} {v:.1f} %" for k, v in dev.items() if k != worst) + ".",
+        runs=["A-2048", "FV-2048"], data=st_json, script=st_script,
+    )  # fmt: skip
+    det = at2048("clumps 45-75: detached clumps > 1e+02 Msun")
+    big = at2048("clumps 45-75: all clumps > 1e+03 Msun")
+    clump_note = (f" Detached clumps above 1e2 Msun: FD {det['FD']:.3g}, FV {det['FV']:.3g} (z = {det['z']:.1f}); above "
+                  f"1e3 Msun FD and FV agree within the noise ({big['FD']:.3g} vs {big['FV']:.3g}, z = {big['z']:.1f}).")
+    for key, name, text, note in (
+        ("MixedGasExcessFD", "PDF 45-75: mixed mass [Msun]", "mixed-entropy gas mass at |z| > 1 kpc", ""),
+        ("ClumpExcessFD", "clumps 45-75: all clumps > 1e+02 Msun", "number of clumps above 1e2 Msun per snapshot",
+         clump_note),
+    ):
+        e = at2048(name)
+        yield key, dict(
+            value=100.0 * (e["FD"] / e["FV"] - 1.0), unit="percent", status="provisional", convergence=None, digits=2,
+            description=f"FD-2048 / FV-2048 - 1 of the {text}, mean over (45, 75] Myr: FD {e['FD']:.3g}, FV "
+                        f"{e['FV']:.3g} (FV seed 1 {seed1(name):.3g}); z = {e['z']:.1f} against the seed noise.{note}",
+            runs=["A-2048", "FV-2048"], data=st_json, script=st_script,
+        )  # fmt: skip
+    sx = {res: at2048(f"map 60 Myr: xray width log S ({res})") for res in ("native", "20 pc", "80 pc", "160 pc")}
+    yield "SXwidthRatioFDFV", dict(
+        value=sx["80 pc"]["FD"] / sx["80 pc"]["FV"], unit="", status="single_snapshot", convergence=None,
+        description="FD-2048 / FV-2048 of the width (std) of the log S_X distribution of the 60 Myr x-z map at "
+                    "1 < |z| < 5 kpc (0.3-2 keV AtomDB), map smoothed to an 80 pc beam: "
+                    f"{sx['80 pc']['FD']:.3f} vs {sx['80 pc']['FV']:.3f} dex (z = {sx['80 pc']['z']:.1f}). Other beams: "
+                    + ", ".join(f"{r} {e['FD'] / e['FV']:.3f} (z = {e['z']:.1f})" for r, e in sx.items() if r != "80 pc")
+                    + ". One snapshot per run.",
+        runs=["A-2048", "FV-2048"], data=st_json, script=st_script,
+    )  # fmt: skip
+    ha = at2048("map 60 Myr: halpha log S power 100-30 pc")
+    yield "HalphaPowerRatioFDFV", dict(
+        value=ha["FD"] / ha["FV"], unit="", status="single_snapshot", convergence=None,
+        description=f"FD-2048 / FV-2048 of the power of log S_Halpha of the 60 Myr x-z map at 1 < |z| < 5 kpc in the "
+                    f"30-100 pc band: {ha['FD']:.3g} vs {ha['FV']:.3g} (FV seed 1 {seed1('map 60 Myr: halpha log S power 100-30 pc'):.3g}); "
+                    f"z = {ha['z']:.1f}. One snapshot per run.",
+        runs=["A-2048", "FV-2048"], data=st_json, script=st_script,
+    )  # fmt: skip
+
+    # spectra: agreement down to which band, and FV's velocity-power deficit at 30-60 pc
+    bands = list(statistics.BANDS_PC)
+    fields = ("log n", "log T", "|v|")
+    agree_pc, worst_rel, failing = None, 0.0, []
+    for band in bands:
+        es = [at2048(f"spectrum {w}: {f} power {band}") for w in statistics.WINDOWS for f in fields]
+        if all(e["verdict"] == "noise" for e in es):
+            agree_pc = statistics.BANDS_PC[band][1]
+            worst_rel = max(worst_rel, max(abs(e["FV"] / e["FD"] - 1.0) for e in es))
+        else:
+            failing = [f"{w} {f} (FV/FD = {e['FV'] / e['FD']:.2f}, z = {e['z']:.1f})"
+                       for w in statistics.WINDOWS for f in fields
+                       for e in [at2048(f"spectrum {w}: {f} power {band}")] if e["verdict"] != "noise"]  # fmt: skip
+            break
+    yield "SpectraAgreeScaleFDFV", dict(
+        value=agree_pc, unit="pc", status="provisional", convergence=None, digits=2,
+        description=f"Smallest scale down to which the 3D power spectra of log n, log T and |v| (1 < |z| < 3.5 kpc) of "
+                    f"FD-2048 and FV-2048 agree within the seed noise, in the bands 1000-300 / 300-100 / 100-30 pc and "
+                    f"both windows (30, 45] and (45, 75] Myr; down to there the band powers differ by at most "
+                    f"{100 * worst_rel:.0f} %. The next band fails in: {'; '.join(failing) or 'none'}.",
+        runs=["A-2048", "FV-2048"], data=st_json, script=st_script,
+    )  # fmt: skip
+    k = np.sqrt(statistics.K_EDGES[1:] * statistics.K_EDGES[:-1])
+    spec = {tag: stats[tag]["structure"]["45-75"] for tag in ("A2048", "A2048fv", "A2048fvs1")}
+    kmax = min(s["k_nyquist"] for s in spec.values())
+    sel = (1e3 / k >= 30.0) & (1e3 / k <= 60.0) & (k <= kmax)
+    deficit = {tag: 100.0 * (1.0 - float(np.mean(spec[tag]["pk_v"][sel] / spec["A2048"]["pk_v"][sel])))
+               for tag in ("A2048fv", "A2048fvs1")}  # fmt: skip
+    yield "VelPowerDeficitFV", dict(
+        value=deficit["A2048fv"], unit="percent", status="provisional", convergence=None, digits=2,
+        uncertainty={"kind": "range", "lo": min(deficit.values()), "hi": max(deficit.values())},
+        description=f"1 - FV-2048 / FD-2048 of the 3D velocity power spectrum P_|v|(k) at 1 < |z| < 3.5 kpc, mean of the "
+                    f"ratio over the {int(sel.sum())} k bins between 30 and 60 pc (6-12 cells), (45, 75] Myr: "
+                    f"{deficit['A2048fv']:.0f} % (FV seed 1: {deficit['A2048fvs1']:.0f} %). In (30, 45] Myr the "
+                    f"deficit is smaller.",
+        runs=["A-2048", "FV-2048", "FV-2048 seed 1"], data=[STUDIES / f"structure3d_v2_{t}.npz" for t in spec],
+        script=st_script,
+    )  # fmt: skip
+
+    # onset of rim mixing
+    names = {"A2048": "FD-2048", "A2048fv": "FV-2048", "A2048fvs1": "FV-2048 seed 1", "A1024": "FD-1024",
+             "A1024fv": "FV-1024"}
+    onsets = {tag: rim_onset(tag) for tag in names}
+    others = ", ".join(f"{names[t]} {v[0]:g}" for t, v in onsets.items())
+    for key, tag in (("RimOnsetFDTwentyFortyEight", "A2048"), ("RimOnsetFVTwentyFortyEight", "A2048fv")):
+        t_on, t_before = onsets[tag]
+        yield key, dict(
+            value=t_on, unit="Myr", status="provisional", convergence="not_converged", digits=3,
+            uncertainty={"kind": "range", "lo": t_before, "hi": t_on},
+            description=f"Onset of the mixing episode at the cavity rim, {names[tag]}: first checkpoint after "
+                        f"the 15-25 Myr minimum at which the mixed-entropy outflow through |z| = 1 kpc exceeds "
+                        f"{RIM_ONSET_MDOT:g} Msun/yr; the onset lies between {t_before:g} and {t_on:g} Myr (checkpoint "
+                        f"cadence). All runs: {others} Myr. The onset moves earlier with resolution in both schemes, "
+                        f"so it is not converged.",
+            runs=[names[tag]], data=STUDIES / f"convergence3d_v3_{tag}.npz",
+            script=CGOLS / "paper_exports" / "paper1_numbers.py",
+        )  # fmt: skip
 
 
 # --------------------------------------------------------------------------- figures
