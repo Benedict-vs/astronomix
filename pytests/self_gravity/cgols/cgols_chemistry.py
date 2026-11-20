@@ -129,7 +129,7 @@ def build_chemistry(
     radiation_field_per_cell=False,
     radiation_attenuation=0,
     radiation_disk_source=False,
-    source_composition_fixed=True,
+    elements="uniform",
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -290,13 +290,22 @@ def build_chemistry(
     masses = np.asarray(chemistry_params.network.masses, dtype=np.float64) / PROTON_MASS_CGS
     mass_per_hydrogen = float(np.dot(masses, start_abundances))
 
-    # The gas the wind injection adds has the element abundances of the run, whatever the cell it is added to
-    # holds. (Per unit mass in the units of the state: a species is a number density in units of the code density
-    # over the proton mass.) With the composition of the cell instead, an error of the element abundances grows in
-    # the injection sphere by 0.65 % per step and never leaves: see ``ChemistryConfig.source_composition``.
-    # ``source_composition_fixed=False`` is the behaviour up to 2026-11-20, kept to reproduce it. The composition
-    # is set either way: it is also the reference of :func:`element_errors`.
-    if source_composition_fixed:
+    # The element abundances of the gas (``elements``). A CGOLS run has one composition: every cell starts with
+    # it and the wind injection adds gas of it. (Per unit mass in the units of the state: a species is a number
+    # density in units of the code density over the proton mass.)
+    #   "uniform" (default): the species are scaled onto these abundances after every transport step
+    #       (``ChemistryConfig.uniform_composition``); no error of the element content can build up.
+    #   "source": only the gas the injection adds is given them (``SOURCE_COMPOSITION_FIXED``); the totals of the
+    #       cells are advected. Removes the fast growth below, a slow one can remain at the edge of the sphere.
+    #   "cell": the injected gas copies the composition of its cell, the behaviour up to 2026-11-20: an error of
+    #       the element abundances grows in the injection sphere by 0.65 % per step until cells lose whole
+    #       elements. Only to reproduce it.
+    # The composition is set in every case: it is also the reference of :func:`element_errors`.
+    if elements not in ("uniform", "source", "cell"):
+        raise ValueError(f"chemistry: elements must be 'uniform', 'source' or 'cell', not {elements!r}")
+    if elements == "uniform":
+        chemistry_config = chemistry_config._replace(uniform_composition=True)
+    elif elements == "source":
         chemistry_config = chemistry_config._replace(source_composition=SOURCE_COMPOSITION_FIXED)
     chemistry_params = chemistry_params._replace(
         source_abundances=jnp.asarray(start_abundances / mass_per_hydrogen)

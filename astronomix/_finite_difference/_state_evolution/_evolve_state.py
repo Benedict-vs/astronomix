@@ -145,11 +145,16 @@ def _evolve_state_fd(
             dt,
             config,
             registered_variables,
+            reference_abundances=params.chemistry_params.source_abundances,
         )
         # The density the mass sources add within this step, for the
-        # composition of that gas (see the reattachment below).
+        # composition of that gas (see the reattachment below). In a run of
+        # one composition the added gas has that of its cell, which is it.
         source_density = None
-        if config.chemistry_config.source_composition == SOURCE_COMPOSITION_FIXED:
+        if (
+            config.chemistry_config.source_composition == SOURCE_COMPOSITION_FIXED
+            and not config.chemistry_config.uniform_composition
+        ):
             if params.chemistry_params.source_abundances is None:
                 raise ValueError(
                     "ChemistryConfig.source_composition == SOURCE_COMPOSITION_FIXED needs the composition "

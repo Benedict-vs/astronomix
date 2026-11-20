@@ -217,6 +217,15 @@ class ChemistryConfig(NamedTuple):
     # element by element, the ionisation and molecular state of the cell. An error of the composition is then diluted
     # by the mass the source adds, as fast as that mass arrives. Cells without a source are untouched, bit for bit.
     source_composition: int = SOURCE_COMPOSITION_OF_THE_CELL
+    # Finite-difference solver: all the gas of the run, the gas its sources add included, has the element abundances
+    # of ``ChemistryParams.source_abundances``. The atoms of every element and the charge per unit mass are then
+    # constants of the run, and after the advection the species are scaled onto these constants instead of onto
+    # totals that were advected with them: no error of the element abundances can build up, by any mechanism, and the
+    # totals need not be advected. Set it whenever it is true of the run (a galaxy with one metallicity). With
+    # composition gradients leave it off; then ``source_composition`` matters, and so does what it leaves: on the
+    # frozen flow of a CGOLS wind, with the mass of the source spread evenly over its sphere, an error still grew by
+    # about 0.1 to 0.3 % per step at the edge of the sphere (the advection is not monotone at an extremum).
+    uniform_composition: bool = False
     # Temperature from the particles the network carries: T = P / (k sum_i n_i) on the way in and
     # P = k T sum_i n_i (the reacted species) on the way out, as KROME and the codes coupled to it do. With False (the
     # default, and the behaviour before 2026-11-19) the particle density is rho / (mu m_p) with the mean molecular
@@ -307,7 +316,8 @@ class ChemistryParams(NamedTuple):
     # The species of the gas a mass source adds, per unit mass in the units of the state (number density over
     # density), shape ``(num_species,)``; read with ``ChemistryConfig.source_composition == SOURCE_COMPOSITION_FIXED``.
     # Its atoms per element are what the added gas brings; its split of an element over the species is only used in
-    # a cell that holds none of that element.
+    # a cell that holds none of that element. With ``ChemistryConfig.uniform_composition`` it is the composition
+    # of all the gas of the run.
     source_abundances: Any = None
 
     # thermochemistry parameters (heating/cooling)

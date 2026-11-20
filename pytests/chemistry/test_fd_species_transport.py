@@ -63,6 +63,7 @@ from astronomix._modules._chemistry._species_transport import (
     conserved_totals,
     mix_source_composition,
     restore_conserved_totals,
+    restore_uniform_composition,
 )
 from astronomix._modules._chemistry.chemistry_options import (
     SOURCE_COMPOSITION_FIXED,
@@ -745,12 +746,18 @@ def test_source_gas_without_the_composition_of_the_species():
         )
 
 
-def _wind_in_a_box(source_composition, abundances_per_mass, *, mass_rate, energy_rate, t_end, cells=32, source_gas=SOURCE_GAS):
+def _wind_in_a_box(
+    source_composition, abundances_per_mass, *, mass_rate, energy_rate, t_end, cells=32, source_gas=SOURCE_GAS, uniform=False
+):
     """A steady mass source in a sphere at the centre of a box of gas at rest (the CGOLS injection, open
     boundaries, species that do not react). Returns ``(final state, registered variables, radius of every cell)``."""
     # the species are only moved: no reaction is ever due (it would be the whole cost of these runs)
     chemistry_config, chemistry_params = _chemistry(
-        HYDROGEN_HELIUM, Frozen(), source_composition=source_composition, chemistry_step_target=1.0e30
+        HYDROGEN_HELIUM,
+        Frozen(),
+        source_composition=source_composition,
+        uniform_composition=uniform,
+        chemistry_step_target=1.0e30,
     )
     chemistry_params = chemistry_params._replace(source_abundances=jnp.asarray(source_gas))
     config = SimulationConfig(
@@ -855,9 +862,15 @@ def steady_wind():
         return gas
 
     result = {"start": 1.0e-6 * float(bump([np.full((1,), 0.5 + 0.5 / cells)] * 3)[0])}
-    for mode in (SOURCE_COMPOSITION_OF_THE_CELL, SOURCE_COMPOSITION_FIXED):
+    for mode in (SOURCE_COMPOSITION_OF_THE_CELL, SOURCE_COMPOSITION_FIXED, "uniform"):
         final, registered_variables, radius = _wind_in_a_box(
-            mode, source_gas_with_an_error, mass_rate=5.0, energy_rate=100.0, t_end=0.1, cells=cells
+            SOURCE_COMPOSITION_OF_THE_CELL if mode == "uniform" else mode,
+            source_gas_with_an_error,
+            mass_rate=5.0,
+            energy_rate=100.0,
+            t_end=0.1,
+            cells=cells,
+            uniform=mode == "uniform",
         )
         atoms, _ = _atoms(_per_mass(final, registered_variables), chemistry_config)
         error = np.abs(atoms[helium] / 0.075 - 1.0)
@@ -885,6 +898,61 @@ def test_source_that_copies_its_cell_keeps_and_amplifies_the_error(steady_wind):
     assert in_sphere > 1.1 * steady_wind["start"], (in_sphere, steady_wind["start"])
     assert outside > 0.3 * steady_wind["start"], outside
     assert in_sphere > 30.0 * steady_wind[SOURCE_COMPOSITION_FIXED][0]
+
+
+def test_run_of_one_composition_cannot_drift(steady_wind):
+    # uniform_composition: the species are scaled onto the composition of the run after every advection, so the
+    # error of the start is gone after the first step and nothing can build up, with any source
+    in_sphere, outside, speed = steady_wind["uniform"]
+    assert speed > 3.0
+    assert in_sphere < 1e-13 and outside < 1e-13, (in_sphere, outside)
+
+
+def test_species_are_scaled_onto_the_composition_of_the_run():
+    chemistry_config, _ = _chemistry(HYDROGEN_HELIUM, Frozen())
+    elements = list(chemistry_config.species_element_names)
+    hydrogen, helium = elements.index("H"), elements.index("He")
+    # the composition of the run in another state; too little hydrogen, too much helium, charged; no helium
+    cells = np.array(
+        [
+            [0.01, 0.69, 0.001, 0.004, 0.070, 0.834],
+            [0.05, 0.25, 0.200, 0.050, 0.050, 0.300],
+            [0.20, 0.50, 0.000, 0.000, 0.000, 0.500],
+        ]
+    ).T
+    scaled = np.asarray(restore_uniform_composition(jnp.asarray(cells), jnp.asarray(SOURCE_GAS), chemistry_config))
+    before, _ = _atoms(cells, chemistry_config)
+    after, charge = _atoms(scaled, chemistry_config)
+    reference, _ = _atoms(SOURCE_GAS, chemistry_config)
+    np.testing.assert_allclose(after, reference[:, None] * np.ones((1, 3)), rtol=1e-14)
+    np.testing.assert_allclose(charge, 0.0, atol=1e-15)
+    np.testing.assert_allclose(scaled[:, 0], cells[:, 0], rtol=1e-14)  # nothing to do
+    # the state of the cell is kept: one factor per element
+    np.testing.assert_allclose(scaled[:2, 1] / after[hydrogen, 1], cells[:2, 1] / before[hydrogen, 1], rtol=1e-13)
+    np.testing.assert_allclose(scaled[2:5, 1] / after[helium, 1], cells[2:5, 1] / before[helium, 1], rtol=1e-13)
+    # an element the cell does not hold arrives as the species of the reference
+    np.testing.assert_allclose(scaled[2:5, 2], SOURCE_GAS[2:5], rtol=1e-14)
+    # without the composition of the species there is nothing to scale onto
+    without, _ = _chemistry(HYDROGEN_HELIUM, Frozen(), composition=False)
+    with pytest.raises(ValueError, match="uniform_composition"):
+        restore_uniform_composition(jnp.asarray(cells), jnp.asarray(SOURCE_GAS), without)
+
+
+def test_fronts_of_a_run_of_one_composition():
+    # He, He+ and He++ with fronts in the same cells: with uniform_composition the helium per unit mass is the
+    # constant of the run to round-off (the advected totals give 3e-15 too; here they are not advected at all)
+    chemistry_config, chemistry_params = _chemistry(HELIUM, Frozen(), uniform_composition=True)
+    reference = HELIUM_PER_MASS * np.array([1.0, 0.0, 0.0, 0.0])
+    chemistry_params = chemistry_params._replace(source_abundances=jnp.asarray(reference))
+    initial, final, registered_variables = _simulate("fd", chemistry_config, chemistry_params, _helium_fronts)
+    per_mass = _per_mass(final, registered_variables)
+    atoms, charge = _atoms(per_mass, chemistry_config)
+    np.testing.assert_allclose(atoms[0], HELIUM_PER_MASS, rtol=1e-13)
+    np.testing.assert_allclose(charge, 0.0, atol=1e-15)
+    assert (per_mass >= 0.0).all()
+    assert np.abs(_per_mass(final, registered_variables) - _per_mass(initial, registered_variables)).max() > 1e-3  # they moved
+    with pytest.raises(ValueError, match="source_abundances"):
+        _simulate("fd", chemistry_config, chemistry_params._replace(source_abundances=None), _helium_fronts, t_end=0.01)
 
 
 def test_cell_without_particles_keeps_its_pressure():

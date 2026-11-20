@@ -531,7 +531,17 @@ the same function. What differs is how the species are moved between two reactio
   With `source_composition=SOURCE_COMPOSITION_FIXED` the added gas has the element abundances
   of `ChemistryParams.source_abundances` (species per unit mass) and, element by element, the
   ionisation and molecular state of the cell; the same error then decays. Cells without a
-  source are untouched bit for bit.
+  source are untouched bit for bit. This removes the fast growth, not every growth: the
+  advection is not monotone at an extremum, and where a cell loses more gas than the source
+  gives it an error still grew by 0.1 to 0.3 % per step on the frozen flow of that run.
+- **A run of one composition.** If all the gas of a run, the gas of its sources included, has
+  the same element abundances (a galaxy of one metallicity), set `uniform_composition=True`:
+  the atoms of every element and the charge per unit mass are then constants of the run
+  (`ChemistryParams.source_abundances`), the species are scaled onto them after every
+  advection, and the totals are not advected at all. No error of the element abundances can
+  build up, by any mechanism. `pytests/self_gravity/cgols` runs this way
+  (`CGOLS_CHEM_ELEMENTS=uniform`, the default; every frame stores `element_error`, the largest
+  deviation over the cells).
 - **Atoms and charge.** WENO gives every species its own nonlinear weights, so where three or
   more species of an element have a front in the same cells their atoms stop adding up: 1.4 %
   of the helium after 0.1 crossing times in the test with He, He+ and He++. The atoms of every
@@ -563,8 +573,9 @@ the same function. What differs is how the species are moved between two reactio
   (the product agrees to 0.07 % on average and 0.8 % at most on 64^2 cells), open boundaries,
   both temperature conventions on a recombining gas with an exact solution, the density floor,
   the composition of gas from a mass source (exact mass-weighted mean; a steady wind in three
-  dimensions in which an error of 1e-6 is gone with the fixed composition and has grown with
-  the copy of the cell), and the Pallas backend against native JAX. `pytests/chemistry/chemistry_multidevice.py
+  dimensions in which an error is gone with the fixed composition, has grown with the copy of
+  the cell, and is at round-off with `uniform_composition`), and the Pallas backend against
+  native JAX. `pytests/chemistry/chemistry_multidevice.py
   --solver fd` compares one device with several, on emulated CPU devices and on real GPUs
   (two H200: transport bit-identical, one reaction step 1.8e-15 dex, multi-step runs 1e-14
   dex at `--rtol 1e-8 --atol 1e-14`). At a looser tolerance a multi-step run of a strongly

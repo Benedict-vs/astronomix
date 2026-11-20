@@ -41,7 +41,20 @@ error of the atoms per unit mass grew by 0.65 % per step, from round-off at the
 start of the wind to 1e-2 after 35 Myr and to cells without any species after
 45 Myr. With ``SOURCE_COMPOSITION_FIXED`` the added gas has a composition of its
 own (:func:`mix_source_composition`), as ejecta do; the same error then decays,
-by the fraction of the cell's mass the source adds per step.
+by the fraction of the cell's mass the source adds per step. That removes the
+fast growth, not all of it: the fifth-order advection is not monotone at an
+extremum, and where a cell loses more gas than the source gives it (the edge of
+the sphere, dense gas inside it) the frozen-flow test still shows 0.1 to 0.3 %
+per step.
+
+**A run of one composition.** If all the gas of a run, the gas of its sources
+included, has the same element abundances, the atoms of every element and the
+charge per unit mass are constants and need not be advected at all. With
+``ChemistryConfig.uniform_composition`` the species are scaled onto these
+constants after every advection (:func:`restore_uniform_composition`): an error
+of the element abundances cannot build up by any mechanism, in any cell. This is
+the setting for a galaxy of one metallicity; the advected totals above are for
+runs with composition gradients.
 
 **The conserved totals.** The atoms of an element per unit mass,
 ``A_e = sum_i a_ei X_i``, and the charge per unit mass, ``Q = sum_i q_i X_i``,
@@ -203,12 +216,67 @@ def restore_conserved_totals(abundances, element_totals, charge_total, chemistry
     return abundances
 
 
+def _seed_absent_elements(abundances, element_totals, seed, element_matrix):
+    """Add ``seed`` (shape of ``abundances``) to the species of every element of which a cell holds no atom: such
+    species cannot be scaled onto a target, they are all zero."""
+    element_absent = (element_totals <= 0.0).astype(abundances.dtype)
+    of_an_absent_element = (
+        jnp.tensordot(jnp.asarray(element_matrix > 0, dtype=abundances.dtype).T, element_absent, axes=1) > 0.0
+    )
+    return jnp.where(of_an_absent_element, abundances + seed, abundances)
+
+
+def restore_uniform_composition(abundances, reference_abundances, chemistry_config):
+    """
+    Scale the species so that every cell carries the atoms and the charge per unit mass of
+    ``reference_abundances`` (``ChemistryConfig.uniform_composition``): the species of every element by one
+    factor per cell, so the ionisation and molecular state of the cell is kept, and the electrons to the charge.
+    In a cell that holds none of an element its atoms arrive as the species of the reference.
+
+    Args:
+        abundances: The species per unit mass, shape ``(num_species,) + grid``.
+        reference_abundances: The composition of the run per unit mass, shape ``(num_species,)``.
+        chemistry_config: The chemistry configuration (composition of the species).
+
+    Returns:
+        The species per unit mass with the element abundances of the reference.
+    """
+    element_matrix, charges = _composition(chemistry_config)
+    if element_matrix is None:
+        raise ValueError(
+            "ChemistryConfig.uniform_composition needs the composition of the species (species_element_matrix, "
+            "species_charges) and conserve_elements_in_transport."
+        )
+    reference = jnp.asarray(reference_abundances, dtype=abundances.dtype)
+    if reference.shape != (abundances.shape[0],):
+        raise ValueError(
+            f"ChemistryParams.source_abundances has the shape {reference.shape}; the state carries "
+            f"{abundances.shape[0]} species."
+        )
+    grid_axes = (1,) * (abundances.ndim - 1)
+    elements = jnp.asarray(element_matrix, dtype=abundances.dtype)
+    targets = jnp.broadcast_to(
+        (elements @ reference).reshape((-1,) + grid_axes), (elements.shape[0],) + abundances.shape[1:]
+    )
+    element_totals, _ = conserved_totals(abundances, chemistry_config)
+    seeded = _seed_absent_elements(
+        abundances, element_totals, jnp.broadcast_to(reference.reshape((-1,) + grid_axes), abundances.shape), element_matrix
+    )
+    target_charge = None
+    if charges is not None:
+        target_charge = jnp.broadcast_to(
+            jnp.dot(jnp.asarray(charges, dtype=abundances.dtype), reference), abundances.shape[1:]
+        )
+    return restore_conserved_totals(seeded, targets, target_charge, chemistry_config)
+
+
 def advect_chemical_species(
     species,
     primitive_state,
     dt,
     config: SimulationConfig,
     registered_variables: RegisteredVariables,
+    reference_abundances=None,
 ):
     """
     Advect the chemical species over one hydro step (steps 1 and 2 of the module
@@ -222,6 +290,9 @@ def advect_chemical_species(
         dt: The hydro time step.
         config: The simulation configuration.
         registered_variables: The registered variables of ``primitive_state``.
+        reference_abundances: With ``ChemistryConfig.uniform_composition`` the
+            composition of the run per unit mass, shape ``(num_species,)``
+            (``ChemistryParams.source_abundances``).
 
     Returns:
         The advected abundances per unit mass ``X_i``, same shape as
@@ -230,14 +301,20 @@ def advect_chemical_species(
     """
     chemistry_config = config.chemistry_config
     number_of_species = species.shape[0]
+    uniform = chemistry_config.uniform_composition
+    if uniform and reference_abundances is None:
+        raise ValueError(
+            "ChemistryConfig.uniform_composition needs the composition of the run, ChemistryParams.source_abundances."
+        )
 
     density = primitive_state[registered_variables.density_index]
     # The hydro keeps the density positive; the floor only keeps the quotient
     # finite in a cell that broke that.
     abundances = species / jnp.maximum(density, jnp.finfo(density.dtype).tiny)[None, ...]
 
-    # The conserved totals ride along as further scalars.
-    element_totals, charge_total = conserved_totals(abundances, chemistry_config)
+    # The conserved totals ride along as further scalars, unless they are the
+    # constants of a run of one composition.
+    element_totals, charge_total = (None, None) if uniform else conserved_totals(abundances, chemistry_config)
     scalars = [abundances]
     bounds = [(0.0, float("inf"))] * number_of_species
     number_of_elements = 0
@@ -271,6 +348,8 @@ def advect_chemical_species(
         element_totals = advected[number_of_species : number_of_species + number_of_elements]
     if charge_total is not None:
         charge_total = advected[number_of_species + number_of_elements]
+    if uniform:
+        return restore_uniform_composition(abundances, reference_abundances, chemistry_config)
     return restore_conserved_totals(abundances, element_totals, charge_total, chemistry_config)
 
 
@@ -334,13 +413,8 @@ def mix_source_composition(abundances, density, added_density, source_abundances
         target_totals = (1.0 - fraction)[None, ...] * element_totals + fraction[None, ...] * source_totals
         # The species of an element the cell does not hold cannot be scaled to
         # its target; there the atoms arrive as the species of the source.
-        element_absent = (element_totals <= 0.0).astype(abundances.dtype)
-        of_an_absent_element = (
-            jnp.tensordot(jnp.asarray(element_matrix > 0, dtype=abundances.dtype).T, element_absent, axes=1)
-            > 0.0
-        )
-        seeded = jnp.where(
-            of_an_absent_element, abundances + fraction[None, ...] * source_on_grid, abundances
+        seeded = _seed_absent_elements(
+            abundances, element_totals, fraction[None, ...] * source_on_grid, element_matrix
         )
         target_charge = None
         if charges is not None and charge_total is not None:

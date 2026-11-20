@@ -1208,13 +1208,15 @@ CHEM_CR_RATE = float(os.environ.get("CGOLS_CHEM_CR_RATE", "3e-17"))
 CHEM_DRAINE = float(os.environ.get("CGOLS_CHEM_DRAINE", "1"))
 CHEM_FREE_FREE = os.environ.get("CGOLS_CHEM_FREE_FREE", "1") == "1"
 CHEM_FUV = os.environ.get("CGOLS_CHEM_FUV", "1") == "1"
-# The composition of the gas the wind injection adds: "fixed" = the element
-# abundances of the run (default), "cell" = that of the cell it is added to
-# (the behaviour up to 2026-11-20, in which an error of the composition grows
-# in the injection sphere until cells lose whole elements; only to reproduce it).
-CHEM_SOURCE_COMPOSITION = os.environ.get("CGOLS_CHEM_SOURCE_COMPOSITION", "fixed")
-if CHEM_SOURCE_COMPOSITION not in ("fixed", "cell"):
-    raise ValueError(f"CGOLS_CHEM_SOURCE_COMPOSITION must be 'fixed' or 'cell', not {CHEM_SOURCE_COMPOSITION!r}")
+# The element abundances of the gas (cgols_chemistry.build_chemistry, elements):
+# "uniform" (default) = the run has one composition and the species are scaled
+# onto it after every transport step; "source" = only the gas the wind injection
+# adds is given it; "cell" = the injected gas copies the composition of its cell
+# (the behaviour up to 2026-11-20, in which an error of the composition grows in
+# the injection sphere until cells lose whole elements; only to reproduce it).
+CHEM_ELEMENTS = os.environ.get("CGOLS_CHEM_ELEMENTS", "uniform")
+if CHEM_ELEMENTS not in ("uniform", "source", "cell"):
+    raise ValueError(f"CGOLS_CHEM_ELEMENTS must be 'uniform', 'source' or 'cell', not {CHEM_ELEMENTS!r}")
 CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
@@ -1627,7 +1629,7 @@ def chemistry_setup():
                 "los": FUV_ATTENUATION_LINE_OF_SIGHT,
             }[FUV_ATTENUATION],
             radiation_disk_source=FUV_DISK,
-            source_composition_fixed=CHEM_SOURCE_COMPOSITION == "fixed",
+            elements=CHEM_ELEMENTS,
         )
         if CHEM_FUV:
             # The sources of model B's FUV field, with the dust opacity per
@@ -2495,11 +2497,11 @@ def build_config():
             + f", cosmic-ray rate {CHEM_CR_RATE:g} /s "
             f"({len(_setup.params.network.cosmic_ray_terms)} cosmic-ray reactions in the file), "
             f"bremsstrahlung {'on' if CHEM_FREE_FREE else 'off'}, "
-            + (
-                "injected gas with the element abundances of the run, "
-                if CHEM_SOURCE_COMPOSITION == "fixed"
-                else "injected gas COPIES the composition of its cell (reproduces the error growth), "
-            )
+            + {
+                "uniform": "one composition (species scaled onto it every step), ",
+                "source": "injected gas with the element abundances of the run, ",
+                "cell": "injected gas COPIES the composition of its cell (reproduces the error growth), ",
+            }[CHEM_ELEMENTS]
             + f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
         )
     elif COOLING:
