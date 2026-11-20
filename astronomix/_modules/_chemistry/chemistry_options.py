@@ -16,6 +16,8 @@ from jaxtyping import PyTree
 # jax
 import jax.numpy as jnp
 
+from astronomix._modules._cooling.cooling_options import FUV_ATTENUATION_NONE, FUVSourceParams
+
 # Stiff-solver tags (select which Diffrax solver integrates the network). Only
 # Kvaerno5 is wired up for now; the others leave room to switch without changing
 # the container layout.
@@ -205,6 +207,23 @@ class ChemistryConfig(NamedTuple):
     # the species say: in neutral gas that temperature is about half the true one. Set it only for a network whose
     # species (electrons included) are all the particles of the gas, helium among them.
     temperature_from_species: bool = False
+    # A radiation field that differs from cell to cell (three dimensions). The reaction of every cell runs with its
+    # radiation multiplied by the FUV field J / J_0 at that cell, J_0 being the field of Draine (1978): the field of
+    # the point sources of ``ChemistryParams.fuv_source_params`` diluted with distance, attenuated by dust as
+    # ``radiation_attenuation`` says (the ``FUV_ATTENUATION_*`` modes of the cooling module), plus, with
+    # ``radiation_disk_source``, the field of the disk's own star formation. It is the same function that scales
+    # the photoelectric heating of a cooling curve (``fuv_radiation_field`` in ``_cooling.py``), so a run with a
+    # network and a run with a cooling curve can be given the same radiation. What the factor multiplies: for a
+    # KROME network the rates and the heating of its photo-reactions, the Habing flux of its dust terms
+    # (photoelectric heating, recombination on dust) and the user variables named as radiation fluxes when the
+    # network is built (``krome_radiation_user_variables``: the Lyman-Werner flux that dissociates H2); for a carbox
+    # network ``fuv_field``. The spectrum itself is the same in every cell. With the factor the dust between the
+    # sources and the cell is in the field, so the network must not attenuate its radiation by a dust column of
+    # its own on top (``krome_shield_habing_dust=False``). Per-cell kernel or Kvaerno5 in every cell; not with the
+    # emulator or the density gate.
+    radiation_field_per_cell: bool = False
+    radiation_attenuation: int = FUV_ATTENUATION_NONE
+    radiation_disk_source: bool = False
 
 
 class ChemistryParams(NamedTuple):
@@ -228,6 +247,8 @@ class ChemistryParams(NamedTuple):
         cosmic_ray_rate: Cosmic-ray ionization rate [s^-1].
         fuv_field: FUV radiation field strength (Draine units).
         visual_extinction: Visual extinction Av [mag].
+        fuv_source_params: The sources, the dust opacity and the tables of the
+            radiation field per cell (``ChemistryConfig.radiation_field_per_cell``).
         dust_to_gas_ratio: Dust-to-gas mass ratio, used by the grain
             photoelectric heating term.
         floor_temperature: Lower bound [K] on the post-reaction temperature
@@ -261,6 +282,9 @@ class ChemistryParams(NamedTuple):
     cosmic_ray_rate: float = 1e-17
     fuv_field: float = 1.0
     visual_extinction: float = 2.0
+    # The sources of the radiation field per cell (``ChemistryConfig.radiation_field_per_cell``): the same structure
+    # as ``CoolingParams.fuv_source_params``, in code units.
+    fuv_source_params: FUVSourceParams = FUVSourceParams()
 
     # thermochemistry parameters (heating/cooling)
     dust_to_gas_ratio: float = 1e-2

@@ -1470,6 +1470,82 @@ def fuv_attenuation_factor(
     raise ValueError(f"Unknown FUV attenuation mode: {attenuation}")
 
 
+def fuv_radiation_field(
+    density: FIELD_TYPE,
+    pressure: FIELD_TYPE,
+    fuv_source_params: FUVSourceParams,
+    attenuation: int,
+    disk_source: bool,
+    helper_data,
+    time: float,
+) -> FIELD_TYPE:
+    r"""The FUV radiation field J / J_0 at every cell of a 3D grid.
+
+    The field of the point sources, diluted with distance
+    (:func:`fuv_heating_factor`), attenuated by dust in the chosen way
+    (``attenuation``: none, the slab or Jeans factor of
+    :func:`fuv_attenuation_factor`, or the line of sight of
+    :func:`fuv_line_of_sight_factor`; the metagalactic background is not
+    attenuated), plus the field of the disk's own star formation
+    (``disk_source``, :func:`fuv_disk_field`). J_0 is the field of Draine
+    (1978), 2.2e-4 erg s^-1 cm^-2 sr^-1 between 6 and 13.6 eV (G_0 = 1.7 Habing;
+    Kim & Ostriker 2017).
+
+    This is the field that scales the photoelectric heating of a cooling curve
+    (:func:`update_pressure_by_cooling`) and, per cell, the radiation of a
+    chemical network (``ChemistryConfig.radiation_field_per_cell``): both use
+    this one function, so a run with a cooling curve and a run with a network
+    see the same radiation.
+
+    Args:
+        density: The density field (3D).
+        pressure: The pressure field (3D).
+        fuv_source_params: The sources, the dust opacity and the tables.
+        attenuation: The attenuation mode (static; ``FUV_ATTENUATION_*``).
+        disk_source: Add the field of the disk's own star formation (static).
+        helper_data: The helper data (``cell_centers_x/y/z`` of the grid).
+        time: The time at which the luminosity of the sources is evaluated.
+
+    Returns:
+        J / J_0 at every cell, shape of ``density``.
+    """
+    fuv_params = fuv_source_params
+    field = fuv_heating_factor(
+        fuv_params,
+        helper_data.cell_centers_x,
+        helper_data.cell_centers_y,
+        helper_data.cell_centers_z,
+        time,
+    )
+    column_spacing = helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0]
+    if attenuation == FUV_ATTENUATION_LINE_OF_SIGHT:
+        if fuv_params.los_factor_cache.ndim == density.ndim:
+            # Static geometry, evaluated once by the time integrator
+            # (CoolingConfig.cache_fuv_geometry).
+            attenuation_factor = fuv_params.los_factor_cache
+        else:
+            attenuation_factor = fuv_line_of_sight_factor(
+                fuv_params,
+                helper_data.cell_centers_x,
+                helper_data.cell_centers_y,
+                helper_data.cell_centers_z,
+            )
+    elif attenuation != FUV_ATTENUATION_NONE:
+        attenuation_factor = fuv_attenuation_factor(
+            density,
+            pressure,
+            fuv_params,
+            attenuation,
+            column_spacing,
+        )
+    if attenuation != FUV_ATTENUATION_NONE:
+        # Attenuate the sources, not the metagalactic background.
+        field = (field - fuv_params.background) * attenuation_factor + fuv_params.background
+    if disk_source:
+        field = field + fuv_disk_field(density, fuv_params, column_spacing)
+    return field
+
+
 @partial(
     jax.jit,
     static_argnames=(
@@ -1544,40 +1620,15 @@ def update_pressure_by_cooling(
             raise ValueError(
                 "fuv_point_source_heating needs a 3D state and the helper data"
             )
-        fuv_params = cooling_params.fuv_source_params
-        field = fuv_heating_factor(
-            fuv_params,
-            helper_data.cell_centers_x,
-            helper_data.cell_centers_y,
-            helper_data.cell_centers_z,
+        field = fuv_radiation_field(
+            density,
+            pressure,
+            cooling_params.fuv_source_params,
+            cooling_config.fuv_attenuation,
+            cooling_config.fuv_disk_source,
+            helper_data,
             time,
         )
-        column_spacing = helper_data.cell_centers_z[1] - helper_data.cell_centers_z[0]
-        if cooling_config.fuv_attenuation == FUV_ATTENUATION_LINE_OF_SIGHT:
-            if fuv_params.los_factor_cache.ndim == density.ndim:
-                # Static geometry, evaluated once by the time integrator
-                # (CoolingConfig.cache_fuv_geometry).
-                attenuation = fuv_params.los_factor_cache
-            else:
-                attenuation = fuv_line_of_sight_factor(
-                    fuv_params,
-                    helper_data.cell_centers_x,
-                    helper_data.cell_centers_y,
-                    helper_data.cell_centers_z,
-                )
-        elif cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
-            attenuation = fuv_attenuation_factor(
-                density,
-                pressure,
-                fuv_params,
-                cooling_config.fuv_attenuation,
-                column_spacing,
-            )
-        if cooling_config.fuv_attenuation != FUV_ATTENUATION_NONE:
-            # Attenuate the sources, not the metagalactic background.
-            field = (field - fuv_params.background) * attenuation + fuv_params.background
-        if cooling_config.fuv_disk_source:
-            field = field + fuv_disk_field(density, fuv_params, column_spacing)
         heating_rate = heating_rate * field
     with_heating = (
         cooling_config.fuv_point_source_heating

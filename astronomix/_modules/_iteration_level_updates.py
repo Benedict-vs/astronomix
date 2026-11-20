@@ -49,7 +49,7 @@ from astronomix._finite_volume._sharding import (
     get_active_fv_sharding,
 )
 from astronomix._modules._cnn_mhd_corrector._cnn_mhd_corrector import _cnn_mhd_corrector
-from astronomix._modules._cooling._cooling import update_pressure_by_cooling
+from astronomix._modules._cooling._cooling import fuv_radiation_field, update_pressure_by_cooling
 from astronomix._modules._cooling._simple_mixing_cooling import (
     update_pressure_by_cooling_mixing,
 )
@@ -382,12 +382,43 @@ def _iteration_level_updates(
         # reaction, or 0 on the steps where the chemistry is skipped entirely.
         fv_sharding = get_active_fv_sharding()
 
+        # The radiation field of every cell (``radiation_field_per_cell``): the
+        # FUV field J / J_0 of the sources at the middle of the step, from the
+        # gas as it is now. It is the function that scales the photoelectric
+        # heating of a cooling curve, evaluated here on the whole grid (its
+        # dust columns run along z and its geometry needs the cell centres),
+        # and handed to the reaction as one number per cell.
+        radiation = None
+        if config.chemistry_config.radiation_field_per_cell:
+            if fv_sharding is not None:
+                raise NotImplementedError(
+                    "radiation_field_per_cell is not implemented for the finite-volume shard_map"
+                )
+            if primitive_state.ndim != 4 or helper_data.cell_centers_x.shape[0] != primitive_state.shape[1]:
+                raise ValueError(
+                    "radiation_field_per_cell needs a 3D state and the cell centres of its grid "
+                    f"(state {primitive_state.shape}, {helper_data.cell_centers_x.shape[0]} cell centres along x)"
+                )
+            radiation = fuv_radiation_field(
+                primitive_state[registered_variables.density_index],
+                primitive_state[registered_variables.pressure_index],
+                params.chemistry_params.fuv_source_params,
+                config.chemistry_config.radiation_attenuation,
+                config.chemistry_config.radiation_disk_source,
+                helper_data,
+                current_time - 0.5 * dt,
+            )
+
         def _react(state, dt_react, accumulated=None):
             if multi_device:
                 # Only what ``update_chemistry`` reads is passed (replicated):
                 # the other fields of ``params`` can be sharded arrays (an
                 # external potential), which a replicated spec would gather.
                 accumulated_args = () if accumulated is None else (accumulated,)
+                if radiation is not None:
+                    # the field of the cells travels as one more row of the
+                    # state, so that it is split over the devices like the state
+                    state = jnp.concatenate([state, radiation[None].astype(state.dtype)], axis=0)
 
                 def react_block(
                     local_state, dt_local, gamma_local, chemistry_params_local, *accumulated_local
@@ -395,6 +426,13 @@ def _iteration_level_updates(
                     params_local = SimulationParams(
                         gamma=gamma_local, chemistry_params=chemistry_params_local
                     )
+                    local_radiation = None
+                    if radiation is not None:
+                        local_state, local_radiation = local_state[:-1], local_state[-1]
+                        if accumulated_local:
+                            raise NotImplementedError(
+                                "radiation_field_per_cell is not implemented with the density gate"
+                            )
                     # no mesh inside the block: it is one device's local array
                     with pallas_mesh_context(None):
                         return update_chemistry(
@@ -404,6 +442,7 @@ def _iteration_level_updates(
                             params_local,
                             dt_local,
                             *accumulated_local,
+                            radiation_scale=local_radiation,
                         )
 
                 state_spec = _resolve_state_pspec(state, active_mesh)
@@ -457,6 +496,7 @@ def _iteration_level_updates(
                 params,
                 dt_react,
                 accumulated,
+                radiation,
             )
 
         if chemistry_dt is None:

@@ -562,6 +562,72 @@ the same function. What differs is how the species are moved between two reactio
   comment block at that knob and `cgols_chemistry.py`): the network replaces the cooling
   curve, and every cell starts in ionisation equilibrium at its own density and temperature.
 
+### A radiation field that differs from cell to cell
+
+By default every cell of a run reacts in the same radiation (the spectrum the network was
+built with, or `fuv_field`). With `ChemistryConfig.radiation_field_per_cell` the radiation of
+a cell is that radiation times the FUV field J / J_0 at the cell, J_0 being the field of
+Draine (1978):
+
+```python
+from astronomix._modules._cooling.cooling_options import FUV_ATTENUATION_LINE_OF_SIGHT, FUVSourceParams
+
+chemistry_config = chemistry_config._replace(
+    radiation_field_per_cell=True,
+    radiation_attenuation=FUV_ATTENUATION_LINE_OF_SIGHT,  # or _NONE, _SLAB, _LOCAL_JEANS
+    radiation_disk_source=True,
+)
+chemistry_params = chemistry_params._replace(fuv_source_params=FUVSourceParams(...))
+chemistry_config = attach_per_cell_kernel(chemistry_config, chemistry_params, gamma)  # after the option is set
+```
+
+- **The field** is `fuv_radiation_field` of the cooling module: point sources diluted with
+  distance, `sum_k w_k A(t) / (4 pi (d_k^2 + r_s^2))` plus a background, attenuated by dust
+  (none, a slab, a local Jeans length, or `exp(-tau)` along the line of sight from a table)
+  and, with `radiation_disk_source`, the field of the disk's own star formation from a
+  Kennicutt-Schmidt law. It is the same function, with the same `FUVSourceParams`, that scales
+  the photoelectric heating of a cooling curve, so a run with a network and a run with a
+  cooling curve can be given the same radiation. It is evaluated on the whole grid in every
+  step (its dust columns run along z) and handed to the reaction as one number per cell; on
+  several devices it is split with the state. Three dimensions only.
+- **What the factor multiplies.** A KROME network: the rates of its photo-reactions and their
+  heating, the Habing flux of its dust terms (photoelectric heating, recombination on dust),
+  and the `@common` variables named in `krome_radiation_user_variables`. Any other network:
+  `fuv_field`. The spectrum has the same shape in every cell; only its amplitude differs.
+- **The Lyman-Werner flux of H2.** KROME's `react_galaxy_ism` files dissociate H2 with
+  `H2_solomonLW(myflux_eV)`, where `myflux_eV` is a constant of the file: the metagalactic
+  background of Haardt & Madau (2012), for which the rate is 4.4e-13 s^-1, whatever the
+  spectrum of the run. For one Draine field the rate is 5.2e-11 s^-1 (1.38e9 s^-1 times the
+  intensity at 12.87 eV; Bovino et al. 2016, eq. 4), 120 times more. To have H2 follow the
+  radiation, write the rate with a user variable, `H2_solomonLW(user_myfluxLW)` (times
+  `krome_fshield(n,Tgas)` for the self-shielding), give its value for the spectrum of the
+  network in `krome_user_variables` and name it in `krome_radiation_user_variables`.
+- **Dust is counted once.** With an attenuated field the dust between the sources and the
+  cell is in the factor. KROME's `-shieldHabingDust` (`krome_shield_habing_dust`), a dust
+  column guessed from the density of the cell, stands in for that same dust in a model
+  without geometry: switch it off, or the dust is counted twice. The self-shielding of H2
+  has no counterpart in the field and stays.
+- **Solvers.** The per-cell kernel takes the factor as a parameter per cell
+  (`build_fused_core_solver(..., per_cell_parameter=True)`; `attach_per_cell_kernel` does that
+  when the option is set, so set it first), and so does the vmapped Kvaerno5. Not implemented
+  for the emulator and for the density gate.
+- **Limits.** This is a field strength per cell, not radiative transfer: the line-of-sight
+  table is computed once (from the initial gas, in the galaxy run), no gas casts a shadow
+  that the table does not hold, and there are no photons above 13.6 eV unless the spectrum
+  of the network has them.
+- **Tests**: `pytest pytests/chemistry/test_radiation_field.py` (a factor f at a call is the
+  network built in f times the radiation; every cell of a grid is the cell of a run with its
+  field everywhere, with both solvers; the field is the one of the cooling module, term by
+  term; a run through `time_integration` with one field everywhere is the run of a network
+  built in that field, and near a point source less H2 is left and the gas is warmer).
+  `pytests/chemistry/chemistry_multidevice.py --radiation` compares one device with several
+  (two emulated devices: 1.8e-15 dex).
+- **In a galaxy run**: `CGOLS_CHEM_FUV=1` (the default) in
+  `pytests/self_gravity/cgols/cgols.py` gives every cell the FUV field of the cooling-curve
+  runs (the `CGOLS_FUV_*` knobs: the starburst as a point source that follows the star
+  formation rate, attenuated along the line of sight, plus the disk); the frames store it on
+  the edge-on plane (`fuv_xz`). `CGOLS_CHEM_FUV=0` is one field everywhere.
+
 ### Multi-GPU (sharded) finite volume
 
 - Pass a `NamedSharding` of the state (X axis split) to `time_integration`; the FV stencils run

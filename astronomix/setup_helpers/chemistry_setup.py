@@ -117,6 +117,7 @@ def build_chemistry_from_network_file(
     krome_column_density_method: str = "DEFAULT",
     krome_floor_temperature: float = 2.73,
     krome_free_free_cooling: bool = False,
+    krome_radiation_user_variables: Tuple[str, ...] = (),
     temperature_from_species: bool = False,
     conserve_elements_in_transport: bool = True,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
@@ -159,7 +160,10 @@ def build_chemistry_from_network_file(
     ``"WG11"`` or ``"R14"``), ``krome_column_density_method`` the column density
     of both (``-columnDensityMethod``: ``"DEFAULT"`` or ``"JEANS"``),
     ``krome_floor_temperature`` is KROME's ``phys_Tfloor``, at which the cooling
-    is subtracted from itself, and ``krome_free_free_cooling`` adds the
+    is subtracted from itself, ``krome_radiation_user_variables`` names the
+    ``@common`` variables that are radiation fluxes (they follow the radiation
+    field of the cell with ``ChemistryConfig.radiation_field_per_cell``, like
+    the photo-reactions and the Habing flux), and ``krome_free_free_cooling`` adds the
     bremsstrahlung of the atomic ions (``-cooling=FF``; off by default), which
     the other cooling terms do not contain and which dominates in ionised gas
     above about 1e7 K.
@@ -227,6 +231,7 @@ def build_chemistry_from_network_file(
             column_density_method=krome_column_density_method,
             floor_temperature=krome_floor_temperature,
             free_free_cooling=krome_free_free_cooling,
+            radiation_user_variables=krome_radiation_user_variables,
         )
         if krome_photo_bins is not None:
             # the Habing flux in use is the one of the binned spectrum
@@ -347,6 +352,10 @@ def attach_per_cell_kernel(
     integrates the temperature with the abundances, in double precision), and
     the packages gradsolve and warp-lang.
 
+    With ``chemistry_config.radiation_field_per_cell`` the kernel is built with
+    the radiation field of the cell as its per-cell parameter: set that option
+    before attaching the kernel.
+
     Args:
         chemistry_config: The chemistry configuration (``thermochemistry=True``).
         chemistry_params: The chemistry parameters; the tolerances of the kernel
@@ -386,6 +395,7 @@ def attach_per_cell_kernel(
         max_steps=cc.max_steps,
         cache_key=cache_key,
         first_step_fraction=first_step_fraction,
+        per_cell_parameter=bool(cc.radiation_field_per_cell),
     )
     return chemistry_config._replace(stiff_core_solver="warp", stiff_core_fn=solver)
 

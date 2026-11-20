@@ -84,29 +84,48 @@ def make_vector_field(
     clipped to [3, 1e9] K before the network evaluates; with ``thermochemistry`` the state carries the temperature
     as its last element). Exposed so that the fused Warp solver of ``_warp_stiff`` can translate it with CONCRETE
     parameters at set-up time (2026-10-12).
+
+    ``args`` is ``None`` or a length-one vector with the radiation field of the cell, as a factor on the radiation
+    the parameters describe (``ChemistryConfig.radiation_field_per_cell``): a KROME network scales its photo-reactions,
+    its Habing flux and its radiation user variables with it; for any other network ``fuv_field`` is multiplied by it.
+    With ``None`` the function is the one it was before the factor existed, operation for operation.
     """
-    def chemistry_derivative(time, abundances, temperature_kelvin):
+    def chemistry_derivative(time, abundances, temperature_kelvin, radiation_scale=None):
         # A network that is safe for the slightly negative abundances an implicit solver probes can opt out of
         # the clamp, whose kink at zero stalls the solve once a species decays to zero (KROME networks do).
         if not getattr(reaction_network, "accepts_negative_abundances", False):
             abundances = jnp.maximum(abundances, 0.0)
         temperature_kelvin = jnp.clip(temperature_kelvin, 3.0, 1.0e9)
-        return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field, visual_extinction,
-                                rate_modifier_a, rate_modifier_b)
+        if radiation_scale is None:
+            return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field, visual_extinction,
+                                    rate_modifier_a, rate_modifier_b)
+        if getattr(reaction_network, "scales_its_radiation", False):
+            return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field, visual_extinction,
+                                    rate_modifier_a, rate_modifier_b, radiation_scale=radiation_scale)
+        return reaction_network(time, abundances, temperature_kelvin, cosmic_ray_rate, fuv_field * radiation_scale,
+                                visual_extinction, rate_modifier_a, rate_modifier_b)
 
     if thermochemistry:
         def vector_field(time, state, args):
+            radiation_scale = None if args is None else args[0]
             abundances = state[:-1]
             temperature_kelvin = state[-1]
-            abundance_derivative = chemistry_derivative(time, abundances, temperature_kelvin)
+            abundance_derivative = chemistry_derivative(time, abundances, temperature_kelvin, radiation_scale)
             if getattr(reaction_network, "own_thermochemistry", False):
                 # a network with its own heating and cooling (KROME networks)
-                temperature_rate = reaction_network.temperature_derivative(
-                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
-                )
+                if radiation_scale is None:
+                    temperature_rate = reaction_network.temperature_derivative(
+                        abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field
+                    )
+                else:
+                    temperature_rate = reaction_network.temperature_derivative(
+                        abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field,
+                        radiation_scale=radiation_scale,
+                    )
             else:
+                cell_fuv_field = fuv_field if radiation_scale is None else fuv_field * radiation_scale
                 temperature_rate = temperature_derivative(
-                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, fuv_field, dust_to_gas_ratio,
+                    abundances, temperature_kelvin, adiabatic_index, cosmic_ray_rate, cell_fuv_field, dust_to_gas_ratio,
                     hydrogen_molecule_formation_rate_coefficient, hydrogen_index, molecular_hydrogen_index, electron_index,
                     atomic_oxygen_index, ionized_hydrogen_index, helium_index, ionized_carbon_index, co_cooling,
                     carbon_monoxide_index, co_cooling_table, co_cooling_bounds)
@@ -147,6 +166,7 @@ def _advance_single_cell(
     carbon_monoxide_index,
     co_cooling_table,
     co_cooling_bounds,
+    radiation_scale=None,
 ):
     """Advance one cell's chemistry over ``time_step_seconds`` with a stiff solve.
 
@@ -191,6 +211,9 @@ def _advance_single_cell(
         carbon_monoxide_index: Index of CO (or -1).
         co_cooling_table: The 3D CO cooling table.
         co_cooling_bounds: The CO table grid limits.
+        radiation_scale: The radiation field of this cell as a factor on the
+            radiation the parameters describe (see :func:`make_vector_field`);
+            ``None`` for none. Needs ``thermochemistry``.
 
     Returns:
         The end-of-step cell state: the updated abundances [cm^-3] alone, or the
@@ -285,6 +308,19 @@ def _advance_single_cell(
 
         initial_state = cell_abundances
 
+    solver_arguments = None
+    if radiation_scale is not None:
+        if not thermochemistry:
+            raise NotImplementedError("a radiation field per cell needs thermochemistry=True")
+        # the right-hand side with the factor of the cell as its argument
+        vector_field = make_vector_field(
+            reaction_network, rate_modifier_a, rate_modifier_b, cosmic_ray_rate, fuv_field, visual_extinction,
+            thermochemistry, adiabatic_index, dust_to_gas_ratio, hydrogen_molecule_formation_rate_coefficient,
+            hydrogen_index, molecular_hydrogen_index, electron_index, atomic_oxygen_index, ionized_hydrogen_index,
+            helium_index, ionized_carbon_index, co_cooling, carbon_monoxide_index, co_cooling_table, co_cooling_bounds,
+        )
+        solver_arguments = jnp.reshape(radiation_scale, (1,))
+
     ode_term = dx.ODETerm(vector_field)
 
     solution = dx.diffeqsolve(
@@ -294,7 +330,7 @@ def _advance_single_cell(
         t1=time_step_seconds,
         dt0=jnp.minimum(1e-6, time_step_seconds * 1e-3),
         y0=initial_state,
-        args=None,
+        args=solver_arguments,
         stepsize_controller=dx.PIDController(
             rtol=relative_tolerance,
             atol=absolute_tolerance,
@@ -646,6 +682,7 @@ def update_chemistry(
     simulation_params: SimulationParams,
     time_step: float,
     accumulated_time_step=None,
+    radiation_scale=None,
 ) -> STATE_TYPE:
     """React the chemical species of the primitive state for one time step.
 
@@ -670,6 +707,14 @@ def update_chemistry(
         simulation_params: The simulation parameters (network leaves, unit
             factors, physical parameters, tolerances, gamma).
         time_step: The hydro time step, in code units.
+        accumulated_time_step: The step of the cells below the density gate
+            (see above); ``None`` without the gate.
+        radiation_scale: The radiation field of every cell, shape of the grid,
+            as a factor on the radiation of the parameters (J / J_0; see
+            ``ChemistryConfig.radiation_field_per_cell``); ``None`` for the
+            same radiation in every cell. With the per-cell kernel that kernel
+            must have been built to take the factor
+            (``attach_per_cell_kernel`` does that from the configuration).
 
     Returns:
         The primitive state with the species block advanced by one reaction step
@@ -677,6 +722,15 @@ def update_chemistry(
     """
 
     chemistry_params = simulation_params.chemistry_params
+    if radiation_scale is not None and (
+        chemistry_config.solver == EMULATOR
+        or accumulated_time_step is not None
+        or not chemistry_config.thermochemistry
+    ):
+        raise NotImplementedError(
+            "a radiation field per cell is implemented for the stiff solvers in every cell "
+            "(per-cell kernel or Kvaerno5) with thermochemistry, not for the emulator or the density gate"
+        )
 
     # -------------------------------------------------------------
     # =============== ↓ Pick the reaction network and solver ↓ ====
@@ -785,6 +839,9 @@ def update_chemistry(
         number_of_species, number_of_cells
     ).T
     temperature_per_cell = temperature_kelvin.reshape(number_of_cells)
+    radiation_per_cell = None
+    if radiation_scale is not None:
+        radiation_per_cell = jnp.asarray(radiation_scale, dtype=species_per_cell.dtype).reshape(number_of_cells)
 
     # Bind everything that is shared across cells; vmap only over the per-cell
     # abundances and temperature.
@@ -875,8 +932,12 @@ def update_chemistry(
             )
             reacted_per_cell = reacted_per_cell[order]
             step_cells = step_cells[order]
+        # the radiation of every cell rides along as the per-cell parameter of the kernel
+        kernel_arguments = ()
+        if radiation_per_cell is not None:
+            kernel_arguments = (radiation_per_cell if order is None else radiation_per_cell[order],)
         for _ in range(splits):
-            proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits)
+            proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits, *kernel_arguments)
             # like diffrax with throw=False: a cell that returned a non-finite
             # state keeps its pre-step state
             finite = jnp.all(jnp.isfinite(proposed), axis=1)
@@ -951,6 +1012,19 @@ def update_chemistry(
                     lambda cell: react_core(cell[0], cell[1], cell[2]), core_cells, batch_size=core_batch
                 )
             reacted_per_cell = reacted_per_cell.at[core_index].set(core_reacted, mode="drop")
+    elif radiation_per_cell is not None:
+        # Kvaerno5 in every cell, each with its own radiation
+        with_radiation = lambda species, temperature, radiation: react_one_cell(  # noqa: E731
+            species, temperature, radiation_scale=radiation
+        )
+        if 0 < chunk_size < number_of_cells:
+            reacted_per_cell = jax.lax.map(
+                lambda cell: with_radiation(cell[0], cell[1], cell[2]),
+                (species_per_cell, temperature_per_cell, radiation_per_cell),
+                batch_size=chunk_size,
+            )
+        else:
+            reacted_per_cell = jax.vmap(with_radiation)(species_per_cell, temperature_per_cell, radiation_per_cell)
     elif 0 < chunk_size < number_of_cells:
         reacted_per_cell = jax.lax.map(
             lambda cell: react_one_cell(cell[0], cell[1]),

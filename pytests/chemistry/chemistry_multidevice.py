@@ -74,6 +74,11 @@ With that:
 So a multi-step comparison is a test of the split only at a tolerance tight
 enough for the solver not to amplify rounding; use ``--rtol 1e-8 --atol 1e-14
 --steps 5`` for the carbox network.
+
+``--radiation`` gives every cell its own radiation field
+(``ChemistryConfig.radiation_field_per_cell``: a point source in the middle of
+the box), which is computed on the whole grid and split over the devices with
+the state.
 """
 
 import argparse
@@ -91,6 +96,7 @@ parser.add_argument("--krome-data", default=None, help="the data folder of a KRO
 parser.add_argument("--rtol", type=float, default=1.0e-6, help="relative tolerance of the stiff solver")
 parser.add_argument("--atol", type=float, default=1.0e-12, help="absolute tolerance of the stiff solver [cm^-3]")
 parser.add_argument("--steps", type=int, default=0, help="also compare after this many fixed steps")
+parser.add_argument("--radiation", action="store_true", help="a radiation field per cell: a point source in the middle of the box")
 arguments = parser.parse_args()
 
 if arguments.cpu:
@@ -203,12 +209,32 @@ species_names = tuple(species_names)
 # the gas of the box: cold and dense for the carbox network, warm for a KROME network
 TEMPERATURE = 8000.0 if KROME else 100.0
 HYDROGEN_NUCLEI = 0.3 if KROME else 30.0
+if arguments.radiation:
+    # ``ChemistryConfig.radiation_field_per_cell``: every cell reacts in the field of a point source in the middle
+    # of the box, 50 times the field of the parameters next to it and 0.7 times in the corners. The field is
+    # computed on the whole grid and handed to the devices with the state.
+    from astronomix._modules._cooling.cooling_options import FUVSourceParams
+
+    chemistry_config = chemistry_config._replace(radiation_field_per_cell=True)
+    chemistry_params = chemistry_params._replace(
+        fuv_source_params=FUVSourceParams(
+            source_positions=jnp.full((1, 3), 0.5),
+            source_weights=jnp.ones((1,)),
+            softening_length=0.1,
+            luminosity_times=jnp.zeros((1,)),
+            luminosity_values=jnp.asarray([4.0 * np.pi * 0.01 * 50.0]),
+            background=0.0024,
+        )
+    )
 if arguments.kernel:
     chemistry_config = attach_per_cell_kernel(
         chemistry_config,
         chemistry_params,
         GAMMA,
-        cache_key=("chemistry-multidevice", arguments.krome_network, arguments.krome_data, arguments.rtol, arguments.atol),
+        cache_key=(
+            "chemistry-multidevice", arguments.krome_network, arguments.krome_data, arguments.rtol, arguments.atol,
+            arguments.radiation,
+        ),
     )
 
 periodic = BoundarySettings1D(PERIODIC_BOUNDARY, PERIODIC_BOUNDARY)

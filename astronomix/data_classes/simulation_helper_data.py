@@ -196,6 +196,12 @@ def _helper_data_requirements(config: SimulationConfig) -> HelperDataRequirement
         needs_cell_centers_y = True
         needs_cell_centers_z = True
 
+    # The same field as the radiation of every cell of a chemical network.
+    if config.chemistry_config.chemistry and config.chemistry_config.radiation_field_per_cell:
+        needs_cell_centers_x = True
+        needs_cell_centers_y = True
+        needs_cell_centers_z = True
+
     # Snapshot diagnostics.
     if config.return_snapshots:
         snapshot_settings = config.snapshot_settings

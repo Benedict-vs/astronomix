@@ -487,6 +487,12 @@ class KromeNetwork(eqx.Module):
     free_free_charges: Tuple[float, ...] = eqx.field(static=True)
     # the metal table without a look-up (for the per-cell Warp kernel), see ``build_krome_network``
     metal_table_without_lookup: bool = eqx.field(static=True, default=False)
+    # user variables that are radiation fluxes: they scale with ``radiation_scale`` like the photo-reactions
+    radiation_user_names: Tuple[str, ...] = eqx.field(static=True, default=())
+
+    #: The radiation of this network can be scaled per call (``radiation_scale`` of ``__call__`` and of the
+    #: heating): the chemistry module passes the radiation field of a cell through it.
+    scales_its_radiation = True
 
     def _single(self, value):
         # a real constant that KROME's Fortran writes without a ``d`` exponent
@@ -550,18 +556,27 @@ class KromeNetwork(eqx.Module):
             -8.5e-4 * jnp.sqrt(1.0 + x)
         )
 
-    def habing_field(self, abundances, temperature, fuv_field):
-        """The Habing flux of the dust terms: that of the photo bins or ``fuv_field``, attenuated by dust on request."""
+    def habing_field(self, abundances, temperature, fuv_field, radiation_scale=None):
+        """The Habing flux of the dust terms: that of the photo bins or ``fuv_field``, times ``radiation_scale`` when
+        that is given, attenuated by dust on request."""
         field = self.bins_habing_field if self.has_photo_bins else fuv_field
+        if radiation_scale is not None:
+            field = field * radiation_scale
         if self.shield_habing_dust:
             field = field * self.dust_shielding(abundances, temperature, 0.665)
         return field
 
-    def get_rates(self, temperature, cosmic_ray_rate, fuv_field, visual_extinction, abundances):
-        """Rate coefficients of every reaction, in the order of the file (cm^3/s or 1/s)."""
+    def get_rates(self, temperature, cosmic_ray_rate, fuv_field, visual_extinction, abundances, radiation_scale=None):
+        """Rate coefficients of every reaction, in the order of the file (cm^3/s or 1/s).
+
+        ``radiation_scale`` multiplies the radiation the network was built with: the rates of the photo-reactions,
+        the Habing flux of the dust terms and the user variables that are radiation fluxes
+        (``radiation_user_variables`` of :func:`build_krome_network`). The spectrum keeps its shape. ``None`` (the
+        default) is the network as it was built.
+        """
         temperature = jnp.clip(temperature, MINIMUM_TEMPERATURE_KELVIN, MAXIMUM_TEMPERATURE_KELVIN)
         electron_density = abundances[self.species.index("E")] if "E" in self.species else 0.0
-        habing_field = self.habing_field(abundances, temperature, fuv_field)
+        habing_field = self.habing_field(abundances, temperature, fuv_field, radiation_scale)
         functions = {
             "exp": jnp.exp, "dexp": jnp.exp, "log": jnp.log, "dlog": jnp.log, "log10": jnp.log10, "dlog10": jnp.log10,
             "sqrt": jnp.sqrt, "dsqrt": jnp.sqrt, "abs": jnp.abs, "max": jnp.maximum, "min": jnp.minimum,
@@ -594,6 +609,8 @@ class KromeNetwork(eqx.Module):
         functions["o_recombination_on_dust"] = lambda n, t: 0.25 * functions["h_recombination_on_dust"](n, t)
         users = {"user_crate": cosmic_ray_rate, "n": abundances}
         users.update({name: self.user_values[i] for i, name in enumerate(self.user_names)})
+        if radiation_scale is not None:
+            users.update({name: users[name] * radiation_scale for name in self.radiation_user_names})
 
         environments = {}
 
@@ -614,7 +631,8 @@ class KromeNetwork(eqx.Module):
         rates = []
         for _, _, _, lower, upper, expression, photo_slot in self.reactions:
             if photo_slot >= 0:
-                rates.append(self.photo_rates[photo_slot])
+                photo_rate = self.photo_rates[photo_slot]
+                rates.append(photo_rate if radiation_scale is None else photo_rate * radiation_scale)
                 continue
             value = _evaluate(_syntax_tree(expression, self.single_precision_literals), names_at(lower, upper), functions)
             for limit in (lower, upper):
@@ -630,8 +648,9 @@ class KromeNetwork(eqx.Module):
                 rates[position] = value * jnp.ones_like(temperature)
         return jnp.stack(rates)
 
-    def __call__(self, time, abundances, temperature, cosmic_ray_rate, fuv_field, visual_extinction, rate_modifier_a, rate_modifier_b):
-        rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, visual_extinction, abundances)
+    def __call__(self, time, abundances, temperature, cosmic_ray_rate, fuv_field, visual_extinction, rate_modifier_a, rate_modifier_b,
+                 radiation_scale=None):
+        rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, visual_extinction, abundances, radiation_scale)
         rates = rate_modifier_a * rates + rate_modifier_b
         fluxes = []
         for position, (_, reactants, _, _, _, _, _) in enumerate(self.reactions):
@@ -696,7 +715,7 @@ class KromeNetwork(eqx.Module):
             ) + _atomic_oxygen_cooling(n, temperature, index("O"), index("H"), index("H2"))
         return terms
 
-    def heating_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
+    def heating_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field, radiation_scale=None):
         """The heating terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
         from astronomix._modules._chemistry import _krome_thermochemistry as thermo
 
@@ -708,7 +727,7 @@ class KromeNetwork(eqx.Module):
         terms = {}
 
         fraction = thermo.thermalised_fraction(temperature, hydrogen, molecular, nuclei)
-        rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, 0.0, n)
+        rates = self.get_rates(temperature, cosmic_ray_rate, fuv_field, 0.0, n, radiation_scale)
         chemical = self.h2_on_dust_coefficient * self.dust_to_gas * hydrogen * nuclei * (4.2 * fraction + 0.2)
         for position, reactants, energy, thermalised in self.chemical_terms:
             flux = rates[position] * energy * (fraction if thermalised else 1.0)
@@ -717,7 +736,7 @@ class KromeNetwork(eqx.Module):
             chemical = chemical + flux
         terms["heating_chemical"] = chemical * thermo.ELECTRON_VOLT_TO_ERG
         terms["heating_photoelectric"] = thermo.photoelectric_heating(
-            temperature, electrons, hydrogen, nuclei, self.habing_field(n, temperature, fuv_field), self.dust_to_gas
+            temperature, electrons, hydrogen, nuclei, self.habing_field(n, temperature, fuv_field, radiation_scale), self.dust_to_gas
         )
         # cosmic rays: every reaction of the cosmic-ray block deposits an energy per event
         cosmic_rays = 0.0
@@ -734,22 +753,22 @@ class KromeNetwork(eqx.Module):
         photo = 0.0
         for slot, reactant in enumerate(self.photo_reactants):
             photo = photo + self.photo_heats[slot] * n[reactant]
-        terms["heating_photo"] = photo
+        terms["heating_photo"] = photo if radiation_scale is None else photo * radiation_scale
         return terms
 
-    def heating_and_cooling_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field):
+    def heating_and_cooling_terms(self, abundances, temperature, cosmic_ray_rate, fuv_field, radiation_scale=None):
         """The heating and cooling terms [erg cm^-3 s^-1], by name (see ``_krome_thermochemistry.py``)."""
         terms = self.cooling_terms(abundances, temperature)
-        terms.update(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field))
+        terms.update(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field, radiation_scale))
         return terms
 
-    def temperature_derivative(self, abundances, temperature, adiabatic_index, cosmic_ray_rate, fuv_field):
+    def temperature_derivative(self, abundances, temperature, adiabatic_index, cosmic_ray_rate, fuv_field, radiation_scale=None):
         """dT/dt [K/s] from the heating and cooling of KROME, at constant density.
 
         As in KROME the cooling at the floor temperature is subtracted from the
         cooling, so that the gas does not cool below the floor.
         """
-        heating = sum(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field).values())
+        heating = sum(self.heating_terms(abundances, temperature, cosmic_ray_rate, fuv_field, radiation_scale).values())
         cooling = sum(self.cooling_terms(abundances, temperature).values())
         floor = sum(self.cooling_terms(abundances, self.cooling_floor_temperature * jnp.ones_like(temperature)).values())
         particles = jnp.maximum(jnp.sum(jnp.maximum(abundances, 0.0)), 1e-30)
@@ -762,6 +781,7 @@ def build_krome_network(
     photo_bins=None, xsec_folder=None, shielding=None, shield_habing_dust=False, column_density_method="DEFAULT",
     floor_temperature=MINIMUM_TEMPERATURE_KELVIN,
     free_free_cooling=False,
+    radiation_user_variables=(),
 ):
     """Build the right-hand side of a KROME network file.
 
@@ -820,6 +840,13 @@ def build_krome_network(
             network (KROME's ``-cooling=FF``), which dominates the cooling of
             ionised gas above about 1e7 K. Off by default, as in a KROME build
             without that option.
+        radiation_user_variables: Names of ``@common`` user variables that are
+            radiation fluxes, e.g. the Lyman-Werner flux of an
+            ``H2_solomonLW(user_...)`` rate. Their values in ``user_variables``
+            are those of the spectrum the network is built with; a
+            ``radiation_scale`` given at a call (the radiation field of a cell)
+            multiplies them together with the photo-reactions and the Habing
+            flux, so that every radiative process follows the same field.
 
     Returns:
         The network (a :class:`KromeNetwork`) and the species names.
@@ -920,6 +947,10 @@ def build_krome_network(
     missing = [name for name in user_names if name not in user_variables and re.search(rf"\b{name}\b", used)]
     if missing:
         raise ValueError(f"{path}: the rates use the user variables {missing}; give them in user_variables")
+    radiation_user_names = tuple(name.lower() for name in radiation_user_variables)
+    unknown = sorted(set(radiation_user_names) - set(user_names))
+    if unknown:
+        raise ValueError(f"{path}: radiation_user_variables {unknown} are not @common variables of the network ({list(user_names)})")
 
     coefficient = 3.5e-17 if h2_formation_on_dust is True else float(h2_formation_on_dust or 0.0)
     change = np.zeros(len(species))
@@ -988,6 +1019,7 @@ def build_krome_network(
         column_density_method=column_density_method,
         cooling_floor_temperature=float(floor_temperature),
         metal_table_without_lookup=without_lookup,
+        radiation_user_names=radiation_user_names,
         free_free_charges=(
             tuple(_free_free_charge_squared(name) for name in species) if free_free_cooling else ()
         ),
