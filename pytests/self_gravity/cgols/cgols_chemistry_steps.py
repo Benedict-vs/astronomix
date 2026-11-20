@@ -26,9 +26,17 @@ Usage (from this directory; needs the chemistry environment, see
     python cgols_chemistry_steps.py state.npy --step-kyr 9.5 --cpu --stride 4      # every 4th cell per axis, on the CPU
 
 A run with a radiation field per cell (``CGOLS_CHEM_FUV=1``) is checked with
-one field for all cells, ``--radiation-scale <Draine fields>``, and the network
-file of that run (``--network``); the field of the cells is in the frames
-(``fuv_xz``), so run it for the range found there.
+the network file of that run (``--network``) and the field of every cell::
+
+    python cgols_chemistry_steps.py <checkpoint dir>/<step> --step-kyr 9.5 --radiation-of-the-run 12.5 \
+        --network <...>/react_galaxy_ism_plus_cr_fuv --frame cgols_snapshots_chem256fuv/frame_0010.npz
+
+``--radiation-of-the-run <Myr>`` computes the field as the run does at that time
+(``fuv_radiation_field`` with the sources, the attenuation and the grid of
+``cgols.py``; set the same ``CGOLS_FUV_*`` variables as the run if it changed
+any) and, with ``--frame``, compares it with the field the frame stores
+(``fuv_xz``). ``--radiation-scale <Draine fields>`` instead reacts all cells in
+one field, without ``cgols.py``.
 
 ``--step-kyr`` is the hydro step of the run at that time (the difference of two
 ``t=`` values of the diag log times 9778 kyr). The layout of the state is the one
@@ -45,6 +53,7 @@ when the machine is busy.
 
 import argparse
 import os
+import sys
 import time
 
 parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -63,7 +72,13 @@ parser.add_argument("--first-step", type=float, default=1.0, help="as the run (C
 parser.add_argument("--radiation-scale", type=float, default=None,
                     help="a run with a radiation field per cell (CGOLS_CHEM_FUV=1): react every cell in this many Draine fields "
                          "(the field of a cell is in the frames as fuv_xz; try the smallest and the largest value)")
+parser.add_argument("--radiation-of-the-run", type=float, default=None, metavar="MYR",
+                    help="a run with a radiation field per cell: react every cell in its own field, computed as the run "
+                         "does at this time [Myr] (sources, attenuation and grid of cgols.py)")
 arguments = parser.parse_args()
+if arguments.radiation_of_the_run is not None and arguments.radiation_scale is not None:
+    parser.error("--radiation-of-the-run and --radiation-scale exclude each other")
+per_cell_field = arguments.radiation_of_the_run is not None or arguments.radiation_scale is not None
 
 if arguments.cpu:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -126,7 +141,7 @@ setup = cgols_chemistry.build_chemistry(
     absolute_tolerance=arguments.atol,
     free_free=not arguments.no_free_free,
     first_step_fraction=arguments.first_step,
-    radiation_field_per_cell=arguments.radiation_scale is not None,
+    radiation_field_per_cell=per_cell_field,
 )
 kernel = setup.config.stiff_core_fn
 names = list(setup.species)
@@ -146,7 +161,76 @@ if arguments.frame is not None:
     if abs(ratio_n - 1.0) > 1.0e-3 or abs(ratio_t - 1.0) > 1.0e-3:
         raise SystemExit("the frame does not fit the state: not the same time, or other units")
 
+
+
+def field_of_the_run(time_myr):
+    """J / J_0 of every cell as the run computes it at this time, shape of the grid.
+
+    The sources and the attenuation are the ones ``cgols.py`` builds for a
+    chemistry run (``chemistry_setup``), the cell centres those of its grid;
+    the gas is the state read above. ``cgols.py`` is imported here, after this
+    script has chosen its device, so its own choice of GPUs is switched off.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.join(here, "gpuq", "autocvd_shim"))
+    sys.modules.pop("autocvd", None)
+    os.environ.update(
+        CGOLS_X64="1",
+        CGOLS_CHEMISTRY="1",
+        CGOLS_CHEM_FUV="1",
+        CGOLS_DIM=str(state.shape[1]),
+        CGOLS_CHEM_NETWORK=arguments.network,
+        CGOLS_CHEM_KROME_DATA=arguments.krome_data,
+    )
+    os.environ.setdefault("CGOLS_RUN_TAG", "_chemistry_steps")
+    if arguments.cpu:
+        os.environ.setdefault("CGOLS_PALLAS_INTERPRET", "1")
+    import astropy.units as units
+    import cgols
+
+    from astronomix import get_helper_data
+    from astronomix._modules._cooling._cooling import fuv_radiation_field
+
+    config, registered_variables = cgols.build_config()
+    helper_data = get_helper_data(config)
+    centres = (helper_data.cell_centers_x, helper_data.cell_centers_y, helper_data.cell_centers_z)
+    if tuple(len(axis) for axis in centres) != state.shape[1:]:
+        raise SystemExit(f"the grid of cgols.py {tuple(len(axis) for axis in centres)} is not the one of the state {state.shape[1:]}")
+    run = cgols.chemistry_setup()
+    if abs(run.mass_per_hydrogen / setup.mass_per_hydrogen - 1.0) > 1.0e-12:
+        raise SystemExit("cgols.py built another network than this script")
+    field = fuv_radiation_field(
+        jnp.asarray(state[registered_variables.density_index]),
+        jnp.asarray(state[registered_variables.pressure_index]),
+        run.params.fuv_source_params,
+        run.config.radiation_attenuation,
+        run.config.radiation_disk_source,
+        helper_data,
+        (time_myr * units.Myr).to(cgols.code_units.code_time).value,
+    )
+    return np.asarray(field, dtype=np.float64)
+
+
+radiation_field = None
+if arguments.radiation_of_the_run is not None:
+    # on the whole grid also with --stride: the dust columns of the field run through all cells
+    tic = time.time()
+    radiation_field = field_of_the_run(arguments.radiation_of_the_run)
+    print(
+        f"radiation field of the run at {arguments.radiation_of_the_run:g} Myr in {time.time() - tic:.0f} s: J / J_0 from "
+        f"{radiation_field.min():.3g} to {radiation_field.max():.3g}, median {np.median(radiation_field):.3g}",
+        flush=True,
+    )
+    if arguments.frame is not None and "fuv_xz" in frame.files:
+        stored = np.asarray(frame["fuv_xz"], dtype=np.float64)
+        difference = np.abs(radiation_field[:, state.shape[2] // 2, :] / stored - 1.0)
+        print(f"against the field of the frame (fuv_xz): largest relative difference {difference.max():.2e}, median {np.median(difference):.2e}")
+        if np.median(difference) > 1.0e-3:
+            raise SystemExit("the field computed here is not the one of the frame: other CGOLS_FUV_* settings, or another time")
+
 pick = (slice(None, None, arguments.stride),) * 3
+if radiation_field is not None:
+    radiation_field = np.ascontiguousarray(radiation_field[pick])
 shape = hydrogen_code[pick].shape
 hydrogen = (hydrogen_code[pick] * NUMBER_DENSITY_UNIT_CGS).ravel()
 # the reaction works between its floor and 1e9 K
@@ -166,7 +250,12 @@ chunk = 1 << 22
 tic = time.time()
 for start in range(0, number_of_cells, chunk):
     index = order[start : start + chunk]
-    radiation = () if arguments.radiation_scale is None else (jnp.full(len(index), arguments.radiation_scale),)
+    if radiation_field is not None:
+        radiation = (jnp.asarray(radiation_field.ravel()[index]),)
+    elif arguments.radiation_scale is not None:
+        radiation = (jnp.full(len(index), arguments.radiation_scale),)
+    else:
+        radiation = ()
     reacted, taken = kernel.with_steps(jnp.asarray(cells[index]), jnp.full(len(index), interval), *radiation)
     steps[index] = np.asarray(taken)
     temperature_after[index] = np.asarray(reacted)[:, -1]
@@ -203,6 +292,19 @@ for n_lo in range(-6, 4):
 for share, n_lo, t_lo, count, median, mean, largest, bad in sorted(rows, reverse=True)[:12]:
     print(f"{n_lo:6d}..{n_lo + 1:<2d}{t_lo:5d}..{t_lo + 1:<2d}{count:10d}{100 * count / number_of_cells:9.2f}{median:8.0f}{mean:8.1f}{largest:7d}{100 * share:9.1f}{bad:12d}")
 
+if radiation_field is not None:
+    print("\nby radiation field of the cell:")
+    print(f"{'J / J_0':>14s}{'cells':>10s}{'cells %':>9s}{'median':>8s}{'mean':>8s}{'max':>7s}{'steps %':>9s}{'unfinished':>12s}")
+    field = radiation_field.ravel()
+    edges = [0.0, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, np.inf]
+    for low, high in zip(edges[:-1], edges[1:]):
+        mask = (field >= low) & (field < high)
+        if mask.any():
+            print(
+                f"{low:6g}..{high:<6g}{mask.sum():10d}{100 * mask.sum() / number_of_cells:9.2f}{np.median(taken[mask]):8.0f}"
+                f"{taken[mask].mean():8.1f}{taken[mask].max():7d}{100 * taken[mask].sum() / max(taken.sum(), 1):9.1f}{unfinished[mask].sum():12d}"
+            )
+
 worst = np.argsort(np.where(unfinished, np.iinfo(np.int32).max, taken))[::-1][:15]
 print("\nthe cells with the most steps (unfinished cells first):")
 print(f"{'steps':>8s}   {'(ix, iy, iz)':<16s}{'n_H [cm^-3]':>12s}{'T [K]':>12s}{'T after [K]':>13s}   species that are exactly zero")
@@ -220,5 +322,6 @@ if arguments.out is not None:
         temperature_after=temperature_after.reshape(shape).astype(np.float32),
         step_kyr=arguments.step_kyr,
         stride=arguments.stride,
+        **({} if radiation_field is None else dict(radiation_field=radiation_field.astype(np.float32))),
     )
     print(f"\nwritten: {arguments.out}")
