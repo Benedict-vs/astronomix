@@ -204,10 +204,12 @@ def build_pipeline():
         settings = EmissionMapSettings(projection_axes=(1,), solar_abundance_set="A09")
         cell_size = float(config.box_size.y) / dim_y
 
-    def xray(final):
-        """Edge-on S_X(x, z) of the final state in the two models (see the module docstring)."""
-        maps = emission_maps(final[rv.density_index], final[rv.pressure_index], conversions, table, cell_size,
-                             settings)
+    def xray(fields):
+        """Edge-on S_X(x, z) of the final (density, pressure) in the two models (see the module docstring).
+
+        Applied outside the differentiated time integration (exact chain rule on the returned fields and their
+        tangents), so it adds nothing to the integration's peak memory."""
+        maps = emission_maps(fields[0], fields[1], conversions, table, cell_size, settings)
         return {"sx_cgols": maps["xray_cgols_xz"],
                 "sx_atomdb": maps["xray_atomdb_hhe_xz"] + XRAY_METALLICITY * maps["xray_atomdb_metals_xz"]}
 
@@ -228,13 +230,13 @@ def build_pipeline():
         sigma = jnp.sum(rho, axis=1) * col_factor               # (dim_x, dim_z), cm^-2
         n_mid = rho[:, my, :] * N_FACTOR                        # (dim_x, dim_z), cm^-3
         if XRAY:
-            return sigma, n_mid, xray(final)
+            return sigma, n_mid, (rho, final[rv.pressure_index])
         return sigma, n_mid
 
-    return f, config, params, rv
+    return f, (xray if XRAY else None), config, params, rv
 
 
-def compute_sensitivities(f):
+def compute_sensitivities(f, xray=None):
     theta0 = jnp.array([1.0, 1.0])
     e_M = jnp.array([1.0, 0.0])
     e_E = jnp.array([0.0, 1.0])
@@ -246,24 +248,28 @@ def compute_sensitivities(f):
     def jvp_dir(theta, tangent):
         return jax.jvp(f, (theta,), (tangent,))
 
+    xray_jvp = jax.jit(lambda fields, dfields: jax.jvp(xray, (fields,), (dfields,))) if xray else None
+    sx = {}
+
+    def run(direction, label):
+        """One direction; with X-ray, map the 3D fields right away and drop them before the next integration."""
+        primal, tangent = jvp_dir(theta0, direction)
+        if xray:
+            sx0, dsx = xray_jvp(primal[2], tangent[2])
+            for name in sx0:
+                sx[f"{name}0"] = np.asarray(sx0[name])
+                sx[f"d{name}_d{label}"] = np.asarray(dsx[name])
+            primal, tangent = primal[:2], tangent[:2]
+        return jax.tree_util.tree_map(np.asarray, jax.block_until_ready((primal, tangent)))
+
     # Direction 1 (mass loading): also yields the baseline primal.
-    primal, tan_M = jvp_dir(theta0, e_M)
+    (sigma0, n_mid0), tan_M = run(e_M, "M")
     # Direction 2 (energy loading): reuses the compilation.
-    _, tan_E = jvp_dir(theta0, e_E)
-    primal, tan_M, tan_E = jax.tree_util.tree_map(np.asarray, jax.block_until_ready((primal, tan_M, tan_E)))
-    sigma0, n_mid0 = primal[:2]
-    out = (sigma0, n_mid0, tan_M[0], tan_M[1], tan_E[0], tan_E[1])
-    if XRAY:
-        sx = {}
-        for name in primal[2]:
-            sx[f"{name}0"] = primal[2][name]
-            sx[f"d{name}_dM"] = tan_M[2][name]
-            sx[f"d{name}_dE"] = tan_E[2][name]
-        return out + (sx,)
-    return out + ({},)
+    _, tan_E = run(e_E, "E")
+    return (sigma0, n_mid0, tan_M[0], tan_M[1], tan_E[0], tan_E[1], sx)
 
 
-def finite_difference_check(f, eps=0.05, k=300):
+def finite_difference_check(f, xray=None, eps=0.05, k=300):
     """Validate the mass-loading jvp against a central finite difference, on the
     top-k highest-|tangent| pixels.
 
@@ -278,14 +284,18 @@ def finite_difference_check(f, eps=0.05, k=300):
     theta0 = jnp.array([1.0, 1.0])
     f_jit = jax.jit(f)
 
-    def maps(out):
+    xray_jit = jax.jit(xray) if xray else None
+    xray_jvp = jax.jit(lambda fields, dfields: jax.jvp(xray, (fields,), (dfields,))) if xray else None
+
+    def maps(out, sx=None):
         m = {"sigma": out[0]}
-        if XRAY:
-            m.update(out[2])
+        if xray:
+            m.update(sx if sx is not None else xray_jit(out[2]))
         return {name: np.asarray(v, dtype=np.float64) for name, v in m.items()}
 
-    _, tangent = jax.jvp(f, (theta0,), (jnp.array([1.0, 0.0]),))
-    tangent = maps(tangent)
+    primal, tangent = jax.jit(lambda th: jax.jvp(f, (th,), (jnp.array([1.0, 0.0]),)))(theta0)
+    tangent = maps(tangent, xray_jvp(primal[2], tangent[2])[1] if xray else None)
+    del primal
     plus = maps(f_jit(jnp.array([1.0 + eps, 1.0])))
     minus = maps(f_jit(jnp.array([1.0 - eps, 1.0])))
     result = {}
@@ -449,14 +459,14 @@ if __name__ == "__main__":
                 plot_xray_maps(sx, extent_xz, _study_fig(f"sensitivity_xray_{model[3:]}{TAG}.png"), model)
         raise SystemExit(0)
 
-    f, config, params, rv = build_pipeline()
+    f, xray, config, params, rv = build_pipeline()
     x, y, z, extent_xz, _ = _snapshot_grid(config)
 
-    fd_result = finite_difference_check(f) if FDCHECK else None
+    fd_result = finite_difference_check(f, xray) if FDCHECK else None
 
     print("Running forward-mode jvp through the solver (compiles on first pass)...")
     t_start = time.perf_counter()
-    sigma0, n_mid0, dsig_dM, dn_dM, dsig_dE, dn_dE, sx = compute_sensitivities(f)
+    sigma0, n_mid0, dsig_dM, dn_dM, dsig_dE, dn_dE, sx = compute_sensitivities(f, xray)
     print(f"[timing] jvp in both directions incl. compile: {time.perf_counter() - t_start:.0f} s")
     for name, v in sx.items():
         print(f"  {name}: finite {np.isfinite(v).mean():.4f}, max |.| {np.nanmax(np.abs(v)):.3e}")
