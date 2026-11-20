@@ -25,6 +25,11 @@ Usage (from this directory; needs the chemistry environment, see
     python cgols_chemistry_steps.py state.npy --step-kyr 9.5 --frame cgols_snapshots_chem256/frame_0009.npz
     python cgols_chemistry_steps.py state.npy --step-kyr 9.5 --cpu --stride 4      # every 4th cell per axis, on the CPU
 
+A run with a radiation field per cell (``CGOLS_CHEM_FUV=1``) is checked with
+one field for all cells, ``--radiation-scale <Draine fields>``, and the network
+file of that run (``--network``); the field of the cells is in the frames
+(``fuv_xz``), so run it for the range found there.
+
 ``--step-kyr`` is the hydro step of the run at that time (the difference of two
 ``t=`` values of the diag log times 9778 kyr). The layout of the state is the one
 of ``cgols.py`` in three dimensions: density first, pressure fifth, the species
@@ -55,6 +60,9 @@ parser.add_argument("--rtol", type=float, default=1.0e-4, help="as the run (CGOL
 parser.add_argument("--atol", type=float, default=1.0e-12, help="as the run (CGOLS_CHEM_ATOL)")
 parser.add_argument("--no-free-free", action="store_true", help="as a run with CGOLS_CHEM_FREE_FREE=0")
 parser.add_argument("--first-step", type=float, default=1.0, help="as the run (CGOLS_CHEM_FIRST_STEP)")
+parser.add_argument("--radiation-scale", type=float, default=None,
+                    help="a run with a radiation field per cell (CGOLS_CHEM_FUV=1): react every cell in this many Draine fields "
+                         "(the field of a cell is in the frames as fuv_xz; try the smallest and the largest value)")
 arguments = parser.parse_args()
 
 if arguments.cpu:
@@ -118,6 +126,7 @@ setup = cgols_chemistry.build_chemistry(
     absolute_tolerance=arguments.atol,
     free_free=not arguments.no_free_free,
     first_step_fraction=arguments.first_step,
+    radiation_field_per_cell=arguments.radiation_scale is not None,
 )
 kernel = setup.config.stiff_core_fn
 names = list(setup.species)
@@ -157,7 +166,8 @@ chunk = 1 << 22
 tic = time.time()
 for start in range(0, number_of_cells, chunk):
     index = order[start : start + chunk]
-    reacted, taken = kernel.with_steps(jnp.asarray(cells[index]), jnp.full(len(index), interval))
+    radiation = () if arguments.radiation_scale is None else (jnp.full(len(index), arguments.radiation_scale),)
+    reacted, taken = kernel.with_steps(jnp.asarray(cells[index]), jnp.full(len(index), interval), *radiation)
     steps[index] = np.asarray(taken)
     temperature_after[index] = np.asarray(reacted)[:, -1]
 print(f"{number_of_cells} cells reacted over {arguments.step_kyr:g} kyr in {time.time() - tic:.0f} s", flush=True)

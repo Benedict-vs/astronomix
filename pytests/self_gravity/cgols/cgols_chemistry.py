@@ -25,6 +25,7 @@ this repository (KROME is GPL): ``CGOLS_CHEM_NETWORK`` and
 
 import hashlib
 import os
+import re
 import warnings
 from typing import NamedTuple
 
@@ -33,7 +34,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
-from astronomix._modules._chemistry._krome_photo import photo_spectrum
+from astronomix._modules._chemistry._krome_photo import draine_intensity, photo_spectrum
 from astronomix._modules._chemistry._species_transport import restore_conserved_totals
 from astronomix._modules._chemistry.chemistry_options import KVAERNO5
 from astronomix.setup_helpers import (
@@ -73,6 +74,9 @@ TABLE_LOG_HYDROGEN = np.linspace(-7.0, 4.0, 23)
 _TABLE_VERSION = 2
 
 PROTON_MASS_CGS = 1.67262192e-24
+#: The energy at which the Lyman-Werner flux of the Solomon process is taken (Glover & Jappsen 2007; Bovino et al.
+#: 2016, eq. 4).
+LYMAN_WERNER_ENERGY_EV = 12.87
 
 
 class ChemistrySetup(NamedTuple):
@@ -122,6 +126,9 @@ def build_chemistry(
     reaction_chunk_size=0,
     free_free=True,
     first_step_fraction=1.0,
+    radiation_field_per_cell=False,
+    radiation_attenuation=0,
+    radiation_disk_source=False,
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -160,6 +167,34 @@ def build_chemistry(
             on frames of the 256 run, at the same accuracy against a tight
             tolerance); a cell that needs short steps is cut back by a factor
             of up to five per rejected step.
+        radiation_field_per_cell: The radiation of every cell is
+            ``draine_field`` times the FUV field J / J_0 at that cell, the
+            field that scales the photoelectric heating of the cooling-curve
+            runs (model B): the starburst as a point source diluted with
+            distance and attenuated by dust, plus the disk's own star
+            formation. The caller puts the sources into
+            ``params.fuv_source_params``. The network then does not attenuate
+            the Habing flux by a dust column of its own (the dust between the
+            sources and the cell is in the field already), and the network file
+            must take the Lyman-Werner flux that dissociates H2 from the user
+            variable ``user_myfluxLW`` (see below).
+        radiation_attenuation: The attenuation of the point source, one of the
+            ``FUV_ATTENUATION_*`` modes of the cooling module.
+        radiation_disk_source: Add the field of the disk's own star formation.
+
+    **The Lyman-Werner flux.** KROME's ``react_galaxy_ism`` files dissociate H2
+    with ``H2_solomonLW(myflux_eV)``, where ``myflux_eV`` is a constant of the
+    file: the metagalactic background of Haardt & Madau (2012) at 12.87 eV, for
+    which the rate is 4.4e-13 s^-1. The file says that this must be updated for
+    another radiation field (Bovino et al. 2016, eq. 4: the rate is 1.38e9 s^-1
+    times the intensity of the field in use at 12.87 eV). A file whose rate is
+    ``H2_solomonLW(user_myfluxLW)`` gets that flux from here: the intensity of
+    the Draine field at 12.87 eV times ``draine_field`` (5.2e-11 s^-1 for one
+    Draine field, without shielding), and it follows the field of the cell with
+    ``radiation_field_per_cell``. If the rate also calls ``krome_fshield``, the
+    self-shielding of H2 is the function of Wolcott-Green et al. (2011), the
+    one Bovino et al. (2016) use with this network, with KROME's default column
+    density. A file with the constant keeps the constant.
 
     Returns:
         A :class:`ChemistrySetup`.
@@ -172,6 +207,25 @@ def build_chemistry(
                 f"chemistry: the {what} {path!r} does not exist (CGOLS_CHEM_NETWORK / "
                 "CGOLS_CHEM_KROME_DATA; neither is part of the repository)"
             )
+
+    with open(network_path) as file:
+        network_text = "\n".join(line.split("#")[0] for line in file.read().lower().splitlines())
+    # H2 dissociated by the Lyman-Werner flux of the radiation field in use, and with self-shielding?
+    lyman_werner_from_field = re.search(r"h2_solomonlw\(\s*user_myfluxlw\s*\)", network_text) is not None
+    self_shielding = "WG11" if "krome_fshield" in network_text else None
+    if radiation_field_per_cell and not lyman_werner_from_field:
+        raise ValueError(
+            f"chemistry: {network_path} dissociates H2 with a Lyman-Werner flux that is a constant of the file, "
+            "whatever the radiation field of the cell. With radiation_field_per_cell the rate of that reaction must "
+            "be H2_solomonLW(user_myfluxLW) (times krome_fshield(n,Tgas) for the self-shielding): see the docstring "
+            "of cgols_chemistry.build_chemistry"
+        )
+    lyman_werner = {}
+    if lyman_werner_from_field:
+        lyman_werner = dict(
+            krome_user_variables={"user_myfluxLW": float(draine_field) * float(draine_intensity(LYMAN_WERNER_ENERGY_EV))},
+            krome_radiation_user_variables=("user_myfluxLW",),
+        )
 
     with warnings.catch_warnings():
         # lines that KROME skips too (react_galaxy_ism_plus has three)
@@ -197,13 +251,23 @@ def build_chemistry(
             krome_data_folder=krome_data_folder,
             krome_metal_table=True,
             krome_photo_bins=photo_spectrum("draine", 5.0, 13.6, 10, scale=draine_field),
-            krome_shield_habing_dust=True,
+            # the local dust column of KROME stands in for the dust between the
+            # sources and the cell; with the field of the cell that dust is in
+            # the field, and counting it here too would count it twice
+            krome_shield_habing_dust=not radiation_field_per_cell,
+            krome_shielding=self_shielding,
             krome_free_free_cooling=free_free,
+            **lyman_werner,
             # all particles of the gas are species of the network
             temperature_from_species=True,
         )
     species = tuple(species)
-    chemistry_config = chemistry_config._replace(chemistry_step_target=float(step_target))
+    chemistry_config = chemistry_config._replace(
+        chemistry_step_target=float(step_target),
+        radiation_field_per_cell=bool(radiation_field_per_cell),
+        radiation_attenuation=int(radiation_attenuation),
+        radiation_disk_source=bool(radiation_disk_source),
+    )
 
     missing = [
         name for element in _START.values() for name in element if name not in species
@@ -231,6 +295,9 @@ def build_chemistry(
         network_hash, os.path.abspath(krome_data_folder), species, tuple(ABUNDANCES.items()),
         float(cosmic_ray_rate), float(draine_field),
     )  # fmt: skip
+    if lyman_werner_from_field or self_shielding or radiation_field_per_cell:
+        # only then: the keys of a run without any of these stay what they were
+        equilibrium += (bool(lyman_werner_from_field), self_shielding or "", not radiation_field_per_cell)
     equilibrium_key = hashlib.sha1(repr(equilibrium).encode()).hexdigest()
     key = hashlib.sha1(
         repr(
@@ -240,6 +307,7 @@ def build_chemistry(
                 float(adiabatic_index), float(floor_temperature), float(cooling_courant), bool(free_free),
                 float(first_step_fraction),
             )
+            + ((True,) if radiation_field_per_cell else ())
         ).encode()
     ).hexdigest()  # fmt: skip
 

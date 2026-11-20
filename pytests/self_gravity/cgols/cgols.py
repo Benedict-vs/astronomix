@@ -80,6 +80,7 @@ import os
 import re
 import signal
 import time
+from types import SimpleNamespace
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.95")
 
@@ -405,6 +406,7 @@ from astronomix._modules._cooling.cooling_options import (
     FUVSourceParams,
 )
 from astronomix._modules._cooling._cooling import (
+    fuv_radiation_field,
     get_effective_molecular_weights,
     tabulated_cooling_from_curve,
 )
@@ -1171,6 +1173,18 @@ if KI02 and "CGOLS_IC_TAG" not in os.environ:
 #   CGOLS_CHEM_CR_RATE     cosmic-ray ionisation rate [1/s] (3e-17)
 #   CGOLS_CHEM_DRAINE      radiation field in units of the Draine field (1),
 #                          the same in every cell, attenuated by dust
+#   CGOLS_CHEM_FUV         the radiation of every cell (default 1): the
+#                          Draine field times the FUV field J / J_0 of the
+#                          cooling-curve runs (model B) at that cell, i.e. the
+#                          starburst diluted with distance and attenuated by
+#                          dust, plus the disk's own star formation, set by
+#                          the CGOLS_FUV_* knobs (attenuation, disk, SFR). It
+#                          scales the photo-reactions, the photoelectric
+#                          heating and the Lyman-Werner flux that dissociates
+#                          H2; the network file must take that flux from
+#                          user_myfluxLW (cgols_chemistry.build_chemistry).
+#                          0: CGOLS_CHEM_DRAINE in every cell, attenuated by
+#                          the local dust column of KROME (the first runs).
 #   CGOLS_CHEM_FREE_FREE   bremsstrahlung of the ions (KROME's -cooling=FF),
 #                          default 1: the main cooling of the 1e7-1e8 K wind
 #   CGOLS_CHEM_FIRST_STEP  first trial step of the kernel as a fraction of the
@@ -1193,6 +1207,7 @@ CHEM_STEP_MYR = float(os.environ.get("CGOLS_CHEM_STEP_MYR", "0"))
 CHEM_CR_RATE = float(os.environ.get("CGOLS_CHEM_CR_RATE", "3e-17"))
 CHEM_DRAINE = float(os.environ.get("CGOLS_CHEM_DRAINE", "1"))
 CHEM_FREE_FREE = os.environ.get("CGOLS_CHEM_FREE_FREE", "1") == "1"
+CHEM_FUV = os.environ.get("CGOLS_CHEM_FUV", "1") == "1"
 CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
@@ -1597,7 +1612,25 @@ def chemistry_setup():
             cooling_courant=CHEM_COOLING_COURANT,
             free_free=CHEM_FREE_FREE,
             first_step_fraction=CHEM_FIRST_STEP,
+            radiation_field_per_cell=CHEM_FUV,
+            radiation_attenuation={
+                "none": FUV_ATTENUATION_NONE,
+                "slab": FUV_ATTENUATION_SLAB,
+                "jeans": FUV_ATTENUATION_LOCAL_JEANS,
+                "los": FUV_ATTENUATION_LINE_OF_SIGHT,
+            }[FUV_ATTENUATION],
+            radiation_disk_source=FUV_DISK,
         )
+        if CHEM_FUV:
+            # The sources of model B's FUV field, with the dust opacity per
+            # unit mass of this run's own composition.
+            _CHEMISTRY_SETUP = _CHEMISTRY_SETUP._replace(
+                params=_CHEMISTRY_SETUP.params._replace(
+                    fuv_source_params=build_fuv_source_params(
+                        mass_per_hydrogen=_CHEMISTRY_SETUP.mass_per_hydrogen
+                    )
+                )
+            )
     return _CHEMISTRY_SETUP
 
 
@@ -1641,8 +1674,16 @@ def _ki02_setup():
 _KI02_SETUP = _ki02_setup()
 
 
-def build_fuv_source_params():
-    """The distance-diluted FUV field of the central starburst (CGOLS_FUV)."""
+def build_fuv_source_params(mass_per_hydrogen=None):
+    """The distance-diluted FUV field of the central starburst (CGOLS_FUV).
+
+    ``mass_per_hydrogen``: the mass of the gas per hydrogen nucleus in proton
+    masses, which turns the dust cross section per H into an opacity per unit
+    mass; the TIGRESS composition of the cooling curve by default, the
+    composition of the network in a chemistry run.
+    """
+    if mass_per_hydrogen is None:
+        mass_per_hydrogen = TIGRESS_MU_H
     myr_to_code = (1 * u.Myr).to(code_units.code_time).value
     # A(t) = L_FUV / (4 pi J_0) = SFR / Sigma_SFR,0, an area.
     sfr_to_area = (
@@ -1670,7 +1711,7 @@ def build_fuv_source_params():
         background=0.0024,
         # kappa = sigma_d per H / (rho / n_H) of the TIGRESS composition.
         dust_opacity=(
-            FUV_SIGMA_DUST * u.cm**2 / (TIGRESS_MU_H * const.m_p)
+            FUV_SIGMA_DUST * u.cm**2 / (mass_per_hydrogen * const.m_p)
         ).to(code_units.code_length**2 / code_units.code_mass).value,
         # Neutral gas: mu = TIGRESS_MU_H / TIGRESS_X_PART.
         jeans_sound_speed_squared_cap=(
@@ -1683,7 +1724,11 @@ def build_fuv_source_params():
         # density unit, 1e6 Msun / kpc^2, is exactly 1 Msun / pc^2.
         disk_sfr_coefficient=FUV_KS_A / FUV_SIGMA_SFR0,
         disk_sfr_index=FUV_KS_N,
-        **(build_fuv_los_tau_table() if FUV_ATTENUATION == "los" else {}),
+        **(
+            build_fuv_los_tau_table(mass_per_hydrogen=mass_per_hydrogen)
+            if FUV_ATTENUATION == "los"
+            else {}
+        ),
     )
 
 
@@ -2072,7 +2117,7 @@ def _ic_gas_density_rz(R, z):
     return rho_disk + rho_halo
 
 
-def build_fuv_los_tau_table(spacing=0.02, n_samples=800):
+def build_fuv_los_tau_table(spacing=0.02, n_samples=800, mass_per_hydrogen=None):
     """FUVSourceParams fields of the starburst's line-of-sight optical depth.
 
     tau(R, z) = kappa * int rho dl along the straight ray from the box centre,
@@ -2081,7 +2126,9 @@ def build_fuv_los_tau_table(spacing=0.02, n_samples=800):
     on a 10 pc grid). Static: the disk barely moves radially, and the ionised
     wind gas that does move has no photoelectric heating.
     """
-    kappa = (FUV_SIGMA_DUST * u.cm**2 / (TIGRESS_MU_H * const.m_p)).to(
+    if mass_per_hydrogen is None:
+        mass_per_hydrogen = TIGRESS_MU_H
+    kappa = (FUV_SIGMA_DUST * u.cm**2 / (mass_per_hydrogen * const.m_p)).to(
         code_units.code_length**2 / code_units.code_mass
     ).value
     r_s = (FUV_SOFTENING_PC * u.pc).to(code_units.code_length).value
@@ -2431,7 +2478,13 @@ def build_config():
             f"Chemistry ON: {os.path.basename(CHEM_NETWORK)} ({len(_setup.species)} species: "
             f"{' '.join(_setup.species)}), solver {CHEM_SOLVER} (rtol {CHEM_RTOL:g}, atol {CHEM_ATOL:g}), "
             + (f"reacting every {CHEM_STEP_MYR:g} Myr" if CHEM_STEP_MYR > 0 else "reacting every hydro step")
-            + f", Draine field x {CHEM_DRAINE:g}, cosmic-ray rate {CHEM_CR_RATE:g} /s "
+            + (
+                f", radiation of every cell: Draine field x {CHEM_DRAINE:g} x J/J_0 of the FUV model "
+                f"(attenuation {FUV_ATTENUATION}, disk {'on' if FUV_DISK else 'off'})"
+                if CHEM_FUV
+                else f", Draine field x {CHEM_DRAINE:g} in every cell"
+            )
+            + f", cosmic-ray rate {CHEM_CR_RATE:g} /s "
             f"({len(_setup.params.network.cosmic_ray_terms)} cosmic-ray reactions in the file), "
             f"bremsstrahlung {'on' if CHEM_FREE_FREE else 'off'}, "
             f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
@@ -3571,6 +3624,25 @@ def make_snapshot_callable(
             T_xz, chemistry = cgols_chemistry.frame_products(
                 state[species_start:species_stop, g:hi, my, g:hi], P_xz, chemistry_setup()
             )
+            if CHEM_FUV:
+                # The radiation field of the cells of the plane, J / J_0, as
+                # the reaction is given it (the one-cell-thick slab of the
+                # plane has the columns along z that the disk term needs).
+                _setup = chemistry_setup()
+                _plane = SimpleNamespace(
+                    cell_centers_x=x_c + config.box_size.x / 2,
+                    cell_centers_y=jnp.asarray([(my - g + 0.5) * dy]),
+                    cell_centers_z=z_c + config.box_size.z / 2,
+                )
+                chemistry["fuv_xz"] = fuv_radiation_field(
+                    rho[g:hi, my : my + 1, g:hi],
+                    P_gas[g:hi, my : my + 1, g:hi],
+                    _setup.params.fuv_source_params,
+                    _setup.config.radiation_attenuation,
+                    _setup.config.radiation_disk_source,
+                    _plane,
+                    time,
+                )[:, 0, :]
 
         # Edge-on radial velocity v_r = v . r_hat in km/s (paper Figs 1/2
         # middle panels).

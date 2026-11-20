@@ -6,11 +6,15 @@
 #   run_chemistry_local.sh 7 256 1 60 _chem256                            # 75 Myr at 256 x 256 x 512
 #   run_chemistry_local.sh 7 256 1 60 _chem256 CGOLS_RESTART_FROM=latest  # resume from its newest checkpoint
 #   run_chemistry_local.sh 7 64 0.02 3 _chemtest64 CGOLS_CHECKPOINT_EVERY=0
+#   # one radiation field everywhere, with the network file as KROME ships it (the first run, _chem256):
+#   run_chemistry_local.sh 7 256 1 60 _chem256 CGOLS_CHEM_FUV=0 CGOLS_CHEM_NETWORK=<...>/react_galaxy_ism_plus_cr
 #
 # The GPU must be completely free (no process of anyone, lab policy); with ALLOW_OWN=1 it may hold
 # other runs of the same user. The run needs what is not part of the repository:
 #   CHEM_PYTHON            a Python with jax, diffrax, gradsolve and warp-lang (requirements-chemistry.txt)
-#   CGOLS_CHEM_NETWORK     the network in the KROME format (react_galaxy_ism_plus, cosmic-ray block on)
+#   CGOLS_CHEM_NETWORK     the network in the KROME format (react_galaxy_ism_plus, cosmic-ray block on, and for
+#                          a radiation field per cell the H2 dissociation by the flux user_myfluxLW: see
+#                          cgols_chemistry.build_chemistry and the README next to the network files)
 #   CGOLS_CHEM_KROME_DATA  the data folder of a KROME installation
 # Start it detached for a long run:  setsid nohup run_chemistry_local.sh ... > run.out 2>&1 < /dev/null &
 set -u
@@ -20,7 +24,7 @@ GPU=$1; DIM=$2; END_FRACTION=$3; NUM_SNAPSHOTS=$4; RUN_TAG=$5; shift 5
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPOSITORY=$(cd "$HERE/../../.." && pwd)
 CHEM_PYTHON=${CHEM_PYTHON:-/export/scratch/bschuber/envs/chemenv/bin/python}
-export CGOLS_CHEM_NETWORK=${CGOLS_CHEM_NETWORK:-/export/scratch/bschuber/krome_networks/react_galaxy_ism_plus_cr}
+export CGOLS_CHEM_NETWORK=${CGOLS_CHEM_NETWORK:-/export/scratch/bschuber/krome_networks/react_galaxy_ism_plus_cr_fuv}
 export CGOLS_CHEM_KROME_DATA=${CGOLS_CHEM_KROME_DATA:-/export/scratch/lbranca/krome/data}
 
 used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i "$GPU")
