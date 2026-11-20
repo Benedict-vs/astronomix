@@ -191,6 +191,55 @@ def test_a_cell_that_cannot_advance_stops_at_once():
     assert -60 <= steps[1] < 0
 
 
+def test_every_solver_keeps_its_own_right_hand_side():
+    """Solvers built one after the other, each for another right-hand side, each of which is gone again when the
+    next is built. gradsolve caches a translated right-hand side under the id() of the function it is given and
+    keeps no reference to it, so a function that has been freed can hand its id, and with it its generated code,
+    to the next one: the solver then integrates another equation, without an error (found 2026-11-20, when
+    kernels for several radiation fields were built in one process; whether an id is reused depends on the
+    allocator). ``_warp_stiff`` keeps every function it has had translated alive, which is what is checked here,
+    next to the solutions."""
+    from gradsolve.warp import jax_field
+    from astronomix._modules._chemistry import _warp_stiff
+
+    rates = (0.5, 3.0, 20.0, 150.0)
+    initial, interval = jnp.ones((2, 1)), jnp.asarray([0.01, 0.1])
+    kept = len(_warp_stiff._TRANSLATED_FUNCTIONS)
+    for number, rate in enumerate(rates, start=1):
+        def decay(time, state, args, rate=rate):
+            return -rate * state
+
+        solver = build_fused_core_solver(decay, 1, rtol=1.0e-8, atol=1.0e-14, max_steps=4096, cache_key=("pytest-own-field", rate))
+        del decay
+        assert len(_warp_stiff._TRANSLATED_FUNCTIONS) == kept + number
+        np.testing.assert_allclose(
+            np.asarray(solver(initial, interval))[:, 0], np.exp(-rate * np.asarray(interval)), rtol=2.0e-5, atol=1.0e-9, err_msg=f"rate {rate}"
+        )
+    # every right-hand side in gradsolve's caches is one that is still alive here: its id cannot be given away
+    alive = {id(function) for function in _warp_stiff._TRANSLATED_FUNCTIONS}
+    for cache in (jax_field._FIELD_CACHE, jax_field._JAC_CACHE):
+        assert {key[0] for key in cache} <= alive
+
+
+def test_a_parameter_per_cell():
+    """``per_cell_parameter``: the right-hand side reads one number per cell (``args[0]``), here its decay rate."""
+    def decay(time, state, args):
+        return -args[0] * state
+
+    solver = build_fused_core_solver(decay, 1, rtol=1.0e-8, atol=1.0e-14, max_steps=4096, cache_key="pytest-parameter", per_cell_parameter=True)
+    assert solver.per_cell_parameter
+    rates, interval = jnp.asarray([0.5, 3.0, 20.0, 150.0]), jnp.full((4,), 0.05)
+    states, steps = solver.with_steps(jnp.ones((4, 1)), interval, rates)
+    np.testing.assert_allclose(np.asarray(states)[:, 0], np.exp(-0.05 * np.asarray(rates)), rtol=2.0e-5)
+    assert (np.asarray(steps) > 0).all()
+    with pytest.raises(TypeError, match="with a parameter per cell"):
+        solver(jnp.ones((4, 1)), interval)
+    plain = build_fused_core_solver(lambda time, state, args: -3.0 * state, 1, rtol=1.0e-8, atol=1.0e-14, cache_key="pytest-no-parameter")
+    assert not plain.per_cell_parameter
+    with pytest.raises(TypeError, match="without a parameter per cell"):
+        plain(jnp.ones((4, 1)), interval, rates)
+
+
 def test_zero_step_returns_the_state(robertson):
     # update_chemistry relies on it under the density gate: a cell that is not due is untouched
     _, initial, _, result = robertson

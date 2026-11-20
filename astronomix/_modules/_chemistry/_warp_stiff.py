@@ -310,6 +310,11 @@ def _extend_translator(JF):
 # Kernel: adaptive Rosenbrock23 per cell with a per-cell step length (gradsolve's scheme, constants and controller)
 # ---------------------------------------------------------------------------------------------------------------------
 _CACHE = {}
+#: The right-hand sides handed to gradsolve's translator, kept for the life of the process. gradsolve caches a
+#: translated right-hand side under the id() of the function it was given, and holds no reference to it. A function
+#: that has been freed can give its id to the next one built, which would then be handed the generated code of the
+#: first: a kernel with the right-hand side of another network, without an error. Kept alive, an id is never reused.
+_TRANSLATED_FUNCTIONS = []
 #: A cell whose step has shrunk below this fraction of its interval has stalled: about forty rejections in a row,
 #: far below any time scale of a network (the shortest are 1e-15 of a hydro step). No step, however short, has an
 #: acceptable error then, which means that the right-hand side or its Jacobian is not finite at the state itself.
@@ -318,8 +323,14 @@ _TABLE_STORE = None   # the tables of the build in progress: {"values": [...], "
 
 
 def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_steps=2048, cache_key=None,
-                            first_step_fraction=0.01):
+                            first_step_fraction=0.01, per_cell_parameter=False):
     """Return ``fn(y0[n, dim], dt[n]) -> y1[n, dim]`` (float64), a JAX primitive running one Warp thread per cell.
+
+    With ``per_cell_parameter`` the right-hand side has one parameter that differs from cell to cell (the radiation
+    field of the cell, for the chemistry): the solver is then ``fn(y0[n, dim], dt[n], parameter[n])`` and
+    ``vector_field(t, state, args)`` is called with ``args`` a length-one vector holding the parameter of the cell;
+    without it ``args`` is ``None``, and the generated right-hand side is the one of a solver built before the
+    option existed.
 
     ``vector_field(t, state, args)`` is the diffrax-style right-hand side with CONCRETE closed-over parameters (it is
     traced once here, at build time). A cell that does not reach the end of its interval returns its last accepted
@@ -334,7 +345,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     and is otherwise cut back as after any rejected step.
     """
     key = cache_key if cache_key is not None else id(vector_field)
-    key = (key, int(dim), float(rtol), float(atol), int(max_steps), float(first_step_fraction))
+    key = (key, int(dim), float(rtol), float(atol), int(max_steps), float(first_step_fraction), bool(per_cell_parameter))
     if key in _CACHE:
         return _CACHE[key]
     import warp as wp
@@ -346,7 +357,9 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     D = int(dim)
 
     def f_jax(t, y, p):
-        return vector_field(t, y, None)
+        return vector_field(t, y, p if per_cell_parameter else None)
+
+    _TRANSLATED_FUNCTIONS.append(f_jax)   # see there: its id must stay its own
 
     global _TABLE_STORE
     _TABLE_STORE = {"values": [], "offsets": {}}
@@ -393,11 +406,13 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
         return out
 
     @wp.kernel
-    def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), tables: wp.array(dtype=wp.float64),
-                           y_out: wp.array(dtype=vecD), steps_out: wp.array(dtype=wp.int32)):
+    def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), parameter: wp.array(dtype=wp.float64),
+                           tables: wp.array(dtype=wp.float64), y_out: wp.array(dtype=vecD), steps_out: wp.array(dtype=wp.int32)):
         jt = wp.tid()
         t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
+        # the parameter of the cell; a right-hand side built without one does not read it
+        p[0] = parameter[jt]; pj[0] = parameter[jt]
         taken = int(0)   # trial steps of this cell, accepted or not
         for _ in range(MAXS):
             if t >= t1:
@@ -457,17 +472,28 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     wp.load_module(rosenbrock23_cells.module, device=list(devices.values()))
     tables = jnp.asarray(table_values)
 
+    def launch(y0, dt_cell, *parameter):
+        if per_cell_parameter != (len(parameter) == 1) or len(parameter) > 1:
+            raise TypeError(
+                "this solver was built " + ("with" if per_cell_parameter else "without") + " a parameter per cell: call it as "
+                + ("fn(y0, dt, parameter)" if per_cell_parameter else "fn(y0, dt)")
+            )
+        # without a parameter the kernel is handed the step lengths in its place: it needs an array there, and a
+        # right-hand side built without a parameter never reads it
+        return kernel_fn(y0, dt_cell, parameter[0] if per_cell_parameter else dt_cell, tables)
+
     def fn(*args):   # the states alone
-        return kernel_fn(*args, tables)[0]
+        return launch(*args)[0]
 
     def with_steps(*args):
         """``(y1, steps)``: the states and the trial steps every cell took (accepted or rejected). The count
         is negative for a cell that did not reach the end of its interval (it ran out of steps, or its step
         collapsed); such a cell returns its last accepted state."""
-        y1, steps = kernel_fn(*args, tables)
+        y1, steps = launch(*args)
         return y1, steps
 
     fn.with_steps = with_steps
+    fn.per_cell_parameter = bool(per_cell_parameter)
     fn.max_steps = MAXS
     _CACHE[key] = fn
     return fn
