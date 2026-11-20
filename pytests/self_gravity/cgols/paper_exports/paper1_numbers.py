@@ -458,6 +458,7 @@ def numbers():
     yield from numbers_v5()
     yield from numbers_v6()
     yield from numbers_v7()
+    yield from numbers_v7_sensitivity()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -1151,6 +1152,55 @@ def numbers_v7():
         )  # fmt: skip
 
 
+# --------------------------------------------------------------------------- numbers, v7 (asgard-papers #4)
+SENS_LOGS = Path("/export/scratch/bschuber/diagnostics/asgard_issue4")
+
+
+def wall_hours(memory_log):
+    """Wall time of a sensitivity run from its per-minute GPU-memory log (first to last line, across midnight)."""
+    lines = [ln.split()[0] for ln in memory_log.read_text().splitlines() if ln.strip()]
+    seconds = [int(h) * 3600 + int(m) * 60 + int(s) for h, m, s in (t.split(":") for t in (lines[0], lines[-1]))]
+    return ((seconds[1] - seconds[0]) % 86400) / 3600.0
+
+
+def tangent_error(tag32, tag64, name):
+    """Relative L2 difference of a float32 tangent map from the float64 one, and the finite fraction of float32."""
+    a = np.load(STUDIES / f"cgols_sensitivity{tag32}.npz")[name].astype(np.float64)
+    b = np.load(STUDIES / f"cgols_sensitivity{tag64}.npz")[name]
+    return float(np.linalg.norm(np.nan_to_num(a - b)) / np.linalg.norm(b)), float(np.isfinite(a).mean())
+
+
+def numbers_v7_sensitivity():
+    """Yield (key, kwargs for export_number) for the float32/float64 sensitivity keys of asgard-papers #4."""
+    h64 = wall_hours(SENS_LOGS / "gpu0_mem_d.log")
+    h32 = wall_hours(SENS_LOGS / "gpu4_mem_e.log")
+    yield "JVPCostRatio", dict(
+        value=h64 / h32, unit="", status="provisional", convergence=None,
+        description=f"Wall time of the forward-mode sensitivity run (both directions, model A, 256^3, 0-30 Myr, one "
+                    f"fully free H200 each) in float64 over float32: {h64:.1f} h / {h32:.1f} h. Peak device memory "
+                    "141 GB (float64, needs the whole 143 GB card with the async allocator) vs 83 GB (float32).",
+        runs=["A-256 sensitivity"], data=[SENS_LOGS / "gpu0_mem_d.log", SENS_LOGS / "gpu4_mem_e.log"],
+        script=CGOLS / "cgols_sensitivity.py",
+    )  # fmt: skip
+    err = {(n, t, k): tangent_error(f"_d{n}_t{t}myr", f"_d{n}_t{t}myr_x64", k)
+           for n, t in ((256, 30), (128, 30), (128, 45)) for k in ("dsig_dM", "dsig_dE")}  # fmt: skip
+    finite = min(v[1] for v in err.values())
+    ladder = "; ".join(f"{n}^3 at {t} Myr: {100 * err[(n, t, 'dsig_dM')][0]:.0f} % / {100 * err[(n, t, 'dsig_dE')][0]:.0f} %"
+                       for n, t in ((128, 30), (128, 45), (256, 30)))  # fmt: skip
+    yield "TangentErrorFloatThirtyTwo", dict(
+        value=err[(256, 30, "dsig_dM")][0], unit="", status="provisional", convergence=None,
+        description="Relative L2 difference ||t32 - t64|| / ||t64|| of the float32 tangent dSigma/dln Mdot of the "
+                    "edge-on column density from the float64 one, model A 256^3 at 30 Myr (same IC and code). The "
+                    f"float32 tangent stays finite (finite fraction {finite:.3f}) but is dominated by amplified rounding "
+                    "noise; the primal Sigma agrees to 2e-4 (median). Mass / energy loading: " + ladder + ". The "
+                    "float64 tangent passes the finite-difference check at 128^3 (45 Myr); float32 is not usable at "
+                    "256^3 by 30 Myr.",
+        runs=["A-256 sensitivity", "A-128 sensitivity"],
+        data=[STUDIES / f"cgols_sensitivity_d256_t30myr{s}.npz" for s in ("", "_x64")],
+        script=CGOLS / "cgols_sensitivity.py",
+    )  # fmt: skip
+
+
 # --------------------------------------------------------------------------- figures
 
 
@@ -1184,6 +1234,12 @@ def figures():
          ("Outflow against cluster number N at 512^3 (N = 1-128, smooth limit), model C, adiabatic: the same total "
           "injected mass, energy and volume, split into N regions"),
          ["C-512 N = 1-128"]),
+        ("sensitivity_A256", FIGURES / "studies" / "sensitivity_maps_d256_t30myr_x64.png", "cgols_sensitivity.py",
+         ("Forward-mode sensitivity of the edge-on column density of model A (256^3, float64) at 30 Myr to the mass "
+          "and energy loading: top, Sigma, dSigma/dln Mdot, dSigma/dln Edot; bottom, the mid-plane density slice and "
+          "the relative sensitivities dln Sigma/dln Mdot, dln Sigma/dln Edot (pixels below the 5th percentile of "
+          "Sigma blanked)"),
+         ["A-256 sensitivity"]),
         ("xray_cgols_vs_A", FIGURES / "comparisons" / "xray_cgols_vs_A.png", "cgols_cholla_compare.py",
          ("Public CGOLS I 2048^3 state against our A-2048, both at 60 Myr, same emission pipeline: minor-axis "
           "0.3-1 keV absorbed photon profile against Strickland+04, L_X-weighted n-T distributions (CGOLS recipe), "
