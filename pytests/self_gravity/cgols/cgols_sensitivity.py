@@ -134,6 +134,9 @@ TAG = f"_d{RES}_t{T_END_MYR:g}myr"
 # float64 runs (CGOLS_X64=1) get their own files, never overwriting the float32 maps.
 if os.environ.get("CGOLS_X64", "0") == "1":
     TAG += "_x64"
+# X-ray runs, too: they recompute the Sigma maps, which must not replace the files the manifest points to.
+if os.environ.get("CGOLS_SENS_XRAY", "0") == "1":
+    TAG += "_xray"
 
 # --- code-density -> physical helpers (module-level equivalents of the ones
 #     built inside cgols.make_snapshot_callable) ------------------------------
