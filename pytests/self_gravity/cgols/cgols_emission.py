@@ -21,6 +21,12 @@ Emission models (see emission.py for the physics):
   halpha            Eq. 3 of arXiv:2606.10762 in 5e3-5e4 K
   emission_measure  int n_e n_H dl of the same gas [pc cm^-6]
 
+Model B (KI02 + GF12 cooling): pass --temperature-model ki02gf12. The state then
+carries T / mu(T), and every model uses the cooling model's physical temperature
+and ionisation (n_e = x_e n_H, H-alpha / EM on n_e n_HII); see
+emission.ki02_ionisation_table. The in-situ frame maps of model-B runs were made
+with the mu = 0.6 temperature, so this needs the checkpoints.
+
 Memory: a checkpoint is never loaded whole. The state is read chunk by chunk
 (the Orbax chunks are (x, y)-tiles spanning all of z) straight from the OCDBT
 store with tensorstore; every map is a line-of-sight sum, so the tiles'
@@ -33,6 +39,7 @@ Usage (from this directory, any python env with astronomix + tensorstore):
     python cgols_emission.py --tag _A1024 --checkpoint-dir data/legacy/cgols_checkpoints_A1024
     python cgols_emission.py --tag _A2048 --source frames
     python cgols_emission.py --tag _A512new --figures-only
+    python cgols_emission.py --tag _B1024 --temperature-model ki02gf12 --checkpoint-dir <ckpts>
 The cache is resumable: snapshots already in it are skipped.
 """
 
@@ -97,6 +104,13 @@ _parser.add_argument(
     "[cm^-2] (0.3-1 keV table only; e.g. 4e20 = Galactic toward M82), compared with the "
     "Strickland+04 photon fits without any erg/photon conversion",
 )
+_parser.add_argument(
+    "--temperature-model",
+    choices=("cgols", "ki02gf12"),
+    default="cgols",
+    help="cgols: fully ionised, mu = 0.6 (models A and C, legacy CIE B); "
+    "ki02gf12: model B's KI02 + GF12 temperature and ionisation (checkpoints only)",
+)
 _parser.add_argument("--threads", type=int, default=16, help="CPU threads (XLA + tensorstore)")
 _parser.add_argument("--figures-only", action="store_true", help="re-render the figures from the cache")
 _parser.add_argument("--no-figures", action="store_true", help="only update the cache")
@@ -158,6 +172,7 @@ from astronomix.analysis_helpers.emission import XRAY_TABLE_PATHS
 from astronomix.analysis_helpers.emission import (
     emission_conversions,
     emission_maps,
+    ki02_ionisation_table,
     load_xray_emissivity_table,
     luminosity_from_map,
     minor_axis_profile,
@@ -272,14 +287,15 @@ def checkpoint_steps(checkpoint_directory):
 _BLOCK_PROJECTORS = {}
 
 
-def make_block_projector(table, settings, cell_size_code):
+def make_block_projector(table, settings, cell_size_code, ionisation=None):
     """The jitted (density, pressure) block -> maps function.
 
     Memoised per cell size, so the snapshots of one run share one compiled
     function instead of re-tracing it for every checkpoint.
     """
-    if cell_size_code in _BLOCK_PROJECTORS:
-        return _BLOCK_PROJECTORS[cell_size_code]
+    key = (cell_size_code, ionisation is not None)
+    if key in _BLOCK_PROJECTORS:
+        return _BLOCK_PROJECTORS[key]
     conversions = emission_conversions(CODE_UNITS)
 
     @jax.jit
@@ -291,13 +307,14 @@ def make_block_projector(table, settings, cell_size_code):
             table,
             cell_size_code,
             settings,
+            ionisation=ionisation,
         )
 
-    _BLOCK_PROJECTORS[cell_size_code] = project_block
+    _BLOCK_PROJECTORS[key] = project_block
     return project_block
 
 
-def checkpoint_snapshot(step_directory, step, table, settings, threads):
+def checkpoint_snapshot(step_directory, step, table, settings, threads, ionisation=None):
     """Project one checkpoint, chunk by chunk."""
     context = tensorstore.Context(
         {
@@ -326,7 +343,7 @@ def checkpoint_snapshot(step_directory, step, table, settings, threads):
 
     cell_size_kpc = BOX_SIZE_KPC[0] / nx
     cell_size_code = float((cell_size_kpc * u.kpc).to(CODE_UNITS.code_length).value)
-    project_block = make_block_projector(table, settings, cell_size_code)
+    project_block = make_block_projector(table, settings, cell_size_code, ionisation)
 
     chunk_x, chunk_y = state.chunk_layout.read_chunk.shape[1:3]
     tiles = [
@@ -540,6 +557,12 @@ def _map_extent(map_shape):
     return (-half_width, half_width, -half_height, half_height)
 
 
+def _halpha_mask_label(metadata):
+    """' (|z| >= m kpc)' when H-alpha / EM were computed with a disk mask, else ''."""
+    mask = float(metadata.get("halpha_disk_mask_kpc", np.nan))
+    return "" if not np.isfinite(mask) else rf" ($|z| \geq {mask:g}$ kpc)"
+
+
 def plot_maps(maps, metadata, tag, figure_directory):
     """Fig. 9-like edge-on maps (x-z plane, LOS along y) at the map time."""
     time_myr = float(metadata.get("map_time_myr", np.nan))
@@ -547,9 +570,10 @@ def plot_maps(maps, metadata, tag, figure_directory):
         ("xray_cgols_xz", "X1: CGOLS I recipe\n" + r"$n^2\Lambda_{A4}$, $2.3$-$15.5$ MK"),
         ("xray_atomdb_xz", "X2: AtomDB 0.3-2 keV\n" + r"$n_e n_H\epsilon(T)$, " + _solar_label(metadata)),
     ]
+    ki02 = str(metadata.get("temperature_model", "cgols")) == "ki02gf12"
     panels_halpha = [
-        ("halpha_xz", r"H$\alpha$ (Eq. 3), $5\times10^3$-$5\times10^4$ K"),
-        ("emission_measure_xz", r"EM $\int n_e n_H\,dl$, same window"),
+        ("halpha_xz", r"H$\alpha$ (Eq. 3), $5\times10^3$-$5\times10^4$ K" + _halpha_mask_label(metadata)),
+        ("emission_measure_xz", r"EM $\int n_e n_{HII}\,dl$, same window" if ki02 else r"EM $\int n_e n_H\,dl$, same window"),
     ]
     # Pixels without emitting gas (outside a temperature window) are zero;
     # draw them as the colormap's floor rather than as holes.
@@ -587,7 +611,8 @@ def plot_maps(maps, metadata, tag, figure_directory):
             axis.set_title(title, fontsize=9)
             axis.set_xlabel("x [kpc]")
             axis.set_ylabel("z [kpc]")
-        figure.suptitle(f"{tag.lstrip('_')}: edge-on (LOS along y), t = {time_myr:.2f} Myr")
+        model_note = "\nKI02+GF12 temperature and CIE ionisation" if ki02 else ""
+        figure.suptitle(f"{tag.lstrip('_')}: edge-on (LOS along y), t = {time_myr:.2f} Myr{model_note}")
         figure.tight_layout()
         out = os.path.join(figure_directory, f"{tag.lstrip('_')}_{suffix}.png")
         figure.savefig(out, dpi=150)
@@ -698,7 +723,9 @@ def plot_luminosities(records, metadata, tag, figure_directory):
     axis_xray.set_ylabel(r"$L_X$ [erg s$^{-1}$]")
     axis_xray.legend(fontsize=7)
     values = np.array([float(records[index].get("L_halpha_xz", np.nan)) for index in indices])
-    axis_halpha.plot(times, values, "o-", color="C3", markersize=3, label=r"H$\alpha$, Eq. 3")
+    axis_halpha.plot(
+        times, values, "o-", color="C3", markersize=3, label=r"H$\alpha$, Eq. 3" + _halpha_mask_label(metadata)
+    )
     axis_halpha.set_yscale("log")
     axis_halpha.set_ylabel(r"$L_{H\alpha}$ [erg s$^{-1}$]")
     axis_halpha.set_xlabel("t [Myr]")
@@ -755,6 +782,18 @@ def main():
                 f"{SOLAR_ABUNDANCE_SET} solar; --solar-abundances {ARGS.solar_abundances} "
                 "needs the checkpoints"
             )
+        if source != "checkpoints" and ARGS.temperature_model != "cgols":
+            raise SystemExit(
+                "--temperature-model ki02gf12 needs the checkpoints: the in-situ frame maps "
+                "use the mu = 0.6 temperature"
+            )
+        cached_model = str(metadata.get("temperature_model", "cgols")) if records else ARGS.temperature_model
+        if cached_model != ARGS.temperature_model:
+            raise SystemExit(
+                f"{cache_path} was made with --temperature-model {cached_model}; "
+                "use another --cache or delete it"
+            )
+        ionisation = ki02_ionisation_table(CODE_UNITS) if ARGS.temperature_model == "ki02gf12" else None
         if source != "checkpoints" and (ARGS.xray_band != "0.3-2" or ARGS.xray_photons_nh is not None):
             raise SystemExit("--xray-band / --xray-photons-nh need the checkpoints (frames hold 0.3-2 keV maps)")
         table = load_xray_emissivity_table(
@@ -773,13 +812,14 @@ def main():
             xray_band=ARGS.xray_band,
             xray_photons_nh=np.nan if ARGS.xray_photons_nh is None else ARGS.xray_photons_nh,
             halpha_disk_mask_kpc=np.nan if ARGS.halpha_disk_mask_kpc is None else ARGS.halpha_disk_mask_kpc,
+            temperature_model=ARGS.temperature_model,
         )
         for index in selected:
             if index in records:
                 continue
             start = time.perf_counter()
             if source == "checkpoints":
-                snapshot = checkpoint_snapshot(located[index], index, table, settings, ARGS.threads)
+                snapshot = checkpoint_snapshot(located[index], index, table, settings, ARGS.threads, ionisation)
             else:
                 snapshot = frame_snapshot(located[index], index)
             summary, products = summarise(snapshot, ARGS.metallicity, ARGS.halpha_disk_mask_kpc)
