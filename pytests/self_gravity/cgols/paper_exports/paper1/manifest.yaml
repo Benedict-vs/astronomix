@@ -1,6 +1,6 @@
 paper: paper1
-generated: '2026-11-19T15:29:42+00:00'
-astronomix_commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+generated: '2026-11-20T10:20:26+00:00'
+astronomix_commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
 numbers:
 - key: AxisVelocityOffsetCCEightyFive
   value: -2.392909391672225
@@ -19,10 +19,30 @@ numbers:
   - A-2048
   - FV-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
     sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: ConeHalfAngleA
+  value: 59.80923400436541
+  unit: deg
+  uncertainty:
+    kind: range
+    lo: 59.80923400436541
+    hi: 61.33076015919911
+  status: converged
+  convergence: converged
+  description: 'Half-opening angle of the fast wind (v_out > 600 km/s) at |z| = 1 kpc, tan(theta) = sqrt(A_fast
+    / pi) / z, hemispheres averaged, 15-40 Myr (every snapshot after 15 Myr), A-2048, every checkpoint.
+    Ladder: A-512 61.3; A-1024 60.5; A-2048 59.8 (-1.1% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
   digits: 3
 - key: CostRatioFDFV
   value: 6.539244956611512
@@ -37,7 +57,7 @@ numbers:
   - A-2048
   - FV-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data: null
   digits: 3
 - key: CumMassNmax
@@ -50,7 +70,7 @@ numbers:
   runs:
   - C-512 N = 128
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
     sha256: null
@@ -65,10 +85,30 @@ numbers:
   runs:
   - C-512 N = 16
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C512
     sha256: null
+  digits: 3
+- key: DiscMassCTenTwentyFour
+  value: 851263260.8710054
+  unit: Msun
+  uncertainty:
+    kind: range
+    lo: 618107877.0463524
+    hi: 851263260.8710054
+  status: not_converged
+  convergence: not_converged
+  description: 'Gas mass at |z| < 0.5 kpc at 75 Myr, C-1024 (N = 16); 1.94e+09 Msun at 2.5 Myr, before
+    the 5 Myr feedback onset. Ladder: C-256 6.18e+08; C-512 7.83e+08; C-1024 8.51e+08 (+8.7% at the last
+    doubling).'
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
+    sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
   digits: 3
 - key: EdotAfiveKpc
   value: 2.874705401540253e+42
@@ -85,10 +125,83 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
     sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: EdotAoneKpcFraction
+  value: 0.9387962917985883
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 0.9387962917985883
+    hi: 0.9517668956672828
+  status: converged
+  convergence: converged
+  description: 'Net energy flux through both |z| = 1 kpc planes, 15-40 Myr (every snapshot after 15 Myr),
+    A-2048, every checkpoint, all phases, over the mean injected power in the same window (5.4e+42 erg/s).
+    Ladder: A-512 0.952; A-1024 0.945; A-2048 0.939 (-0.6% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: FVFDGapExponent
+  value: 0.7527098969031405
+  unit: ''
+  uncertainty:
+    kind: noise
+    lo: 0.6252190138947878
+    hi: 0.8802007799114931
+  status: provisional
+  convergence: null
+  description: Exponent p in |FD - FV| ~ N^-p of the mean outflow through |z| = 5 kpc, 15-40 Myr, weighted
+    fit over 128^3-1024^3 (cgols_fvfd_synthesis.trend); over 256^3-1024^3 p = 1.09 +- 0.05. FD - FV =
+    +0.420, +0.268, +0.126, +0.046, -0.033 Msun/yr at 128^3-2048^3; at 2048^3 the sign flips within the
+    noise (z = -1.2).
+  runs:
+  - FD/FV 128-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: HalphaLateDiffFVFD
+  value: -7.399468330604897
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: (FV - FD) / FD of the H-alpha luminosity over 60-75 Myr at 2048^3 (10.1 vs 10.9 e41 erg/s);
+    z = (FD - FV) / sigma_diff = 4.5 (cgols_fvfd_synthesis.py).
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: InjectedMassTotal
+  value: 472500075.0
+  unit: Msun
+  uncertainty: null
+  status: converged
+  convergence: null
+  description: 'Mass injected from 0 to 75 Myr by the feedback schedule (cgols.py build_cgols_wind_params:
+    0 before 5 Myr, 1.5 Msun/yr from 5 Myr, linear to 12 Msun/yr at 10 Myr, 12 to 40 Myr, linear to 1.5
+    at 45 Myr, then 1.5); the same in every model.'
+  runs:
+  - all
+  script: pytests/self_gravity/cgols/cgols.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data: null
   digits: 3
 - key: LxAsixtyMyr
   value: 6.338166702134244e+39
@@ -102,10 +215,29 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
     sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
+  digits: 3
+- key: LxBurstRatioCthousand
+  value: 3.8585105705122915
+  unit: ''
+  uncertainty: null
+  status: single_snapshot
+  convergence: unknown
+  description: L_X(N = 1000) / L_X(N = 16) at 15 Myr, C-1024, CGOLS I recipe (one snapshot each); the
+    ratio of the 15-40 Myr (every snapshot after 15 Myr) means is 2.10.
+  runs:
+  - C-1024
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
+    sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024n1000.npz
+    sha256: 4132154d53f8684f9cfd464987969640d4fe63fb50afad7c4ad291624c1cf1dc
   digits: 3
 - key: LxCGOLSsnapshot
   value: 5.958656281681397e+39
@@ -121,7 +253,7 @@ numbers:
   runs:
   - CGOLS I 2048^3 (public)
   script: pytests/self_gravity/cgols/cgols_cholla_compare.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_CGOLSI.npz
     sha256: 1d766793a0f69c589096a236d5154ad4ab1bd22b265ab22c16b51df06fd70f51
@@ -138,7 +270,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
     sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
@@ -154,7 +286,7 @@ numbers:
   - C-1024
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
   - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
     sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
@@ -172,7 +304,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
     sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
@@ -188,10 +320,48 @@ numbers:
   runs:
   - FV-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048fv.npz
     sha256: 724c5a692547555929cde3f65356908a33d8ab07c5f9387a2149ec745cd79f7b
+  digits: 3
+- key: LxLateZ
+  value: 0.6338787460475143
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: '(FD - FV) / sigma_diff of the soft X-ray luminosity (CGOLS I recipe) over 60-75 Myr at
+    2048^3 (cgols_fvfd_synthesis.py: sigma from seed scatter and time sampling); FD - FV = 0.38e39 erg/s
+    (+7.1 %).'
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: LxSnapshotScatter
+  value: 2.161657539370169
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: 'Max / min of the soft X-ray luminosity (CGOLS I recipe) over 50-70 Myr (15 snapshots after
+    50 Myr, 1.25 Myr apart), A-2048; median ratio of neighbouring snapshots 1.07. C-1024: max / min 5.81,
+    neighbours 1.26 (16 snapshots).'
+  runs:
+  - A-2048
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_A2048.npz
+    sha256: 6e08705875823f106c10f1798490325bf88969b9bf182c34045411b945282531
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_C1024.npz
+    sha256: 625c123a5a6beab0509844f364d06b442ee409e3ea008bfe0aa668222a474b48
   digits: 3
 - key: MassAfiveKpc
   value: 311101669.88114053
@@ -207,7 +377,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
     sha256: null
@@ -227,7 +397,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A2048
     sha256: null
@@ -247,7 +417,7 @@ numbers:
   runs:
   - A-512
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A512
     sha256: null
@@ -267,7 +437,7 @@ numbers:
   runs:
   - A-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A1024
     sha256: null
@@ -287,7 +457,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
     sha256: null
@@ -303,7 +473,7 @@ numbers:
   runs:
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024n1000
     sha256: null
@@ -320,10 +490,136 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
     sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: MixedMdotAoneKpcRimChange
+  value: 13.875578277089474
+  unit: percent
+  uncertainty: null
+  status: not_converged
+  convergence: null
+  description: 'Relative change of MixedMdotAoneKpcRim (mixed-entropy outflow through both |z| = 1 kpc
+    planes, 30-45 Myr) from A-1024 to A-2048: 3.7 -> 4.21 Msun/yr (A-512 1.84).'
+  runs:
+  - A-1024
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A1024.npz
+    sha256: 218545ec9973e253dad19e5522db0cc340822cbcebfabd8a896b70688ea91af4
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: MixedMdotCfiveKpcDrop
+  value: 5.457131062570282
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 4.597512099674243
+    hi: 6.477477119892635
+  status: not_converged
+  convergence: not_converged
+  description: Factor by which the outflow of mixed-entropy gas through both |z| = 5 kpc planes falls
+    per doubling, 15-30 Myr (every snapshot after 15 Myr), C-256 -> C-1024 (geometric mean of 4.60 and
+    6.48; C-256 3.63, C-512 0.79, C-1024 0.122 Msun/yr). The drop steepens.
+  runs:
+  - C-256
+  - C-512
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C256.npz
+    sha256: 8400858406f0cc5e7e8f14ed8aa1b3c6274c19445a5f721abaaa0a6c82fcd0bb
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C512.npz
+    sha256: 2060bc240694ffde7dd31919c247dc650df5624605ceb19e2b5223cf8f3769cd
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
+    sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
+  digits: 3
+- key: MixedMdotFVFDDiff
+  value: 4.331242397937918
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: '(FV - FD) / FD of the mixed-entropy outflow through both |z| = 1 kpc planes, 30-45 Myr,
+    2048^3, on the synthesis''s 5 Myr cadence (4.8 vs 4.6 Msun/yr, z = (FD - FV) / sigma_diff = -2.9).
+    On the 6 checkpoints all three runs share (2.5 Myr): FD 4.39, FV 4.64 (+5.6 %), FV seed 1 4.46 (+1.5
+    %).'
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048fv.npz
+    sha256: f3097bd280a1972fb38de10e6abbc8cbf5a8230b045c487477bead68d79a1e99
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048fvs1.npz
+    sha256: d5a9118f780f62b563e14e8cfa1f0179638e823da2487fd9ea5d935b80a9c012
+  digits: 3
+- key: MixingLayerAreaGrowth
+  value: 1.2048338913588441
+  unit: ''
+  uncertainty: null
+  status: not_converged
+  convergence: not_converged
+  description: 'Growth factor of the mixing-layer area (log K = 6.8 isosurface, both hemispheres) from
+    1024^3 to 2048^3, mean over 45-75 Myr (every snapshot after 45 Myr, 12 snapshots), FD: 1424 -> 1715
+    kpc^2 (FD-1024 seed 1: 1331). FV: 943 -> 1306 kpc^2 (1.38x); seed means 954 -> 1270 kpc^2 (1.33x).
+    FD-512 818 kpc^2.'
+  runs:
+  - A-1024
+  - A-2048
+  - FV-1024
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/structure3d_v2_A1024.npz
+    sha256: 21747f32156898dcd41beb8eb0d03221e69876c634d13b47f9193b46e523a14b
+  - path: compgpu12:/export/scratch/bschuber/studies/structure3d_v2_A2048.npz
+    sha256: a77da33121807b1e876ef9fa282848cf34372b708134e5fff9fc6dac97b1a8a3
+  - path: compgpu12:/export/scratch/bschuber/studies/structure3d_v2_A1024fvr.npz
+    sha256: fb1437f5d9f8b2ada3dafe005aed9a5d6f16089bfdc3a2217a4415b87cd6edf1
+  - path: compgpu12:/export/scratch/bschuber/studies/structure3d_v2_A2048fv.npz
+    sha256: 8ddbcedb68134c72510b0a84b4afc28d3c24a40d74f21cb2578118d1aa6cc480
+  digits: 3
+- key: NsweepRealisationScatter
+  value: 7.094231957380252
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: '(max - min) / mean of the mean outflow through |z| = 5 kpc, 15-40 Myr (every snapshot
+    after 15 Myr), over three random cluster realisations at 256^3 with N = 16 (17.09, 16.76, 15.91 Msun/yr;
+    std/mean 3.7 %). N = 64: 1.2 %. Cluster radius fixed at 119 pc instead of 300 pc / N^(1/3): N = 1
+    +1.4 %, N = 4 +0.7 %, N = 8 -0.4 %, N = 32 -0.5 %, N = 64 -0.9 %.'
+  runs:
+  - C-256 N = 16 (3 realisations)
+  - C-256 N = 64 (3 realisations)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/home/bschuber/astronomix/pytests/self_gravity/cgols/cgols_snapshots_C256
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C256s2
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C256s3
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C256n64
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C256n64s2
+    sha256: null
+  - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C256n64s3
+    sha256: null
   digits: 3
 - key: NsweepSlope
   value: 2.2286961500237625
@@ -341,7 +637,7 @@ numbers:
   - C-512 N = 64
   - C-512 N = 128
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n1
     sha256: null
@@ -353,6 +649,46 @@ numbers:
     sha256: null
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_Nsweep/C512n128
     sha256: null
+  digits: 3
+- key: OutflowFracROutsideTwoKpcA
+  value: 0.8800165253900054
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 0.8790965574824713
+    hi: 0.8839511991585897
+  status: converged
+  convergence: converged
+  description: 'Fraction of the net outflow through both |z| = 5 kpc planes that crosses at cylindrical
+    R > 2 kpc (ratio of window means), 15-40 Myr (every snapshot after 15 Myr), A-2048, every checkpoint.
+    Ladder: A-256 0.884; A-512 0.881; A-1024 0.879; A-2048 0.88 (+0.1% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
+  digits: 3
+- key: OutflowFracROutsideTwoKpcCTenTwentyFour
+  value: 0.7387870646547459
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 0.7387870646547459
+    hi: 0.7476010566799847
+  status: converged
+  convergence: converged
+  description: 'Fraction of the net outflow through both |z| = 5 kpc planes that crosses at cylindrical
+    R > 2 kpc (ratio of window means), 15-40 Myr (every snapshot after 15 Myr), C-1024, every checkpoint.
+    C-1024 with N = 1000: 0.753. Ladder: C-256 0.748; C-512 0.739; C-1024 0.739 (-0.1% at the last doubling).'
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
+    sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
   digits: 3
 - key: RatioMdotCtoATenTwentyFour
   value: 1.9986467755880057
@@ -366,12 +702,31 @@ numbers:
   - C-1024
   - A-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_C1024
     sha256: null
   - path: compgpu12:/export/scratch/bschuber/frames/cgols_snapshots_A1024
     sha256: null
+  digits: 3
+- key: SXratioAchange
+  value: 14.280863036916802
+  unit: percent
+  uncertainty: null
+  status: not_converged
+  convergence: null
+  description: 'Largest relative change of SXratioAtwoKpc and SXratioAfiveKpc from A-1024 to A-2048: -11.2
+    % at 2 kpc, +14.3 % at 5 kpc.'
+  runs:
+  - A-1024
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_A1024_sx0p3_1keV_ph_nh4e20.npz
+    sha256: d8d4bfda20d2eebe092f6ddce9eb06bfb04dd8ed1b457f0f803df2050433515d
+  - path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
+    sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
   digits: 3
 - key: SXratioAfiveKpc
   value: 0.03340239443759437
@@ -387,7 +742,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
@@ -406,7 +761,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
@@ -424,10 +779,44 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
+  digits: 3
+- key: SXratioCthousandfiveKpc
+  value: 0.03155439329764877
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: unknown
+  description: S_X / Strickland+04 north fit at |z| = 5 kpc, geometric mean over 50-70 Myr (16 snapshots
+    after 50 Myr), C-1024 with N = 1000 (one resolution); AtomDB 3.1.3 0.3-1.0 keV photons after TBabs
+    absorption by N_H = 4e20 cm^-2, edge-on x-z projection, north.
+  runs:
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_C1024n1000_sx0p3_1keV_ph_nh4e20.npz
+    sha256: ccbeaf20f185674c50c46b71c676a45c82bbb436e6f633f13564ba2b0582ca87
+  digits: 3
+- key: SXratioCthousandtwoKpc
+  value: 0.02651146414403952
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: unknown
+  description: S_X / Strickland+04 north fit at |z| = 2 kpc, geometric mean over 50-70 Myr (16 snapshots
+    after 50 Myr), C-1024 with N = 1000 (one resolution); AtomDB 3.1.3 0.3-1.0 keV photons after TBabs
+    absorption by N_H = 4e20 cm^-2, edge-on x-z projection, north.
+  runs:
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_C1024n1000_sx0p3_1keV_ph_nh4e20.npz
+    sha256: ccbeaf20f185674c50c46b71c676a45c82bbb436e6f633f13564ba2b0582ca87
   digits: 3
 - key: SXratioCtwoKpcTenTwentyFour
   value: 0.4275669938869065
@@ -442,7 +831,7 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
@@ -460,7 +849,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_A2048_sx0p3_1keV_ph_nh4e20.npz
     sha256: f44d0675c41b97cbdc111b89e276ce5493a0043de80a9875609741cbb6252b94
@@ -477,10 +866,108 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/emission_C1024_sx0p3_1keV_ph_nh4e20.npz
     sha256: 80a130e4a7278b2f28ae8530938b5ac351c190cc5cd358546c931f651d687141
+  digits: 3
+- key: ScaleHeightCthousand
+  value: 1.1365180851123518
+  unit: kpc
+  uncertainty: null
+  status: single_snapshot
+  convergence: unknown
+  description: 'Exponential scale height of the minor-axis soft X-ray profile, least squares in log S_X
+    over 0.5-5 kpc, 60 Myr, C-1024 with N = 1000 (one resolution); AtomDB 3.1.3 0.3-1.0 keV photons after
+    TBabs absorption by N_H = 4e20 cm^-2, edge-on x-z projection, north. Strickland+04 north: 1.42 kpc.'
+  runs:
+  - C-1024 (N = 1000)
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/emission_C1024n1000_sx0p3_1keV_ph_nh4e20.npz
+    sha256: ccbeaf20f185674c50c46b71c676a45c82bbb436e6f633f13564ba2b0582ca87
+  digits: 3
+- key: SeedScatterEarly
+  value: 0.849057738827568
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: 'Largest (max - min) / mean between initial-condition seeds of the mean outflow through
+    |z| = 5 kpc, 15-40 Myr (every snapshot after 15 Myr), over the seed sets at 512^3 and above: FD-512
+    0.00 % (2 seeds); FD-1024 0.02 % (2 seeds); FV-1024 0.85 % (4 seeds); FV-2048 0.12 % (2 seeds). Largest:
+    FV-1024.'
+  runs:
+  - FD-512
+  - FD-1024
+  - FV-1024
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: SeedScatterLateLx
+  value: 16.736746434511495
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: 'Largest (max - min) / mean between initial-condition seeds of the soft X-ray luminosity
+    (CGOLS I recipe), 60-75 Myr, over the seed sets at 512^3 and above: FD-512 1.83 % (2 seeds); FD-1024
+    11.98 % (2 seeds); FV-1024 16.74 % (4 seeds); FV-2048 10.21 % (2 seeds). Largest: FV-1024.'
+  runs:
+  - FD-512
+  - FD-1024
+  - FV-1024
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: ShellEdotFractionA
+  value: 0.9076102415300368
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 0.9076102415300368
+    hi: 0.9304868430703399
+  status: converged
+  convergence: converged
+  description: 'Net energy flux through the full sphere r = 5 kpc, 15-30 Myr (every snapshot after 15
+    Myr), A-2048, every checkpoint, all phases, over the mean injected power in the same window (5.4e+42
+    erg/s). Definition proposed here (asgard-papers #3 named the key only). Ladder: A-512 0.93; A-1024
+    0.929; A-2048 0.908 (-2.3% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: ShellFVFDRatioFiveKpc
+  value: 1.034100103314276
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: 'FV-2048 / FD-2048 net outflow through the full sphere r = 5 kpc, 15-40 Myr (every snapshot
+    after 15 Myr), on the 10 checkpoints both share (15.14 / 14.64 Msun/yr); r = 1 kpc: 1.010.'
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048fv.npz
+    sha256: c337e327a697967a9f51a9064a7d6450b79f150d4b6961e2dde9f54cf0bc7d70
   digits: 3
 - key: ShellMdotAfiveKpc
   value: 14.609596639911743
@@ -497,7 +984,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
     sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
@@ -518,7 +1005,7 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
     sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
@@ -538,10 +1025,33 @@ numbers:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
     path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
     sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: ShellToPlaneA
+  value: 2.0549635678204266
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 2.01728931543804
+    hi: 2.0996207091126418
+  status: converged
+  convergence: converged
+  description: 'Net outflow through the full sphere r = 5 kpc (bin [r - 0.125, r) kpc) over that through
+    both |z| = 5 kpc planes, 15-30 Myr (every snapshot after 15 Myr), A-2048, the same checkpoints (13.25
+    / 6.45 Msun/yr; window of ShellMdotAfiveKpcEarly). Ladder: A-512 2.02; A-1024 2.1; A-2048 2.05 (-2.1%
+    at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+  - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_A2048.npz
+    sha256: f8a02b16df8ac9a7fa08caea0fd3d7fc55ca2517c52af2162fc74a28ff5f93f5
   digits: 3
 - key: ShellToPlaneCTenTwentyFour
   value: 1.869583549604671
@@ -554,37 +1064,122 @@ numbers:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   data:
   - path: compgpu12:/export/scratch/bschuber/studies/shells_v2_C1024.npz
     sha256: 7921e11752224b09de24fe96c78487617ca20eb8b6b5b24bd99d0b26c48388da
   - path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
     sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
   digits: 3
+- key: ShellWindMdotA
+  value: 12.544309265098098
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 12.297865695877547
+    hi: 12.544309265098098
+  status: converged
+  convergence: converged
+  description: 'Wind-entropy part (6.8 < log K < 7.9) of the net outflow through the full sphere r = 5
+    kpc, 15-30 Myr (every snapshot after 15 Myr), A-2048, every checkpoint; injected mass rate in the
+    window 12 Msun/yr (1.045x). Ladder: A-512 12.3; A-1024 12.3; A-2048 12.5 (+1.6% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: UnboundFractionA
+  value: 0.9053389990727485
+  unit: ''
+  uncertainty:
+    kind: range
+    lo: 0.9053389990727485
+    hi: 0.9246933484477623
+  status: converged
+  convergence: converged
+  description: 'Fraction of the mass leaving the box through all six faces, 0-75 Myr, that leaves with
+    positive Bernoulli parameter (v^2/2 + gamma/(gamma-1) P/rho + Phi > 0, outflowing cells), A-2048,
+    trapezoid over the checkpoints. 7.4e+08 Msun leave the box, 86% of it through the side faces. Ladder:
+    A-512 0.925; A-1024 0.906; A-2048 0.905 (-0.1% at the last doubling).'
+  runs:
+  - A-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/shells_v2_A2048.npz
+    sha256: 24648290b012bf8c7eaa5b39bce8f77d9a1261ee3e3e5e5328ac59017abaec09
+  digits: 3
+- key: UpDownAsymmetryFD
+  value: 0.26877288613337164
+  unit: dex
+  uncertainty:
+    kind: noise
+    lo: 0.21536892120368079
+    hi: 0.3221768510630625
+  status: provisional
+  convergence: null
+  description: rms of log10 n(x, z) - log10 n(x, -z) over the x-z density slice, mean over 50-75 Myr (frames),
+    FD-2048; FV-2048 0.296 (z = -0.5); uncertainty = the synthesis's sigma.
+  runs:
+  - A-2048
+  - FV-2048
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/fvfd_synthesis_metrics.json
+    sha256: 057226ca9f48ba34d958f00d01f18a59a7434d94a33e47a16e9c106bd63a453c
+  digits: 3
+- key: WindMdotCfiveKpcTenTwentyFour
+  value: 12.427783263578052
+  unit: Msun/yr
+  uncertainty:
+    kind: range
+    lo: 12.381593863291878
+    hi: 12.706363923721474
+  status: converged
+  convergence: converged
+  description: 'Outflow of wind-entropy gas (6.8 < log K < 7.9) through both |z| = 5 kpc planes, 15-30
+    Myr (every snapshot after 15 Myr), C-1024 (N = 16), every checkpoint (2.5 Myr). Ladder: C-256 12.4;
+    C-512 12.7; C-1024 12.4 (-2.2% at the last doubling).'
+  runs:
+  - C-1024
+  script: pytests/self_gravity/cgols/paper_exports/paper1_numbers.py
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
+  data:
+    path: compgpu12:/export/scratch/bschuber/studies/convergence3d_v3_C1024.npz
+    sha256: 08ed28ea8f1c7e0bd1fb693e707e9e46a589948bf700150e85e4a0d9ec80e461
+  digits: 3
 figures:
 - key: cluster_number_512
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/model_c_cluster_number_scaling_512.png
-  caption_hint: Outflow against cluster number N at 512^3 (N = 1-128, smooth limit)
+  caption_hint: 'Outflow against cluster number N at 512^3 (N = 1-128, smooth limit), model C, adiabatic:
+    the same total injected mass, energy and volume, split into N regions'
   runs:
   - C-512 N = 1-128
   script: pytests/self_gravity/cgols/cgols_cluster_number_scaling.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: cost_accuracy
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/cost_accuracy_families.png
-  caption_hint: Error against cost per family of quantities, FD and FV
+  caption_hint: 'Worst and median error per family of quantities against cost, FD and FV, model A; dotted
+    verticals: cost of FD-2048 (blue) and FV-2048 (red); dash-dot: tolerances 5, 10, 20 %; up-arrows:
+    error > 800 %'
   runs:
   - FD/FV 128-2048
   script: pytests/self_gravity/cgols/cgols_cost_accuracy.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: fvfd_summary
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/fvfd_summary_significance.png
-  caption_hint: FD - FV differences for all metrics, 128^3-2048^3, in units of their combined scatter
+  caption_hint: FD (WENO5-Z) - FV (VL2 + PLM + HLLC) differences for every metric, model A 128^3-2048^3,
+    in units of their combined scatter
   runs:
   - FD/FV 128-2048
   script: pytests/self_gravity/cgols/cgols_fvfd_synthesis.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: outflow_A_ladder
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_outflow_128_2048.png
@@ -596,7 +1191,7 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_model_c_compare.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: outflow_C_vs_A
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/model_c_outflow_c1024_a2048.png
@@ -606,12 +1201,12 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_model_c_compare.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: outflow_per_R_A_C
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/outflow_per_R_A_C.png
   caption_hint: Net mass flux through |z| = 1 and 5 kpc per cylindrical radius bin (R < 0.5, 0.5-1, 1-2,
-    > 2 kpc), (15, 40] and (50, 75] Myr, models A (256-2048) and C (256-1024, N = 16 and 1000)
+    > 2 kpc), (15, 40] and (50, 75] Myr, models A (256-2048, blue) and C (256-1024, N = 16 and 1000, orange)
   runs:
   - A-256
   - A-512
@@ -622,11 +1217,12 @@ figures:
   - C-1024
   - C-1024 (N = 1000)
   script: pytests/self_gravity/cgols/cgols_outflow_per_radius.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: shells_A
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/a_series_shells_profiles.png
   caption_hint: Mass, momentum and energy flux through spherical shells and bicones, model A 128^3-2048^3
+    (time means; faint where the shell leaves the box)
   runs:
   - A-128
   - A-256
@@ -634,7 +1230,7 @@ figures:
   - A-1024
   - A-2048
   script: pytests/self_gravity/cgols/cgols_shell_fluxes.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: slices_A2048
   path: pytests/self_gravity/cgols/figures/cgols/paper/paper_slices_A2048.png
@@ -643,7 +1239,7 @@ figures:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/cgols_paper_slices.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: sx_profile_A2048
   path: pytests/self_gravity/cgols/figures/cgols/emission/A2048_sx0p3_1keV_ph_nh4e20_sx_profile.png
@@ -652,7 +1248,7 @@ figures:
   runs:
   - A-2048
   script: pytests/self_gravity/cgols/cgols_emission.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: sx_profile_C1024
   path: pytests/self_gravity/cgols/figures/cgols/emission/C1024_sx0p3_1keV_ph_nh4e20_sx_profile.png
@@ -661,7 +1257,7 @@ figures:
   runs:
   - C-1024
   script: pytests/self_gravity/cgols/cgols_emission.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
 - key: xray_cgols_vs_A
   path: pytests/self_gravity/cgols/figures/cgols/comparisons/xray_cgols_vs_A.png
@@ -673,5 +1269,5 @@ figures:
   - CGOLS I 2048^3 (public)
   - A-2048
   script: pytests/self_gravity/cgols/cgols_cholla_compare.py
-  commit: 12645f031dd4d04cedaf3e8ac9284b696504af36
+  commit: 7a1dffd2bc0558b9bd07cbdbb04ad7870bbf4f11
   status: draft
