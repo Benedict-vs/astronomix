@@ -73,8 +73,11 @@ from astronomix._finite_difference._time_integrators._ssprk import (
 from astronomix._geometry.boundaries import _boundary_handler
 from astronomix._modules._chemistry._species_transport import (
     advect_chemical_species,
+    mix_source_composition,
     species_from_abundances,
 )
+from astronomix._modules._chemistry.chemistry_options import SOURCE_COMPOSITION_FIXED
+from astronomix._modules._time_integrator_sources import _density_added_by_sources
 
 
 @partial(
@@ -143,6 +146,24 @@ def _evolve_state_fd(
             config,
             registered_variables,
         )
+        # The density the mass sources add within this step, for the
+        # composition of that gas (see the reattachment below).
+        source_density = None
+        if config.chemistry_config.source_composition == SOURCE_COMPOSITION_FIXED:
+            if params.chemistry_params.source_abundances is None:
+                raise ValueError(
+                    "ChemistryConfig.source_composition == SOURCE_COMPOSITION_FIXED needs the composition "
+                    "of the added gas, ChemistryParams.source_abundances."
+                )
+            source_density = _density_added_by_sources(
+                primitive_state,
+                dt,
+                config,
+                params,
+                helper_data,
+                registered_variables,
+                current_time,
+            )
 
     # -------------------------------------------------------------
     # ========== ↑ Split off and advect the chemical species ↑ =====
@@ -456,9 +477,19 @@ def _evolve_state_fd(
     # ============ ↓ Reattaching the chemical species ↓ ============
     # -------------------------------------------------------------
 
-    # Number densities again, with the density of the updated state: gas that a
-    # source term added within the step takes the composition of its cell.
+    # Number densities again, with the density of the updated state. Gas that a
+    # source term added within the step takes the composition of its cell, or
+    # (``ChemistryConfig.source_composition``) one of its own: a steady source
+    # must not copy the cell, see ``_species_transport.py``.
     if chemistry_species_active:
+        if source_density is not None:
+            species_abundances = mix_source_composition(
+                species_abundances,
+                primitive_state[registered_variables.density_index],
+                source_density,
+                params.chemistry_params.source_abundances,
+                config.chemistry_config,
+            )
         if config.boundary_handling == GHOST_CELLS:
             species_abundances = _fill_scalar_ghost_cells(species_abundances, config)
         primitive_state = jnp.concatenate(

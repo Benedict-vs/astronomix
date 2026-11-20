@@ -36,7 +36,7 @@ import jax.numpy as jnp
 
 from astronomix._modules._chemistry._krome_photo import draine_intensity, photo_spectrum
 from astronomix._modules._chemistry._species_transport import restore_conserved_totals
-from astronomix._modules._chemistry.chemistry_options import KVAERNO5
+from astronomix._modules._chemistry.chemistry_options import KVAERNO5, SOURCE_COMPOSITION_FIXED
 from astronomix.setup_helpers import (
     attach_per_cell_kernel,
     build_chemistry_from_network_file,
@@ -129,6 +129,7 @@ def build_chemistry(
     radiation_field_per_cell=False,
     radiation_attenuation=0,
     radiation_disk_source=False,
+    source_composition_fixed=True,
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -288,6 +289,18 @@ def build_chemistry(
 
     masses = np.asarray(chemistry_params.network.masses, dtype=np.float64) / PROTON_MASS_CGS
     mass_per_hydrogen = float(np.dot(masses, start_abundances))
+
+    # The gas the wind injection adds has the element abundances of the run, whatever the cell it is added to
+    # holds. (Per unit mass in the units of the state: a species is a number density in units of the code density
+    # over the proton mass.) With the composition of the cell instead, an error of the element abundances grows in
+    # the injection sphere by 0.65 % per step and never leaves: see ``ChemistryConfig.source_composition``.
+    # ``source_composition_fixed=False`` is the behaviour up to 2026-11-20, kept to reproduce it. The composition
+    # is set either way: it is also the reference of :func:`element_errors`.
+    if source_composition_fixed:
+        chemistry_config = chemistry_config._replace(source_composition=SOURCE_COMPOSITION_FIXED)
+    chemistry_params = chemistry_params._replace(
+        source_abundances=jnp.asarray(start_abundances / mass_per_hydrogen)
+    )
 
     with open(network_path, "rb") as file:
         network_hash = hashlib.sha1(file.read()).hexdigest()
@@ -509,6 +522,35 @@ def equilibrium_species(density, pressure, log_abundances, setup):
 def frame_name(species_name):
     """The key of a species in a frame file: ``H+`` -> ``x_Hp_xz``, ``H-`` -> ``x_Hm_xz``."""
     return "x_" + species_name.replace("+", "p").replace("-", "m") + "_xz"
+
+
+def element_errors(species, density, setup):
+    """
+    How far the element content of the worst cell is from the composition of the run.
+
+    The atoms of an element per unit mass are the same in every cell of a run
+    that starts with one composition and whose sources add gas of that
+    composition: no reaction and no transport changes them. The largest
+    relative deviation over the cells is therefore a check of the whole
+    chemistry coupling that costs one reduction: round-off (1e-13) in a sound
+    run. It was 1e-2 after 40 Myr, and 1 after 45 Myr, in the run of 2026-11-19
+    whose injected gas copied the composition of its cell
+    (``ChemistryConfig.source_composition``).
+
+    Args:
+        species: The species, shape ``(num_species,) + grid``, code number densities.
+        density: The density, shape ``grid``, code units.
+        setup: The chemistry of the run.
+
+    Returns:
+        The largest ``|atoms per unit mass / reference - 1|`` of every element,
+        in the order of ``setup.config.species_element_names``.
+    """
+    elements = jnp.asarray(setup.config.species_element_matrix, dtype=species.dtype)
+    reference = elements @ jnp.asarray(setup.params.source_abundances, dtype=species.dtype)
+    atoms = jnp.tensordot(elements, species, axes=1) / density[None, ...]
+    grid_axes = tuple(range(1, atoms.ndim))
+    return jnp.max(jnp.abs(atoms / reference.reshape((-1,) + (1,) * len(grid_axes)) - 1.0), axis=grid_axes)
 
 
 def frame_products(species_plane, pressure_plane, setup):

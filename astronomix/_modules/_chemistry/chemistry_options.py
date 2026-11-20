@@ -28,6 +28,13 @@ TSIT5 = 3
 # ``_chemistry._emulate_single_cell`` and ``setup_helpers.attach_emulator``.
 EMULATOR = 4
 
+# The composition of gas that a mass source (a wind, a feedback region) adds within a step of the finite-difference
+# solver (``ChemistryConfig.source_composition``, see ``_species_transport.mix_source_composition``).
+#: The added gas takes the composition of the cell it is added to.
+SOURCE_COMPOSITION_OF_THE_CELL = 0
+#: The added gas has the element abundances of ``ChemistryParams.source_abundances``.
+SOURCE_COMPOSITION_FIXED = 1
+
 
 class ChemistryConfig(NamedTuple):
     """Top-level chemistry configuration.
@@ -200,6 +207,16 @@ class ChemistryConfig(NamedTuple):
     # Finite-difference solver: after the advection of the species, restore the atoms of every element and the charge
     # per unit mass to their own advected values (see ``_species_transport.py``). Needs the composition above.
     conserve_elements_in_transport: bool = True
+    # Finite-difference solver: the composition of the gas a mass source adds within a step.
+    # SOURCE_COMPOSITION_OF_THE_CELL: the composition of the cell it is added to. Only for a source that acts for a
+    # short time: in a cell that a source keeps refilling while the flow carries its gas away, nothing ever dilutes an
+    # error of the composition, and the high-order advection amplifies it a little every step (the outflow removes
+    # less than the cell's share of an excess). In a 256 x 256 x 512 CGOLS run the hydrogen per unit mass of the
+    # injection sphere went from round-off at 5 Myr to 1e-2 at 40 Myr and to cells without any species at 50 Myr.
+    # SOURCE_COMPOSITION_FIXED: the added gas has the element abundances of ``ChemistryParams.source_abundances`` and,
+    # element by element, the ionisation and molecular state of the cell. An error of the composition is then diluted
+    # by the mass the source adds, as fast as that mass arrives. Cells without a source are untouched, bit for bit.
+    source_composition: int = SOURCE_COMPOSITION_OF_THE_CELL
     # Temperature from the particles the network carries: T = P / (k sum_i n_i) on the way in and
     # P = k T sum_i n_i (the reacted species) on the way out, as KROME and the codes coupled to it do. With False (the
     # default, and the behaviour before 2026-11-19) the particle density is rho / (mu m_p) with the mean molecular
@@ -249,6 +266,8 @@ class ChemistryParams(NamedTuple):
         visual_extinction: Visual extinction Av [mag].
         fuv_source_params: The sources, the dust opacity and the tables of the
             radiation field per cell (``ChemistryConfig.radiation_field_per_cell``).
+        source_abundances: The species per unit mass of the gas a mass source
+            adds (``ChemistryConfig.source_composition``).
         dust_to_gas_ratio: Dust-to-gas mass ratio, used by the grain
             photoelectric heating term.
         floor_temperature: Lower bound [K] on the post-reaction temperature
@@ -285,6 +304,11 @@ class ChemistryParams(NamedTuple):
     # The sources of the radiation field per cell (``ChemistryConfig.radiation_field_per_cell``): the same structure
     # as ``CoolingParams.fuv_source_params``, in code units.
     fuv_source_params: FUVSourceParams = FUVSourceParams()
+    # The species of the gas a mass source adds, per unit mass in the units of the state (number density over
+    # density), shape ``(num_species,)``; read with ``ChemistryConfig.source_composition == SOURCE_COMPOSITION_FIXED``.
+    # Its atoms per element are what the added gas brings; its split of an element over the species is only used in
+    # a cell that holds none of that element.
+    source_abundances: Any = None
 
     # thermochemistry parameters (heating/cooling)
     dust_to_gas_ratio: float = 1e-2

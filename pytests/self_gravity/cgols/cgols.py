@@ -1208,6 +1208,13 @@ CHEM_CR_RATE = float(os.environ.get("CGOLS_CHEM_CR_RATE", "3e-17"))
 CHEM_DRAINE = float(os.environ.get("CGOLS_CHEM_DRAINE", "1"))
 CHEM_FREE_FREE = os.environ.get("CGOLS_CHEM_FREE_FREE", "1") == "1"
 CHEM_FUV = os.environ.get("CGOLS_CHEM_FUV", "1") == "1"
+# The composition of the gas the wind injection adds: "fixed" = the element
+# abundances of the run (default), "cell" = that of the cell it is added to
+# (the behaviour up to 2026-11-20, in which an error of the composition grows
+# in the injection sphere until cells lose whole elements; only to reproduce it).
+CHEM_SOURCE_COMPOSITION = os.environ.get("CGOLS_CHEM_SOURCE_COMPOSITION", "fixed")
+if CHEM_SOURCE_COMPOSITION not in ("fixed", "cell"):
+    raise ValueError(f"CGOLS_CHEM_SOURCE_COMPOSITION must be 'fixed' or 'cell', not {CHEM_SOURCE_COMPOSITION!r}")
 CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
@@ -1620,6 +1627,7 @@ def chemistry_setup():
                 "los": FUV_ATTENUATION_LINE_OF_SIGHT,
             }[FUV_ATTENUATION],
             radiation_disk_source=FUV_DISK,
+            source_composition_fixed=CHEM_SOURCE_COMPOSITION == "fixed",
         )
         if CHEM_FUV:
             # The sources of model B's FUV field, with the dust opacity per
@@ -2487,7 +2495,12 @@ def build_config():
             + f", cosmic-ray rate {CHEM_CR_RATE:g} /s "
             f"({len(_setup.params.network.cosmic_ray_terms)} cosmic-ray reactions in the file), "
             f"bremsstrahlung {'on' if CHEM_FREE_FREE else 'off'}, "
-            f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
+            + (
+                "injected gas with the element abundances of the run, "
+                if CHEM_SOURCE_COMPOSITION == "fixed"
+                else "injected gas COPIES the composition of its cell (reproduces the error growth), "
+            )
+            + f"disk IC T/mu = {CHEM_DISK_T_OVER_MU:g} K, no cooling curve; outputs tagged {RUN_TAG!r}"
         )
     elif COOLING:
         rprint(
@@ -3503,6 +3516,15 @@ def make_snapshot_callable(
                 for name, value in extras.items()
             },
         )
+        if "element_error" in extras:
+            errors = np.asarray(extras["element_error"], dtype=np.float64)
+            names = chemistry_setup().config.species_element_names
+            worst = int(np.argmax(np.nan_to_num(errors, nan=np.inf)))
+            rprint(
+                f"[chemistry] frame {i}, {float(time) * code_time_myr:.2f} Myr: atoms per unit mass within "
+                f"{errors[worst]:.1e} of the run's composition (worst element: {names[worst]})"
+                + ("  <-- the composition of some cells is WRONG" if not errors[worst] < 1.0e-6 else "")
+            )
 
     # Rolling retention for the Orbax checkpoints (CGOLS_CHECKPOINT_EVERY > 0):
     # the TO_DISK driver writes one step dir per frame and never deletes; keep
@@ -3623,6 +3645,14 @@ def make_snapshot_callable(
             species_stop = species_start + registered_variables.num_chemical_species
             T_xz, chemistry = cgols_chemistry.frame_products(
                 state[species_start:species_stop, g:hi, my, g:hi], P_xz, chemistry_setup()
+            )
+            # The element content of the worst cell of the whole grid against
+            # the composition of the run: round-off unless the coupling is
+            # broken (cgols_chemistry.element_errors).
+            chemistry["element_error"] = cgols_chemistry.element_errors(
+                state[species_start:species_stop, g:hi, g:hi, g:hi],
+                rho[g:hi, g:hi, g:hi],
+                chemistry_setup(),
             )
             if CHEM_FUV:
                 # The radiation field of the cells of the plane, J / J_0, as

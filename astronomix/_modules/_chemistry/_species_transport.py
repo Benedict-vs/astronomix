@@ -23,10 +23,25 @@ is a label of the fluid parcel, which is what a passive scalar is. One step is:
 3. the hydro update of the step runs on the state without the species;
 4. ``n_i = X_i rho`` with the density at the end of the step.
 
-Gas that a source term adds within the step (a wind, a feedback region) takes
-the composition of the cell it is added to, because the density of step 4 is the
-one after the sources. The transport is not in flux form: the total number of a
-species in the box is conserved to the accuracy of the scheme, not to round-off.
+The transport is not in flux form: the total number of a species in the box is
+conserved to the accuracy of the scheme, not to round-off.
+
+**Gas that a source adds.** The density of step 4 is the one after the sources
+of the hydro step, so without more the gas that a mass source adds (a wind, a
+feedback region) takes the composition of the cell it is added to
+(``ChemistryConfig.source_composition == SOURCE_COMPOSITION_OF_THE_CELL``). That
+is harmless for a short burst and wrong for a steady source. A cell that a
+source keeps refilling while the flow carries its gas away has no inflow that
+could dilute an error of its composition, and the advection amplifies one: the
+fifth-order upwind value of a ratio at an outflow face lies between the cell and
+its neighbours, so the outflow removes less than the cell's share of an excess,
+and the copy of the cell's composition that the source adds keeps what is left.
+On the flow of a CGOLS wind (300 pc injection sphere, 256 x 256 x 512 cells) an
+error of the atoms per unit mass grew by 0.65 % per step, from round-off at the
+start of the wind to 1e-2 after 35 Myr and to cells without any species after
+45 Myr. With ``SOURCE_COMPOSITION_FIXED`` the added gas has a composition of its
+own (:func:`mix_source_composition`), as ejecta do; the same error then decays,
+by the fraction of the cell's mass the source adds per step.
 
 **The conserved totals.** The atoms of an element per unit mass,
 ``A_e = sum_i a_ei X_i``, and the charge per unit mass, ``Q = sum_i q_i X_i``,
@@ -257,6 +272,83 @@ def advect_chemical_species(
     if charge_total is not None:
         charge_total = advected[number_of_species + number_of_elements]
     return restore_conserved_totals(abundances, element_totals, charge_total, chemistry_config)
+
+
+def mix_source_composition(abundances, density, added_density, source_abundances, chemistry_config):
+    """
+    Give the gas that the mass sources added within the step its own composition.
+
+    ``abundances`` are those of the gas that was advected, per unit mass. Of the
+    density at the end of the step the fraction ``f = added_density / density``
+    is gas from the sources, with the atoms per unit mass of
+    ``source_abundances``. The atoms of every element and the charge per unit
+    mass of the cell become the mass-weighted mean,
+
+        A_e <- (1 - f) A_e + f A_e(source),        Q <- (1 - f) Q + f Q(source),
+
+    and the species of every element are scaled to it
+    (:func:`restore_conserved_totals`): the added gas arrives in the ionisation
+    and molecular state of the cell, element by element, so a cell of the
+    source's own composition is left as it is (to round-off), and what the
+    source changes is the element abundances. Only in a cell that holds none of
+    an element do its atoms arrive as the species of ``source_abundances``.
+    Without the composition of the species (``species_element_matrix``), or with
+    ``conserve_elements_in_transport`` off, the species themselves are mixed,
+    ``X_i <- (1 - f) X_i + f X_i(source)``.
+
+    Cells to which no source added mass are returned bit for bit.
+
+    Args:
+        abundances: The advected species per unit mass, shape
+            ``(num_species,) + grid``.
+        density: The density at the end of the step, shape ``grid``.
+        added_density: The density the mass sources added within the step,
+            shape ``grid`` (``_density_added_by_sources``).
+        source_abundances: The species of the added gas per unit mass, shape
+            ``(num_species,)`` (``ChemistryParams.source_abundances``).
+        chemistry_config: The chemistry configuration (composition of the species).
+
+    Returns:
+        The species per unit mass of the gas of the cell, same shape as
+        ``abundances``.
+    """
+    element_matrix, charges = _composition(chemistry_config)
+    grid_axes = (1,) * (abundances.ndim - 1)
+    fraction = jnp.clip(
+        added_density / jnp.maximum(density, jnp.finfo(density.dtype).tiny), 0.0, 1.0
+    )
+    source = jnp.asarray(source_abundances, dtype=abundances.dtype)
+    if source.shape != (abundances.shape[0],):
+        raise ValueError(
+            f"ChemistryParams.source_abundances has the shape {source.shape}; the state carries "
+            f"{abundances.shape[0]} species."
+        )
+    source_on_grid = source.reshape((-1,) + grid_axes)
+
+    if element_matrix is None:
+        mixed = (1.0 - fraction)[None, ...] * abundances + fraction[None, ...] * source_on_grid
+    else:
+        elements = jnp.asarray(element_matrix, dtype=abundances.dtype)
+        element_totals, charge_total = conserved_totals(abundances, chemistry_config)
+        source_totals = (elements @ source).reshape((-1,) + grid_axes)
+        target_totals = (1.0 - fraction)[None, ...] * element_totals + fraction[None, ...] * source_totals
+        # The species of an element the cell does not hold cannot be scaled to
+        # its target; there the atoms arrive as the species of the source.
+        element_absent = (element_totals <= 0.0).astype(abundances.dtype)
+        of_an_absent_element = (
+            jnp.tensordot(jnp.asarray(element_matrix > 0, dtype=abundances.dtype).T, element_absent, axes=1)
+            > 0.0
+        )
+        seeded = jnp.where(
+            of_an_absent_element, abundances + fraction[None, ...] * source_on_grid, abundances
+        )
+        target_charge = None
+        if charges is not None and charge_total is not None:
+            source_charge = jnp.dot(jnp.asarray(charges, dtype=abundances.dtype), source)
+            target_charge = (1.0 - fraction) * charge_total + fraction * source_charge
+        mixed = restore_conserved_totals(seeded, target_totals, target_charge, chemistry_config)
+
+    return jnp.where((fraction > 0.0)[None, ...], mixed, abundances)
 
 
 def species_from_abundances(abundances, density):

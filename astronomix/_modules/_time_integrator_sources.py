@@ -63,6 +63,65 @@ from astronomix._modules._viscosity._viscosity import fd_viscosity_source
 from astronomix._modules._conduction._conduction import fd_conduction_source
 
 
+def _density_added_by_sources(
+    state: STATE_TYPE,
+    dt: Float[Array, ""],
+    config: SimulationConfig,
+    params: SimulationParams,
+    helper_data: HelperData,
+    registered_variables: RegisteredVariables,
+    current_time: Union[float, Float[Array, ""]] = 0.0,
+):
+    """
+    The density that the mass sources of the finite-difference solver add over
+    one step ``dt``: the stellar wind and the CGOLS wind. Their mass rates
+    depend on the position and the time only, so over the stages of a step they
+    add exactly this (the stages see the same start-of-step time).
+
+    It is what the species transport needs to give the added gas a composition
+    of its own (``ChemistryConfig.source_composition``).
+
+    Args:
+        state: A state whose density row is the density (primitive or
+            conserved; the other rows only enter rows of the sources that are
+            not read here).
+        dt: The time step.
+        config: The simulation configuration.
+        params: The simulation parameters.
+        helper_data: The helper data.
+        registered_variables: The registered variables of ``state``.
+        current_time: The simulation time at the start of the step.
+
+    Returns:
+        The added density, shape of the grid.
+    """
+    density_index = registered_variables.density_index
+    added = jnp.zeros_like(state[density_index])
+    if config.solver_mode != FINITE_DIFFERENCE:
+        return added
+    if config.wind_config.stellar_wind:
+        added = added + _wind_ei3D_source(
+            params.wind_params,
+            state,
+            dt,
+            config,
+            helper_data,
+            config.wind_config.num_injection_cells,
+            registered_variables,
+        )[density_index]
+    if config.cgols_wind_config.cgols_wind:
+        added = added + _cgols_wind_source(
+            params.cgols_wind_params,
+            state,
+            dt,
+            current_time,
+            config,
+            helper_data,
+            registered_variables,
+        )[density_index]
+    return added
+
+
 @partial(jax.jit, static_argnames=["config", "registered_variables"])
 def _time_integrator_sources(
     conserved_state: STATE_TYPE,

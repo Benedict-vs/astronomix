@@ -4,10 +4,12 @@ Reads the state of a run of ``cgols.py`` with ``CGOLS_CHEMISTRY=1`` (an Orbax
 checkpoint, or the same array saved as ``.npy``) and reacts every cell once over
 a hydro step with the per-cell kernel, which also returns the trial steps of
 every cell (``solver.with_steps``). Nothing is written back; the state is only
-read. It answers two questions:
+read. It answers three questions:
 
 * What does a reaction cost, and in which gas? A cell costs its trial steps, and
   on a GPU a group of 32 cells runs as long as its slowest cell.
+* Is the element content of every cell still that of the run? (Printed first;
+  round-off in a sound run.)
 * Does every cell reach the end of its step? A cell that does not (a negative
   count: out of ``max_steps``, or stalled) comes back with its last accepted
   state, so it has not reacted or cooled as it should, and a cell that runs to
@@ -151,6 +153,18 @@ species_code = state[-number_of_species:]
 pressure_code = state[PRESSURE_INDEX]
 hydrogen_code = sum(count * species_code[names.index(name)] for name, count in HYDROGEN_ATOMS.items() if name in names)
 temperature_code = pressure_code / np.maximum(np.maximum(species_code, 0.0).sum(axis=0), 1.0e-300)
+
+# The element content of every cell against the composition of the run: no reaction and no transport changes the
+# atoms of an element per unit mass, so anything above round-off means the coupling is broken (see
+# cgols_chemistry.element_errors; a run of 2026-11-19 reached 1e-2 after 40 Myr and lost whole elements after 45).
+element_matrix = np.asarray(setup.config.species_element_matrix, dtype=np.float64)
+reference_atoms = element_matrix @ np.asarray(setup.params.source_abundances, dtype=np.float64)
+worst_elements = []
+for element, atoms_of_species, reference in zip(setup.config.species_element_names, element_matrix, reference_atoms):
+    atoms = sum(count * species_code[index] for index, count in enumerate(atoms_of_species) if count) / state[0]
+    worst_elements.append(f"{element} {float(np.abs(atoms / reference - 1.0).max()):.1e}")
+    del atoms
+print("atoms per unit mass against the composition of the run, largest deviation over the cells: " + ", ".join(worst_elements), flush=True)
 
 if arguments.frame is not None:
     frame = np.load(arguments.frame)

@@ -58,11 +58,15 @@ from astronomix._modules._chemistry._chemistry import (
     chemistry_temperature_kelvin,
     update_chemistry,
 )
+from astronomix._modules._cgols_wind.cgols_wind_options import CGOLSWindConfig, CGOLSWindParams
 from astronomix._modules._chemistry._species_transport import (
     conserved_totals,
+    mix_source_composition,
     restore_conserved_totals,
 )
 from astronomix._modules._chemistry.chemistry_options import (
+    SOURCE_COMPOSITION_FIXED,
+    SOURCE_COMPOSITION_OF_THE_CELL,
     ChemistryConfig,
     ChemistryParams,
 )
@@ -665,6 +669,257 @@ def test_density_floor_and_the_species(solver_mode):
     else:
         # the finite-volume solver carries the species as densities of their own
         assert bool((floored[start : start + 4] == state[start : start + 4]).all())
+
+
+# -----------------------------------------------------------------------------
+# ==================== ↓ 8. Gas that a mass source adds ↓ ======================
+# -----------------------------------------------------------------------------
+
+HYDROGEN_HELIUM = ("H", "H+", "He", "He+", "He++", "E")
+# per unit mass: 0.7 hydrogen nuclei and 0.075 helium nuclei, neutral gas
+SOURCE_GAS = np.array([0.35, 0.35, 0.025, 0.025, 0.025, 0.35 + 0.025 + 0.05])
+
+
+def _atoms(abundances, chemistry_config):
+    totals, charge = conserved_totals(jnp.asarray(abundances), chemistry_config)
+    return np.asarray(totals), np.asarray(charge)
+
+
+def test_source_gas_brings_its_elements_and_takes_the_state_of_the_cell():
+    chemistry_config, _ = _chemistry(HYDROGEN_HELIUM, Frozen())
+    elements = list(chemistry_config.species_element_names)
+    hydrogen, helium = elements.index("H"), elements.index("He")
+    # four cells: no source; the composition of the source in another ionisation state; too little
+    # hydrogen and too much helium; no helium at all
+    cells = np.array(
+        [
+            [0.10, 0.60, 0.070, 0.004, 0.001, 0.606],
+            [0.01, 0.69, 0.001, 0.004, 0.070, 0.834],
+            [0.05, 0.25, 0.200, 0.050, 0.050, 0.400],
+            [0.20, 0.50, 0.000, 0.000, 0.000, 0.500],
+        ]
+    ).T
+    density = np.array([2.0, 1.0, 4.0, 0.5])
+    added = np.array([0.0, 0.3, 1.0, 0.1])
+    fraction = added / density
+    mixed = np.asarray(
+        mix_source_composition(
+            jnp.asarray(cells), jnp.asarray(density), jnp.asarray(added), jnp.asarray(SOURCE_GAS), chemistry_config
+        )
+    )
+    before, charge_before = _atoms(cells, chemistry_config)
+    after, charge_after = _atoms(mixed, chemistry_config)
+    source, _ = _atoms(SOURCE_GAS, chemistry_config)
+
+    # a cell without a source: bit for bit
+    assert (mixed[:, 0] == cells[:, 0]).all()
+    # the atoms of every element are the mass-weighted mean of the cell and the source, the gas stays neutral
+    np.testing.assert_allclose(after, (1.0 - fraction) * before + fraction * source[:, None], rtol=1e-14)
+    np.testing.assert_allclose(charge_after, 0.0, atol=1e-15)
+    np.testing.assert_allclose(charge_before, 0.0, atol=1e-15)
+    # gas of the source's composition is left as it is, whatever its ionisation
+    np.testing.assert_allclose(mixed[:, 1], cells[:, 1], rtol=1e-14)
+    # the added gas takes the state of the cell: the split of an element over its species does not change
+    for cell in (1, 2):
+        np.testing.assert_allclose(mixed[:2, cell] / after[hydrogen, cell], cells[:2, cell] / before[hydrogen, cell], rtol=1e-13)
+        np.testing.assert_allclose(mixed[2:5, cell] / after[helium, cell], cells[2:5, cell] / before[helium, cell], rtol=1e-13)
+    # an element the cell does not hold arrives as the species of the source
+    np.testing.assert_allclose(mixed[2:5, 3], fraction[3] * SOURCE_GAS[2:5], rtol=1e-14)
+    assert (mixed >= 0.0).all()
+
+
+def test_source_gas_without_the_composition_of_the_species():
+    # no element matrix: the species themselves are mixed
+    chemistry_config, _ = _chemistry(HYDROGEN_HELIUM, Frozen(), composition=False)
+    cells = np.array([[0.05, 0.25, 0.200, 0.050, 0.050, 0.400], [0.10, 0.60, 0.070, 0.004, 0.001, 0.606]]).T
+    mixed = np.asarray(
+        mix_source_composition(
+            jnp.asarray(cells), jnp.asarray([4.0, 2.0]), jnp.asarray([1.0, 0.0]), jnp.asarray(SOURCE_GAS), chemistry_config
+        )
+    )
+    np.testing.assert_allclose(mixed[:, 0], 0.75 * cells[:, 0] + 0.25 * SOURCE_GAS, rtol=1e-14)
+    assert (mixed[:, 1] == cells[:, 1]).all()
+    with pytest.raises(ValueError, match="source_abundances"):
+        mix_source_composition(
+            jnp.asarray(cells), jnp.asarray([4.0, 2.0]), jnp.asarray([1.0, 0.0]), jnp.asarray(SOURCE_GAS[:4]), chemistry_config
+        )
+
+
+def _wind_in_a_box(source_composition, abundances_per_mass, *, mass_rate, energy_rate, t_end, cells=32, source_gas=SOURCE_GAS):
+    """A steady mass source in a sphere at the centre of a box of gas at rest (the CGOLS injection, open
+    boundaries, species that do not react). Returns ``(final state, registered variables, radius of every cell)``."""
+    # the species are only moved: no reaction is ever due (it would be the whole cost of these runs)
+    chemistry_config, chemistry_params = _chemistry(
+        HYDROGEN_HELIUM, Frozen(), source_composition=source_composition, chemistry_step_target=1.0e30
+    )
+    chemistry_params = chemistry_params._replace(source_abundances=jnp.asarray(source_gas))
+    config = SimulationConfig(
+        dimensionality=3,
+        box_size=1.0,
+        num_cells=cells,
+        progress_bar=False,
+        solver_mode=FINITE_DIFFERENCE,
+        numerical_precision=DOUBLE_PRECISION,
+        backend_config=BackendConfig(backend=NATIVE_JAX),
+        boundary_settings=_boundaries("open"),
+        chemistry_config=chemistry_config,
+        cgols_wind_config=CGOLSWindConfig(cgols_wind=True),
+    )
+    params = SimulationParams(
+        t_end=t_end,
+        chemistry_params=chemistry_params,
+        cgols_wind_params=CGOLSWindParams(
+            injection_radius=0.15,
+            schedule_times=jnp.asarray([0.0, 1.0e3]),
+            schedule_mass_rates=jnp.asarray([mass_rate, mass_rate]),
+            schedule_energy_rates=jnp.asarray([energy_rate, energy_rate]),
+        ),
+    )
+    registered_variables = get_registered_variables(config)
+    axis = (np.arange(cells) + 0.5) / cells
+    coordinates = np.meshgrid(axis, axis, axis, indexing="ij")
+    ones = jnp.ones((cells,) * 3)
+    state = construct_primitive_state(
+        config=config,
+        registered_variables=registered_variables,
+        density=ones,
+        gas_pressure=ones,
+        velocity_x=0.0 * ones,
+        velocity_y=0.0 * ones,
+        velocity_z=0.0 * ones,
+    )
+    start = registered_variables.chemistry_species_index
+    state = state.at[start : start + len(HYDROGEN_HELIUM)].set(jnp.asarray(abundances_per_mass(coordinates)))
+    config = finalize_config(config, state.shape)
+    final = np.asarray(time_integration(state, config, params, registered_variables))
+    ghosts = (final.shape[1] - cells) // 2  # the state as the solver holds it
+    if ghosts:
+        final = final[:, ghosts:-ghosts, ghosts:-ghosts, ghosts:-ghosts]
+    radius = np.sqrt(sum((coordinate - 0.5) ** 2 for coordinate in coordinates))
+    return final, registered_variables, radius
+
+
+def _ambient_gas(coordinates):
+    """Gas with less hydrogen and more helium than the source adds (0.6 and 0.1 per unit mass), neutral."""
+    composition = np.array([0.30, 0.30, 0.050, 0.030, 0.020, 0.30 + 0.030 + 0.040])
+    return composition.reshape(-1, 1, 1, 1) * np.ones_like(coordinates[0])[None, ...]
+
+
+def test_mass_a_source_adds_arrives_with_the_composition_of_the_source():
+    # no energy: the source only raises the density of gas at rest, at the same pressure, so nothing moves and the
+    # atoms per unit mass of a cell are exactly the mass-weighted mean of what it held and what was added
+    final, registered_variables, radius = _wind_in_a_box(
+        SOURCE_COMPOSITION_FIXED, _ambient_gas, mass_rate=0.02, energy_rate=0.0, t_end=0.05
+    )
+    chemistry_config, _ = _chemistry(HYDROGEN_HELIUM, Frozen())
+    density = final[registered_variables.density_index]
+    per_mass = _per_mass(final, registered_variables)
+    atoms, charge = _atoms(per_mass, chemistry_config)
+    ambient, _ = _atoms(_ambient_gas([np.zeros((1, 1, 1))] * 3)[:, 0, 0, 0], chemistry_config)
+    source, _ = _atoms(SOURCE_GAS, chemistry_config)
+    assert density.max() > 1.05 and np.abs(final[registered_variables.velocity_index.x]).max() < 1e-10
+    added = (density - 1.0) / density
+    np.testing.assert_allclose(
+        atoms, (1.0 - added)[None] * ambient[:, None, None, None] + added[None] * source[:, None, None, None], rtol=1e-12
+    )
+    np.testing.assert_allclose(charge, 0.0, atol=1e-14)
+    # the added gas took the ionisation of its cell: half of the hydrogen is ionised everywhere
+    np.testing.assert_allclose(per_mass[1] / (per_mass[0] + per_mass[1]), 0.5, rtol=1e-12)
+    # with the composition of the cell the added gas is ambient gas
+    copied, registered_variables, _ = _wind_in_a_box(
+        SOURCE_COMPOSITION_OF_THE_CELL, _ambient_gas, mass_rate=0.02, energy_rate=0.0, t_end=0.05
+    )
+    atoms_copied, _ = _atoms(_per_mass(copied, registered_variables), chemistry_config)
+    np.testing.assert_allclose(atoms_copied, ambient[:, None, None, None] * np.ones_like(atoms_copied), rtol=1e-12)
+
+
+ERROR_WIDTH = 0.05
+
+
+@pytest.fixture(scope="module")
+def steady_wind():
+    """A wind from a steady source in gas of the source's own composition, with an error of its helium that peaks
+    in the middle of the source (1e-6, a Gaussian of 1.2 cells): for both compositions of the added gas the error
+    that is left ``(in the source sphere, outside, largest speed)``, and the error of the middle cells at the start."""
+    chemistry_config, _ = _chemistry(HYDROGEN_HELIUM, Frozen())
+    helium = list(chemistry_config.species_element_names).index("He")
+    cells = 24
+
+    def bump(coordinates):
+        return np.exp(-sum((coordinate - 0.5) ** 2 for coordinate in coordinates) / (2.0 * ERROR_WIDTH**2))
+
+    def source_gas_with_an_error(coordinates):
+        gas = SOURCE_GAS.reshape(-1, 1, 1, 1) * np.ones_like(coordinates[0])[None, ...]
+        gas[2:5] *= 1.0 + 1.0e-6 * bump(coordinates)[None, ...]
+        gas[5] = gas[1] + gas[3] + 2.0 * gas[4]
+        return gas
+
+    result = {"start": 1.0e-6 * float(bump([np.full((1,), 0.5 + 0.5 / cells)] * 3)[0])}
+    for mode in (SOURCE_COMPOSITION_OF_THE_CELL, SOURCE_COMPOSITION_FIXED):
+        final, registered_variables, radius = _wind_in_a_box(
+            mode, source_gas_with_an_error, mass_rate=5.0, energy_rate=100.0, t_end=0.1, cells=cells
+        )
+        atoms, _ = _atoms(_per_mass(final, registered_variables), chemistry_config)
+        error = np.abs(atoms[helium] / 0.075 - 1.0)
+        speed = np.abs(final[registered_variables.velocity_index.x]).max()
+        result[mode] = (error[radius < 0.15].max(), error[radius >= 0.15].max(), speed)
+    return result
+
+
+def test_error_of_the_composition_does_not_survive_in_a_steady_source(steady_wind):
+    in_sphere, outside, speed = steady_wind[SOURCE_COMPOSITION_FIXED]
+    assert speed > 3.0  # a wind blows
+    # the source has replaced the gas of its sphere several times and the error with it (measured: 0.9 % is left)
+    assert in_sphere < 0.03 * steady_wind["start"], (in_sphere, steady_wind["start"])
+    assert outside < 0.03 * steady_wind["start"], outside
+
+
+def test_source_that_copies_its_cell_keeps_and_amplifies_the_error(steady_wind):
+    # Not a wish, a record of why SOURCE_COMPOSITION_OF_THE_CELL is not for a steady source. The gas of the sphere
+    # was replaced as often as above, and the error of the middle cells is still there and LARGER than at the start
+    # (measured: 1.31 times after about 60 steps): they only lose gas, the fifth-order value at their outflow faces
+    # is below their own, and the gas added to them copies them. The wind then carries the error out. In a CGOLS
+    # run it went from round-off to order one in 40 Myr.
+    in_sphere, outside, speed = steady_wind[SOURCE_COMPOSITION_OF_THE_CELL]
+    assert speed > 3.0
+    assert in_sphere > 1.1 * steady_wind["start"], (in_sphere, steady_wind["start"])
+    assert outside > 0.3 * steady_wind["start"], outside
+    assert in_sphere > 30.0 * steady_wind[SOURCE_COMPOSITION_FIXED][0]
+
+
+def test_cell_without_particles_keeps_its_pressure():
+    # all species zero: no temperature to read or write; the reaction must leave the state finite
+    network = RecombiningCoolingGas(coefficient=jnp.asarray(1.0e-3), cooling_time=jnp.asarray(1.0))
+    species = ("H", "H+", "E")
+    chemistry_config, chemistry_params = _chemistry(
+        species, network, thermochemistry=True, temperature_from_species=True
+    )
+    config = SimulationConfig(
+        dimensionality=1,
+        num_cells=4,
+        solver_mode=FINITE_DIFFERENCE,
+        numerical_precision=DOUBLE_PRECISION,
+        chemistry_config=chemistry_config,
+    )
+    registered_variables = get_registered_variables(config)
+    state = jnp.ones((registered_variables.num_vars, 4))
+    start = registered_variables.chemistry_species_index
+    state = state.at[start : start + 3].set(jnp.asarray([[0.5, 0.0, 0.2, 0.0], [0.5, 0.0, 0.8, 1.0], [0.5, 0.0, 0.8, 1.0]]))
+    state = state.at[registered_variables.pressure_index].set(jnp.asarray([150.0, 150.0, 150.0, 150.0]))
+    reacted = np.asarray(
+        update_chemistry(
+            state, registered_variables, chemistry_config, SimulationParams(chemistry_params=chemistry_params), 1.0e-2
+        )
+    )
+    assert np.isfinite(reacted).all()
+    pressure = registered_variables.pressure_index
+    assert reacted[pressure, 1] == 150.0 and (reacted[start : start + 3, 1] == 0.0).all()
+    assert (reacted[pressure, [0, 2, 3]] < 150.0).all()  # the other cells cooled
+
+
+# -----------------------------------------------------------------------------
+# ==================== ↑ 8. Gas that a mass source adds ↑ ======================
+# -----------------------------------------------------------------------------
 
 
 def test_equilibrium_abundances_of_a_linear_network():

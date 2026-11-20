@@ -519,9 +519,19 @@ the same function. What differs is how the species are moved between two reactio
   species. They are moved operator-split, as abundances per unit mass `X_i = n_i / rho`, with
   the machinery of the solver's passive scalars (WENO5 in space, SSP-RK3 in time, sub-cycled
   as the flow requires), and turned back into number densities with the density at the end of
-  the step. Gas that a source term adds within the step takes the composition of its cell.
-  The transport is not in flux form: the total of a species in the box is kept to the accuracy
-  of the scheme (1e-5 in the test below), not to round-off.
+  the step. The transport is not in flux form: the total of a species in the box is kept to
+  the accuracy of the scheme (1e-5 in the test below), not to round-off.
+- **Gas that a mass source adds** (a wind, a feedback region). By default it takes the
+  composition of the cell it is added to (`source_composition=SOURCE_COMPOSITION_OF_THE_CELL`).
+  Do not use that for a steady source. A cell that a source keeps refilling while the flow
+  carries its gas away has no inflow that could dilute an error of its composition, and the
+  high-order advection amplifies one (the outflow removes less than the cell's share of an
+  excess): in a CGOLS run the hydrogen per unit mass of the injection sphere went from
+  round-off to 1e-2 in 35 Myr, 0.65 % per step, and to cells without any species 10 Myr later.
+  With `source_composition=SOURCE_COMPOSITION_FIXED` the added gas has the element abundances
+  of `ChemistryParams.source_abundances` (species per unit mass) and, element by element, the
+  ionisation and molecular state of the cell; the same error then decays. Cells without a
+  source are untouched bit for bit.
 - **Atoms and charge.** WENO gives every species its own nonlinear weights, so where three or
   more species of an element have a front in the same cells their atoms stop adding up: 1.4 %
   of the helium after 0.1 crossing times in the test with He, He+ and He++. The atoms of every
@@ -552,7 +562,9 @@ the same function. What differs is how the species are moved between two reactio
   network against its exact solution, a two-body network against the finite-volume solver
   (the product agrees to 0.07 % on average and 0.8 % at most on 64^2 cells), open boundaries,
   both temperature conventions on a recombining gas with an exact solution, the density floor,
-  and the Pallas backend against native JAX. `pytests/chemistry/chemistry_multidevice.py
+  the composition of gas from a mass source (exact mass-weighted mean; a steady wind in three
+  dimensions in which an error of 1e-6 is gone with the fixed composition and has grown with
+  the copy of the cell), and the Pallas backend against native JAX. `pytests/chemistry/chemistry_multidevice.py
   --solver fd` compares one device with several, on emulated CPU devices and on real GPUs
   (two H200: transport bit-identical, one reaction step 1.8e-15 dex, multi-step runs 1e-14
   dex at `--rtol 1e-8 --atol 1e-14`). At a looser tolerance a multi-step run of a strongly

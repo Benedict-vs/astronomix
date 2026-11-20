@@ -1116,6 +1116,17 @@ def update_chemistry(
                 new_pressure * (read_temperature_kelvin / MAXIMUM_TEMPERATURE_KELVIN),
                 new_pressure,
             )
+        if chemistry_config.temperature_from_species:
+            # A cell without particles (all its species are zero) has no
+            # temperature: P / n is infinite on the way in and 0 x inf on the
+            # way out. It keeps its pressure, and so does any cell whose new
+            # pressure is not finite; one such cell turned a whole state into
+            # NaN within a step (CGOLS, 2026-11-20). A sound state has none.
+            old_pressure = primitive_state[registered_variables.pressure_index]
+            has_particles = jnp.sum(jnp.maximum(species_code_units, 0.0), axis=0) > 0.0
+            new_pressure = jnp.where(
+                has_particles & jnp.isfinite(new_pressure), new_pressure, old_pressure
+            )
         primitive_state = primitive_state.at[
             registered_variables.pressure_index
         ].set(new_pressure)
