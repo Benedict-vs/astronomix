@@ -456,6 +456,7 @@ def numbers():
         )  # fmt: skip
 
     yield from numbers_v5()
+    yield from numbers_v6()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -862,6 +863,81 @@ def numbers_v5():
     )  # fmt: skip
 
 
+# --------------------------------------------------------------------------- numbers, v6 (asgard-papers #11)
+
+
+def numbers_v6():
+    """Yield (key, kwargs for export_number) for the Appendix A keys of asgard-papers #11."""
+    import cgols_cost_accuracy as cost_accuracy
+    import cgols_fvfd_synthesis as synthesis
+
+    synthesis_path = STUDIES / "fvfd_synthesis_metrics.json"
+    runs_fvfd, data_fvfd = synthesis.load_all(False, {})
+    st = synthesis.stats(runs_fvfd, data_fvfd)
+
+    def k_text(key, ns=(256, 512, 1024)):
+        parts = []
+        for n in ns:
+            k, q, note = synthesis.k_factor(st[key], n, key=key)
+            parts.append(f"{n}^3: {k:.2f} [{q[0]:.2f}, {q[1]:.2f}]" if q and np.isfinite(k) else f"{n}^3: {note}")
+        return "; ".join(parts)
+
+    for key, metric, name, n in (
+        ("FVEquivalentResolutionSideLoss", "side_loss", "mass lost through the side faces, 0-75 Myr", 512),
+        ("FVEquivalentResolutionBoxMass", "mass_75", "gas mass in the box at 75 Myr", 512),
+        ("FVEquivalentResolutionLateOutflow", "out5_50_75", "mean outflow through |z| = 5 kpc, 50-75 Myr", 1024),
+    ):
+        k, q, _note = synthesis.k_factor(st[metric], n, key=metric)
+        yield key, dict(
+            value=float(k), unit="", status="provisional", convergence=None,
+            uncertainty={"kind": "noise", "lo": q[0], "hi": q[1]} if q else None,
+            description=f"FV at N matches FD at k N in the {name} (FD ladder interpolated in log2 N; 16-84 % from the "
+                        f"seed noise; cgols_fvfd_synthesis.k_factor, Fig. A.1b); value at N = {n}. Per N: "
+                        f"{k_text(metric)}." + (" Below 1024 FV lies above every FD rung up to 2048, so no k exists."
+                                                 if metric == "out5_50_75" else ""),
+            runs=["FD/FV 128-2048"], data=synthesis_path,
+        )  # fmt: skip
+
+    h1 = h_index(1.0)
+    tags = ("A2048", "A2048fv", "A2048fvs1")
+    early, count = common_window_mean("convergence3d_v3_", tags, EARLY, lambda r: r["mdot_out_K"][h1, MIXED_ENTROPY_BIN])
+    yield "MixedMdotFVFDDiffEarly", dict(
+        value=100.0 * (early["A2048fv"] / early["A2048"] - 1.0), unit="percent", status="provisional",
+        convergence=None,
+        description=f"(FV - FD) / FD of the mixed-entropy outflow through both |z| = 1 kpc planes, 15-30 Myr, 2048^3, "
+                    f"on the {count} checkpoints FD-2048 and both FV-2048 seeds share (2.5 Myr): FD {early['A2048']:.3g}, "
+                    f"FV {early['A2048fv']:.3g}, FV seed 1 {early['A2048fvs1']:.3g} Msun/yr. The FV seeds agree to "
+                    f"{100 * abs(early['A2048fvs1'] / early['A2048fv'] - 1):.0f} %: a scheme effect. Its cause is timing: the "
+                    "mixing episode at the cavity rim starts at 25 Myr in FV-2048 and at 27.5 Myr in FD-2048 (FV-1024: "
+                    "27.5, FD-1024: 30 Myr), so the window mean depends on where the onset falls and its time-sampling "
+                    "error is large (z = -0.9 against it).",
+        runs=["A-2048", "FV-2048"], data=[STUDIES / f"convergence3d_v3_{t}.npz" for t in tags],
+        script=CGOLS / "paper_exports" / "paper1_numbers.py",
+    )  # fmt: skip
+
+    rim = cost_accuracy.rim_values(runs_fvfd)
+    value = {lab: v[0] for lab, v in rim.items()}
+    fv_2048 = [value[lab] for lab in ("FV2048", "FV2048s1") if lab in value]
+    fv_1024 = [value[lab] for lab in ("FV1024", "FV1024s1", "FV1024s2", "FV1024s3") if lab in value]
+    common = ("roughness sigma_R / <R> of the midplane cavity rim (n = 0.1 cm^-3 contour), mean over 20-35 Myr "
+              "(cgols_convergence_3d.rim_metrics, the cost-accuracy quantity)")  # fmt: skip
+    ladder_text = (f"FD 512 / 1024 / 2048: {value['FD512']:.3f} / {value['FD1024']:.3f} / {value['FD2048']:.3f} "
+                   f"(FD-1024 seed 1 {value.get('FD1024s1', np.nan):.3f}); FV 512 / 1024 (4 seeds) / 2048 (2 seeds): "
+                   f"{value['FV512']:.3f} / {np.mean(fv_1024):.3f} / {np.mean(fv_2048):.3f}.")  # fmt: skip
+    yield "RimRoughnessFD", dict(
+        value=value["FD2048"], unit="", status="not_converged", convergence="not_converged",
+        description=f"Cavity-rim {common}, FD-2048; doubles per resolution doubling. {ladder_text}",
+        runs=["A-2048", "A-1024", "A-512"], data=None, script=CGOLS / "cgols_cost_accuracy.py",
+    )  # fmt: skip
+    yield "RimRoughnessFV", dict(
+        value=float(np.mean(fv_2048)), unit="", status="not_converged", convergence="not_converged",
+        uncertainty={"kind": "range", "lo": min(fv_2048), "hi": max(fv_2048)},
+        description=f"Cavity-rim {common}, FV-2048, mean of the two seeds ({', '.join(f'{v:.3f}' for v in fv_2048)}); "
+                    f"FV-512 is already as rough as FD-2048. {ladder_text}",
+        runs=["FV-2048", "FV-1024", "FV-512"], data=None, script=CGOLS / "cgols_cost_accuracy.py",
+    )  # fmt: skip
+
+
 # --------------------------------------------------------------------------- figures
 
 
@@ -909,6 +985,40 @@ def figures():
          ("Worst and median error per family of quantities against cost, FD and FV, model A; dotted verticals: "
           "cost of FD-2048 (blue) and FV-2048 (red); dash-dot: tolerances 5, 10, 20 %; up-arrows: error > 800 %"),
          ["FD/FV 128-2048"]),
+        ("fvfd_stats_pdfs", FIGURES / "comparisons" / "fvfd_stats_pdfs.png", "cgols_fvfd_statistics.py",
+         ("Mass-weighted PDFs of log n and log T of the mixed, wind and halo gas (entropy phases) at |z| > 1 kpc, "
+          "45-75 Myr, FD and FV at 1024^3 and 2048^3; thin lines: seed runs"),
+         ["A-1024", "A-2048", "FV-1024", "FV-2048"]),
+        ("fvfd_stats_spectra", FIGURES / "comparisons" / "fvfd_stats_spectra.png", "cgols_fvfd_statistics.py",
+         ("3D power spectra k P(k) of log n, log T and |v| at 1 < |z| < 3.5 kpc, 45-75 Myr, FD and FV at 1024^3 and "
+          "2048^3; lower row: FV / FD; dotted: 1000, 300, 100, 30 pc"),
+         ["A-1024", "A-2048", "FV-1024", "FV-2048"]),
+        ("fvfd_stats_clumps", FIGURES / "comparisons" / "fvfd_stats_clumps.png", "cgols_fvfd_statistics.py",
+         ("Cumulative mass functions N(> M) of all entrained clumps and of the clumps detached from the disc, "
+          "1 < |z| < 3.5 kpc, mean per snapshot over 45-75 Myr, FD and FV at 1024^3 and 2048^3; thin lines: seeds"),
+         ["A-1024", "A-2048", "FV-1024", "FV-2048"]),
+        ("fvfd_stats_maps", FIGURES / "comparisons" / "fvfd_stats_maps.png", "cgols_fvfd_statistics.py",
+         ("Morphology of the edge-on soft X-ray (0.3-2 keV) and H-alpha maps at 60 Myr, 1 < |z| < 5 kpc: PDF of "
+          "log S at the native resolution and in an 80 pc beam, and the power spectrum of log S; FD and FV at 1024^3 "
+          "and 2048^3, thin lines: seeds"),
+         ["A-1024", "A-2048", "FV-1024", "FV-2048"]),
+        ("fv_riemann_A512", FIGURES / "comparisons" / "fv_riemann_A512.png", "cgols_fv_riemann.py",
+         "Riemann-solver ablation at 512^3: FV with HLLC, FV with HLLE and FD (outflow, late X-rays, slices)",
+         ["A-512", "FV-512", "FV-512 HLLE"]),
+        ("fv_ppm_A256_A512", FIGURES / "comparisons" / "fv_ppm_A256_A512.png", "cgols_fvfd_synthesis.py",
+         "FV with PPM against FV with PLM at 256^3 and 512^3, against FD at N and 2N",
+         ["FV-256", "FV-512", "FV-256 PPM", "FV-512 PPM", "A-256", "A-512", "A-1024"]),
+        ("fv_precision_A512", FIGURES / "comparisons" / "fv_precision_A512.png", "cgols_fv_precision.py",
+         "Precision test at 512^3: FV in float32 (two runs) and float64 against FD",
+         ["A-512", "FV-512", "FV-512 fp64"]),
+        ("fv_density_floor", FIGURES / "comparisons" / "fv_density_floor.png", "cgols_density_floor.py",
+         ("Density floor census: FV hard floor (rho = 1e-4 code units) against FD without a floor, and the FV "
+          "mass budget"),
+         ["A-512", "FV-512"]),
+        ("rim_fdfv_hires", FIGURES / "comparisons" / "a_series_convergence_rim_fdfv_hires.png",
+         "cgols_convergence_3d.py",
+         "Cavity-rim roughness and mean rim radius against time, FD and FV at 1024^3 and 2048^3",
+         ["A-1024", "A-2048", "FV-1024", "FV-2048"]),
     ]  # fmt: skip
     for key, path, script, caption, runs in entries:
         yield key, path, dict(caption_hint=caption, runs=runs, script=CGOLS / script)

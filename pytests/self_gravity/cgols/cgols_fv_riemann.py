@@ -45,6 +45,12 @@ FV_HLLC = {
 }
 
 
+def window(t, start, end):
+    """(start, end] on times rounded to 1e-3 Myr: the window rule of every CGOLS time mean."""
+    t = np.round(np.asarray(t, dtype=float), 3)
+    return (t > start) & (t <= end)
+
+
 def load(frame_dir):
     """Frames of one run, sorted by time."""
     names = sorted(f for f in os.listdir(frame_dir) if f.startswith("frame_"))
@@ -121,7 +127,7 @@ def spectrum():
                 continue
             values = np.array(values)
             ax.plot(t, values, color=color, ls=style, label=label)
-            late = values[(t >= 50) & (t <= 75.01)]
+            late = values[window(t, 50, 75)]
             print(f"    {label:13s} {late.mean():.4f} +- {late.std():.4f} ({late.min():.3f}-{late.max():.3f})")
         ax.set(
             xlabel="t [Myr]",
@@ -133,7 +139,8 @@ def spectrum():
         ax.axvspan(50, 75, color="0.93", zorder=0)
         ax.grid(alpha=0.3)
         ax.legend(fontsize=7, ncol=2)
-    fig.suptitle("A-series small-scale structure: FD WENO5 vs FV VL2 (PLM)")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("A-series small-scale structure: FD WENO5 vs FV VL2 (PLM)")
     fig.tight_layout()
     path = "figures/cgols/comparisons/fv_small_scale_structure.png"
     fig.savefig(path, dpi=110)
@@ -176,8 +183,8 @@ def main():
             log_n = np.log10(at(time)["n_xz"].astype(np.float64))
             asym.append(np.sqrt(np.mean((log_n - log_n[:, ::-1]) ** 2)))
         print(
-            f"{label:20s} {out5[(t >= 15) & (t <= 40)].mean():10.2f} {out5[(t >= 50) & (t <= 75)].mean():11.2f}"
-            f" {lx[(te >= 15) & (te <= 40)].mean() / 1e39:10.1f} {lx[(te >= 60) & (te <= 75)].mean() / 1e39:10.1f}"
+            f"{label:20s} {out5[window(t, 15, 40)].mean():10.2f} {out5[window(t, 50, 75)].mean():11.2f}"
+            f" {lx[window(te, 15, 40)].mean() / 1e39:10.1f} {lx[window(te, 60, 75)].mean() / 1e39:10.1f}"
             f"  {' '.join(f'{pinch(at(T)):.2f}' for T in (60, 65, 70, 75))}  {asym[0]:.3f} {asym[1]:.3f}"
         )
         for col, time in enumerate((50, 65, 75)):
@@ -194,7 +201,8 @@ def main():
     ax_x.set(ylabel="L_X1 (CGOLS Eq. 17) [erg/s]", xlim=(0, 75), ylim=(1e39, 2e42))
     ax_x.legend(fontsize=7)
     ax_pin.set(ylabel="axis <log n>, 4<|z|<9 kpc\n(high = pinched)", xlabel="t [Myr]")
-    fig.suptitle(f"A{dim}: Riemann-solver ablation (FV HLLC vs HLLE vs FD)")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle(f"A{dim}: Riemann-solver ablation (FV HLLC vs HLLE vs FD)")
     fig.tight_layout()
     path = f"figures/cgols/comparisons/fv_riemann_A{dim}.png"
     fig.savefig(path, dpi=90)

@@ -1382,8 +1382,9 @@ def fig_ppm_ladder(runs, data, st, summary):
              title="cost (labels: ms/step, steps)\nPPM on HoreKa, PLM / FD local")
     ax_c.legend(fontsize=8)
     ax_c.grid(alpha=0.3, axis="y", which="both")
-    fig.suptitle("CGOLS A256 / A512, FV VL2 + HLLC: PPM (AthenaPK ppm_simple, GPU) vs PLM corrector, against FD at N "
-                 "and 2N")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS A256 / A512, FV VL2 + HLLC: PPM (AthenaPK ppm_simple, GPU) vs PLM corrector, against FD "
+                     "at N and 2N")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     path = f"{FIG_DIR}/fv_ppm_A256_A512.png"
     fig.savefig(path, dpi=100)

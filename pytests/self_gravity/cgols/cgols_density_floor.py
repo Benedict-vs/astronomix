@@ -106,7 +106,7 @@ def diag_table():
             continue
         t, rho, p = a[:, 0], a[:, 1], a[:, 2]
         hit, phit = rho <= RHO_FLOOR * 1.0001, p <= P_FLOOR * 1.0001
-        late, mid = t >= 60, (t >= 40) & (t < 60)
+        late, mid = t > 60, (t > 40) & (t <= 60)
         first = f"{t[hit][0]:.1f}" if hit.any() else "-"
         print(
             f"  {tag:12s} {hit[mid].mean():6.3f} {hit[late].mean():6.3f} {first:>6s} {rho.min():9.2e}"
@@ -550,7 +550,8 @@ def figure(states, frames, series):
     ax.set(xlabel="t [Myr]", ylabel="[1e6 Msun]", xlim=(0, 75), title="(j) where FV's missing mass goes")
     ax.legend(fontsize=7, ncol=2)
 
-    fig.suptitle("CGOLS A-series density floor (rho = 1e-4 code, log n = %.2f): FV VL2+HLLC hard floor vs FD WENO5 (no clip)" % np.log10(RHO_FLOOR * N_PER_RHO))
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS A-series density floor (rho = 1e-4 code, log n = %.2f): FV VL2+HLLC hard floor vs FD WENO5 (no clip)" % np.log10(RHO_FLOOR * N_PER_RHO))
     fig.tight_layout()
     path = "figures/cgols/comparisons/fv_density_floor.png"
     os.makedirs(os.path.dirname(path), exist_ok=True)
