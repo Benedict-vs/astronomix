@@ -1303,6 +1303,13 @@ def figures():
           "the relative sensitivities dln Sigma/dln Mdot, dln Sigma/dln Edot (pixels below the 5th percentile of "
           "Sigma blanked)"),
          ["A-256 sensitivity"]),
+        ("sensitivity_Lx_A256", FIGURES / "studies" / "sensitivity_xray_atomdb_d256_t30myr_x64_xray.png",
+         "cgols_sensitivity.py",
+         ("Forward-mode sensitivity of the edge-on soft X-ray surface brightness of model A (256^3, float64) at 30 Myr: "
+          "S_X in absorbed 0.3-1.0 keV photons (AtomDB, N_H = 4e20 cm^-2, Z = Z_sun A09), dln S_X/dln Mdot and "
+          "dln S_X/dln Edot; pixels fainter than the median of the emitting pixels blanked. Local (linear) response: "
+          "valid for changes of the loading below ~1 % (SXTangentFDCheck)"),
+         ["A-256 sensitivity"]),
         ("xray_cgols_vs_A", FIGURES / "comparisons" / "xray_cgols_vs_A.png", "cgols_cholla_compare.py",
          ("Public CGOLS I 2048^3 state against our A-2048, both at 60 Myr, same emission pipeline: minor-axis "
           "0.3-1 keV absorbed photon profile against Strickland+04, L_X-weighted n-T distributions (CGOLS recipe), "

@@ -405,8 +405,8 @@ def plot_xray_maps(sx, extent_xz, out, model="sx_atomdb", rel_lim=None):
     safe = np.where(s0 > floor, s0, np.nan)
     rel_M, rel_E = dM / safe, dE / safe
     lim = rel_lim or max(_sym_limit(rel_M), _sym_limit(rel_E))
-    label = {"sx_atomdb": r"$S_X$, 0.3-1 keV photons [ph s$^{-1}$ cm$^{-2}$ sr$^{-1}$ $\times$ unit]",
-             "sx_cgols": r"$S_X$, CGOLS I recipe [erg s$^{-1}$ cm$^{-2}$ $\times$ unit]"}[model]
+    label = {"sx_atomdb": r"$S_X$, absorbed 0.3-1 keV [photons s$^{-1}$ cm$^{-2}$ sr$^{-1}$]",
+             "sx_cgols": r"$S_X$, CGOLS I recipe [erg s$^{-1}$ cm$^{-2}$ sr$^{-1}$]"}[model]
     fig, ax = plt.subplots(1, 3, figsize=(13.5, 6.4), constrained_layout=True)
     panels = (
         (np.clip(s0, 1e-30, None), {"cmap": "magma", "norm": LogNorm(vmin=max(floor * 1e-2, 1e-30), vmax=np.nanmax(s0))},
