@@ -369,7 +369,7 @@ def numbers():
         )  # fmt: skip
 
     # Minor-axis soft X-ray profile against Strickland et al. (2004), 0.3-1.0 keV absorbed photons.
-    photon = {tag: emission(tag, SX_SUFFIX) for tag in ("A512", "A1024", "A2048", "C1024")}
+    photon = {tag: emission(tag, SX_SUFFIX) for tag in ("A512", "A1024", "A2048", "C256", "C512", "C1024")}
     missing = [tag for tag, (cache, _) in photon.items() if cache is None]
     if missing:
         print(f"skipped ScaleHeight*/SXratio*: no 0.3-1.0 keV photon caches for {missing} ({SX_SUFFIX})")
@@ -377,7 +377,7 @@ def numbers():
         sx_text = ("AtomDB 3.1.3 0.3-1.0 keV photons after TBabs absorption by N_H = 4e20 cm^-2 (Galactic, toward "
                    "M82), edge-on x-z projection, north")  # fmt: skip
         for key, tags, run in (("ScaleHeightA", ("A512", "A1024", "A2048"), "A-2048"),
-                               ("ScaleHeightCTenTwentyFour", ("C1024",), "C-1024")):  # fmt: skip
+                               ("ScaleHeightCTenTwentyFour", ("C256", "C512", "C1024"), "C-1024")):  # fmt: skip
             heights = {LABEL[t]: scale_height(photon[t][0]) for t in tags}
             verdict, text = ladder(heights)
             yield key, dict(
@@ -386,7 +386,8 @@ def numbers():
                             f"log S_X over 0.5-5 kpc, 60 Myr, {run}; {sx_text}. Strickland+04 north: 1.42 kpc.{text}",
                 runs=[run], data=photon[tags[-1]][1],
             )  # fmt: skip
-        for model, tags, suffix in (("A", ("A512", "A1024", "A2048"), ""), ("C", ("C1024",), "TenTwentyFour")):
+        for model, tags, suffix in (("A", ("A512", "A1024", "A2048"), ""),
+                                    ("C", ("C256", "C512", "C1024"), "TenTwentyFour")):  # fmt: skip
             for z0, word in ((2.0, "two"), (5.0, "five")):
                 ratios = {LABEL[t]: sx_ratio(photon[t][0], z0)[0] for t in tags}
                 count = sx_ratio(photon[tags[-1]][0], z0)[1]
