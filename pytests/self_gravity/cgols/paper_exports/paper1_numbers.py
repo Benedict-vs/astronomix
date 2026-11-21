@@ -459,6 +459,7 @@ def numbers():
     yield from numbers_v6()
     yield from numbers_v7()
     yield from numbers_v7_sensitivity()
+    yield from numbers_v8()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -1198,6 +1199,68 @@ def numbers_v7_sensitivity():
         runs=["A-256 sensitivity", "A-128 sensitivity"],
         data=[STUDIES / f"cgols_sensitivity_d256_t30myr{s}.npz" for s in ("", "_x64")],
         script=CGOLS / "cgols_sensitivity.py",
+    )  # fmt: skip
+
+
+# --------------------------------------------------------------------------- numbers, v8 (asgard-papers #4, PR #14)
+DISC_PHASES = ("cold", "warm", "hot")  # cgols_convergence_3d PHASE_EDGES_K = (3e4, 5e5)
+
+
+def numbers_v8():
+    """Yield (key, kwargs for export_number) for the X-ray tangent check (#4) and the N = 1000 keys of PR #14."""
+    fd_path = STUDIES / "cgols_sensitivity_d128_t30myr_x64_xray_fdcheck_eps0.002-0.001.npz"
+    fd_coarse = STUDIES / "cgols_sensitivity_d128_t30myr_x64_xray_fdcheck_eps0.05-0.005.npz"
+    if fd_path.is_file() and fd_coarse.is_file():
+        fd = {**dict(np.load(fd_coarse)), **dict(np.load(fd_path))}
+
+        def m(name, region, eps, key):
+            return float(fd[f"fdcheck__{name}__{region}__eps{eps:g}__{key}"])
+
+        ladder_text = ", ".join(f"{m('sx_atomdb', 'all', e, 'median_rel_err'):.0%} at {e:g}"
+                                for e in (0.05, 0.02, 0.01, 0.005, 0.002, 0.001))  # fmt: skip
+        yield "SXTangentFDCheck", dict(
+            value=100.0 * m("sx_atomdb", "all", 0.001, "median_rel_err"), unit="percent", status="provisional",
+            convergence=None, digits=2,
+            description="Median relative error of the forward-mode tangent dS_X/dln Mdot of the edge-on soft X-ray map "
+                        "(AtomDB 0.3-1.0 keV photons after N_H = 4e20, Z = Z_sun A09) against the central finite "
+                        "difference [S(1 + eps) - S(1 - eps)] / 2 eps with eps = 1e-3, over the 300 pixels with the "
+                        "largest tangent; model A, 128^3, float64, 30 Myr. Correlation "
+                        f"{m('sx_atomdb', 'all', 0.001, 'corr'):.3f}, slope FD/AD {m('sx_atomdb', 'all', 0.001, 'slope'):.3f}; "
+                        f"halo |z| > 1 kpc: {m('sx_atomdb', 'halo', 0.001, 'median_rel_err'):.1%}. The error falls with "
+                        f"eps ({ladder_text}): S_X responds linearly only to changes of the loading below ~1 %. Sigma "
+                        f"for comparison: {m('sigma', 'all', 0.001, 'median_rel_err'):.1%}. The CGOLS recipe's hard "
+                        "temperature window gives a tangent uncorrelated with the finite differences (correlation "
+                        f"{m('sx_cgols', 'all', 0.001, 'corr'):.2f} at eps = 1e-3).",
+            runs=["A-128 sensitivity"], data=[fd_coarse, fd_path], script=CGOLS / "cgols_sensitivity.py",
+        )  # fmt: skip
+
+    disc = {}
+    for tag in ("C1024", "C1024n1000"):
+        times, recs, _ = records("convergence3d_v3_", tag)
+        disc[tag] = (np.asarray(recs[-1]["mass_disk"], dtype=float), float(times[-1]),
+                     float(np.sum(recs[0]["mass_disk"])), float(times[0]))  # fmt: skip
+    n1k, n16 = disc["C1024n1000"], disc["C1024"]
+    phases = lambda a: ", ".join(f"{ph} {v:.3g}" for ph, v in zip(DISC_PHASES, a))
+    yield "DiscMassCthousand", dict(
+        value=float(n1k[0].sum()), unit="Msun", status="provisional", convergence="unknown",
+        description=f"Gas mass at |z| < 0.5 kpc at {n1k[1]:.0f} Myr, C-1024 with N = 1000 (one resolution); "
+                    f"{n1k[2]:.3g} Msun at {n1k[3]:.1f} Myr, before the feedback onset. By temperature (< 3e4 K / "
+                    f"3e4-5e5 K / > 5e5 K): {phases(n1k[0])} Msun. N = 16 at the same time: {n16[0].sum():.3g} Msun "
+                    f"({phases(n16[0])}), so N = 1000 leaves {100 * (1 - n1k[0].sum() / n16[0].sum()):.0f} % less disc "
+                    "gas but more cold gas. No radial split in this cache.",
+        runs=["C-1024 (N = 1000)", "C-1024"], data=[STUDIES / f"convergence3d_v3_{t}.npz" for t in disc],
+    )  # fmt: skip
+
+    c16, path16 = emission("C1024")
+    c1k, path1k = emission("C1024n1000")
+    means = {k: (float(c["per_snapshot__L_xray_cgols_xz"][window(c["per_snapshot__time_myr"], BURST)].mean()),
+                 int(window(c["per_snapshot__time_myr"], BURST).sum())) for k, c in (("16", c16), ("1000", c1k))}  # fmt: skip
+    yield "LxBurstMeanRatioCthousand", dict(
+        value=means["1000"][0] / means["16"][0], unit="", status="provisional", convergence="unknown",
+        description=f"L_X(N = 1000) / L_X(N = 16), means over (15, 40] Myr ({means['1000'][1]} and {means['16'][1]} "
+                    f"snapshots), C-1024, CGOLS I recipe: {means['1000'][0]:.3g} / {means['16'][0]:.3g} erg/s. "
+                    "One resolution. The single 15 Myr snapshot ratio is LxBurstRatioCthousand.",
+        runs=["C-1024", "C-1024 (N = 1000)"], data=[path16, path1k],
     )  # fmt: skip
 
 
