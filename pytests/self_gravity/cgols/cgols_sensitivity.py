@@ -60,6 +60,8 @@ Env knobs:
                        everywhere; the CGOLS window is a step in T, so its tangent
                        misses cells that cross a window edge (the finite-difference
                        check measures how much that matters).
+    CGOLS_SENS_FD_EPS  finite-difference steps, comma-separated (default 0.05)
+    CGOLS_SENS_FDONLY  1 = only the finite-difference check (writes <tag>_fdcheck.npz)
     CGOLS_SENS_PLOT_ONLY 1 = redraw the figures from the npz of this tag, no run
     CGOLS_FIGURE_TITLES  0 = figures without the figure-level title (paper)
 """
@@ -122,6 +124,9 @@ from cgols import (
 T_END_MYR = float(os.environ.get("CGOLS_SENS_TMYR", "18"))
 FDCHECK = os.environ.get("CGOLS_SENS_FDCHECK", "0") == "1"
 XRAY = os.environ.get("CGOLS_SENS_XRAY", "0") == "1"
+#: steps of the central finite differences (comma-separated), and whether to stop after the check
+FD_EPS = tuple(float(e) for e in os.environ.get("CGOLS_SENS_FD_EPS", "0.05").split(","))
+FD_ONLY = os.environ.get("CGOLS_SENS_FDONLY", "0") == "1"
 PLOT_ONLY = os.environ.get("CGOLS_SENS_PLOT_ONLY", "0") == "1"
 TITLES = os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0"
 #: AtomDB model of the X-ray maps: the band, absorbing column and metallicity of the
@@ -272,9 +277,9 @@ def compute_sensitivities(f, xray=None):
     return (sigma0, n_mid0, tan_M[0], tan_M[1], tan_E[0], tan_E[1], sx)
 
 
-def finite_difference_check(f, xray=None, eps=0.05, k=300):
-    """Validate the mass-loading jvp against a central finite difference, on the
-    top-k highest-|tangent| pixels.
+def finite_difference_check(f, xray=None, eps_list=(0.05,), k=300, z=None, halo_z_kpc=1.0):
+    """Validate the mass-loading jvp against central finite differences, on the
+    top-k highest-|tangent| pixels, for each step in eps_list.
 
     The high-*column* disk pixels are NOT a meaningful test: the projection
     Sigma = sum_y n is a sum of ~10^21 terms in float32, so the ~O(1%) perturbed
@@ -283,7 +288,15 @@ def finite_difference_check(f, xray=None, eps=0.05, k=300):
     injection region carry the signal well above that floor (SNR ~10^3), so the
     finite difference is trustworthy there. Mass loading (not energy) is used
     because it barely perturbs the CFL timestep, so the two forward runs share
-    the adaptive step schedule and no discretisation jump contaminates the fd."""
+    the adaptive step schedule and no discretisation jump contaminates the fd.
+
+    A map that responds strongly (|dln S/dln Mdot| of several, as S_X near the
+    injection region) is nonlinear over a 5 % step, so the central difference is a
+    secant there; the error must then fall with eps if the tangent is right. With z
+    (cell-centre z [kpc]) the metrics are also given for the halo, |z| > halo_z_kpc.
+
+    Returns (metrics, arrays): metrics[name][region][eps] = dict of numbers; arrays =
+    the tangent and the +/- maps of every eps, for the npz."""
     theta0 = jnp.array([1.0, 1.0])
     f_jit = jax.jit(f)
 
@@ -299,27 +312,33 @@ def finite_difference_check(f, xray=None, eps=0.05, k=300):
     primal, tangent = jax.jit(lambda th: jax.jvp(f, (th,), (jnp.array([1.0, 0.0]),)))(theta0)
     tangent = maps(tangent, xray_jvp(primal[2], tangent[2])[1] if xray else None)
     del primal
-    plus = maps(f_jit(jnp.array([1.0 + eps, 1.0])))
-    minus = maps(f_jit(jnp.array([1.0 - eps, 1.0])))
-    result = {}
-    for name in tangent:
-        ad = tangent[name].ravel()
-        fd = ((plus[name] - minus[name]) / (2 * eps)).ravel()
-        idx = np.argsort(np.abs(ad))[-k:]          # top-k by |analytic tangent|
-        a, d = ad[idx], fd[idx]
-        rel = np.abs(a - d) / np.maximum(np.abs(a), np.abs(d))
-        corr = float(np.corrcoef(a, d)[0, 1])
-        slope = float(np.polyfit(a, d, 1)[0])      # fd ~ slope * ad, expect ~1
-        # whole-map agreement of the relative tangents where the map is bright (top 1 % of pixels)
-        bright = plus[name].ravel() + minus[name].ravel() > 2 * np.nanpercentile(plus[name], 99)
-        rel_l2 = float(np.linalg.norm((ad - fd)[bright]) / np.linalg.norm(fd[bright])) if bright.any() else np.nan
-        result[name] = {"median_rel_err": float(np.median(rel)), "corr": corr, "slope": slope, "rel_l2_bright": rel_l2}
-        print(
-            f"[fd-check] {name}: mass-loading jvp vs central diff (eps={eps}, top-{k} "
-            f"|tangent| px): median rel.err {np.median(rel):.2%}, corr {corr:.4f}, "
-            f"slope(fd/ad) {slope:.3f}; rel. L2 over the brightest 1 % of pixels {rel_l2:.2%}"
-        )
-    return result
+    arrays = {f"fdmap__{name}__ad": v for name, v in tangent.items()}
+    regions = {"all": None}
+    if z is not None:
+        regions["halo"] = np.broadcast_to(np.abs(np.asarray(z))[None, :] > halo_z_kpc,
+                                          next(iter(tangent.values())).shape).ravel()
+    metrics = {name: {region: {} for region in regions} for name in tangent}
+    for eps in eps_list:
+        plus = maps(f_jit(jnp.array([1.0 + eps, 1.0])))
+        minus = maps(f_jit(jnp.array([1.0 - eps, 1.0])))
+        for name in tangent:
+            arrays[f"fdmap__{name}__plus_{eps:g}"] = plus[name]
+            arrays[f"fdmap__{name}__minus_{eps:g}"] = minus[name]
+            ad_all = tangent[name].ravel()
+            fd_all = ((plus[name] - minus[name]) / (2 * eps)).ravel()
+            for region, mask in regions.items():
+                ad = ad_all if mask is None else np.where(mask, ad_all, 0.0)
+                idx = np.argsort(np.abs(ad))[-k:]          # top-k by |analytic tangent| in the region
+                a, d = ad_all[idx], fd_all[idx]
+                rel = np.abs(a - d) / np.maximum(np.abs(a), np.abs(d))
+                corr = float(np.corrcoef(a, d)[0, 1])
+                slope = float(np.polyfit(a, d, 1)[0])      # fd ~ slope * ad, expect ~1
+                m = {"median_rel_err": float(np.median(rel)), "corr": corr, "slope": slope}
+                metrics[name][region][eps] = m
+                print(f"[fd-check] {name} {region}: mass-loading jvp vs central diff (eps={eps:g}, top-{k} "
+                      f"|tangent| px): median rel.err {m['median_rel_err']:.2%}, corr {corr:.4f}, "
+                      f"slope(fd/ad) {slope:.3f}")
+    return metrics, arrays
 
 
 def plot_maps(sigma0, n_mid0, dsig_dM, dsig_dE, extent_xz, out):
@@ -465,7 +484,16 @@ if __name__ == "__main__":
     f, xray, config, params, rv = build_pipeline()
     x, y, z, extent_xz, _ = _snapshot_grid(config)
 
-    fd_result = finite_difference_check(f, xray) if FDCHECK else None
+    fd_result, fd_arrays = (finite_difference_check(f, xray, FD_EPS, z=np.asarray(z)) if FDCHECK
+                            else (None, {}))
+    if FD_ONLY:
+        extra = {f"fdcheck__{name}__{region}__eps{eps:g}__{key}": np.float64(v)
+                 for name, by_region in fd_result.items() for region, by_eps in by_region.items()
+                 for eps, r in by_eps.items() for key, v in r.items()}
+        fd_path = _data_study(f"cgols_sensitivity{TAG}_fdcheck.npz")
+        np.savez(fd_path, **fd_arrays, **extra, z=np.asarray(z), x=np.asarray(x))
+        print(f"Wrote {fd_path}")
+        raise SystemExit(0)
 
     print("Running forward-mode jvp through the solver (compiles on first pass)...")
     t_start = time.perf_counter()
@@ -503,9 +531,9 @@ if __name__ == "__main__":
             plot_xray_maps(sx, extent_xz, _study_fig(f"sensitivity_xray_{model[3:]}{TAG}.png"), model)
     extra = {}
     if fd_result:
-        for name, r in fd_result.items():
-            for key, v in r.items():
-                extra[f"fdcheck__{name}__{key}"] = np.float64(v)
+        extra = {f"fdcheck__{name}__{region}__eps{eps:g}__{key}": np.float64(v)
+                 for name, by_region in fd_result.items() for region, by_eps in by_region.items()
+                 for eps, r in by_eps.items() for key, v in r.items()}
     np.savez(
         npz_path,
         **sx, **extra,
