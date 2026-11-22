@@ -461,6 +461,7 @@ def numbers():
     yield from numbers_v7()
     yield from numbers_v7_sensitivity()
     yield from numbers_v8()
+    yield from numbers_v10()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -1268,6 +1269,152 @@ def numbers_v8():
 # --------------------------------------------------------------------------- figures
 
 
+# --------------------------------------------------------------------------- numbers, v10 (asgard-papers #9, #3, #16)
+SFR_MSUN_YR = 20.0  # star-formation rate for eta = Mdot / SFR (Tobias, asgard-papers #3, 21 Nov)
+MIDPLANE_BIN_DEG = 80.0  # shells_v2 has 10 deg polar-angle bins: the last one, 80-90 deg, holds the mid-plane
+
+
+def sensitivity_xray_stats(path):
+    """Halo and box statistics of the X-ray sensitivity maps (cgols_sensitivity.py with CGOLS_SENS_XRAY=1)."""
+    d = np.load(path)
+    s0 = d["sx_atomdb0"]
+    zz = np.broadcast_to(np.abs(d["z"])[None, :], s0.shape)
+    bright = s0 > np.nanpercentile(s0[s0 > 0], 50)  # the blanking of the maps
+    stats = {"inner": float(s0[zz < 0.5].sum() / s0.sum())}
+    for k in ("M", "E"):
+        tangent = d[f"dsx_atomdb_d{k}"]
+        stats[f"box_{k}"] = float(tangent.sum() / s0.sum())
+        stats[f"halo_{k}"] = float(tangent[zz > 1.0].sum() / s0[zz > 1.0].sum())
+        for name, sel in (("halo", bright & (zz > 1.0)), ("low", bright & (zz > 1.0) & (zz < 3.0)),
+                          ("high", bright & (zz > 3.0))):  # fmt: skip
+            rel = tangent[sel] / s0[sel]
+            stats[f"positive_{name}_{k}"] = float((rel > 0).mean())
+            stats[f"median_{name}_{k}"] = float(np.median(rel))
+    return stats
+
+
+def shell_midplane_share(tag, bounds, radius_kpc=5.0):
+    """Share of the net outflow through the sphere r that crosses it within 10 deg of the mid-plane."""
+    i = shell_index(radius_kpc)
+    times, recs, _ = records("shells_v2_", tag)
+    sel = window(np.asarray(times), bounds)
+    full = np.mean([np.sum(r["mdot_net"][:, i]) for r, s in zip(recs, sel) if s])
+    n_theta = int(MIDPLANE_BIN_DEG / 10.0)
+    cut = np.mean([np.sum(r["mdot_net"][:, i, :n_theta]) for r, s in zip(recs, sel) if s])
+    return float(1.0 - cut / full)
+
+
+def numbers_v10():
+    """Yield (key, kwargs for export_number) for the sensitivity keys of #9, eta of #3 and the rings of #16."""
+    paths = {res: STUDIES / f"cgols_sensitivity_d{res}_t30myr_x64_xray.npz" for res in (128, 256)}
+    if all(path.is_file() for path in paths.values()):
+        st = {res: sensitivity_xray_stats(path) for res, path in paths.items()}
+        a, b = st[256], st[128]
+        model = ("model A, 256^3, float64, 30 Myr, edge-on x-z map in AtomDB 0.3-1.0 keV photons after N_H = 4e20 "
+                 "cm^-2 (Z = Z_sun A09), forward-mode tangents (cgols_sensitivity.py)")  # fmt: skip
+        rings = STUDIES / "sensitivity_rings_A.npz"
+        beam = ""
+        if rings.is_file():
+            r = np.load(rings)
+            beam = (f" In a 312 pc beam, which removes the numerical rings (SensRingWavelengthCells): "
+                    f"{100 * float(r['beam312__halo_positive_fraction']):.0f} %, median "
+                    f"{float(r['beam312__halo_median']):+.2f}.")  # fmt: skip
+        yield "SXsensEdotPositiveFraction", dict(
+            value=100.0 * a["positive_halo_E"], unit="percent", status="provisional", convergence=None,
+            description=f"Fraction of the halo pixels (|z| > 1 kpc, brighter than the median emitting pixel, as "
+                        f"plotted) with dln S_X/dln Edot > 0; {model}. Median {a['median_halo_E']:+.2f}; at 1-3 kpc "
+                        f"{100 * a['positive_low_E']:.0f} % (median {a['median_low_E']:+.2f}), at |z| > 3 kpc "
+                        f"{100 * a['positive_high_E']:.0f} % (median {a['median_high_E']:+.2f}). 128^3: "
+                        f"{100 * b['positive_halo_E']:.0f} %.{beam} Mass loading for comparison: dln S_X/dln Mdot > 0 "
+                        f"in {100 * a['positive_low_M']:.0f} % at 1-3 kpc (median {a['median_low_M']:+.2f}) and "
+                        f"{100 * a['positive_high_M']:.0f} % at |z| > 3 kpc (median {a['median_high_M']:+.2f}).",
+            runs=["A-256 sensitivity"], data=paths[256], script=CGOLS / "cgols_sensitivity.py",
+        )  # fmt: skip
+        for k, word, name in (("M", "Mdot", "mass"), ("E", "Edot", "energy")):
+            yield f"LxSens{word}", dict(
+                value=a[f"box_{k}"], unit="", status="provisional", convergence=None, digits=2,
+                description=f"d ln L_X / d ln {word}: response of the soft X-ray luminosity of the whole box to the "
+                            f"{name} loading, sum of the tangent map over the sum of S_X; {model}. Halo |z| > 1 kpc: "
+                            f"{a[f'halo_{k}']:+.2f}. 128^3: box {b[f'box_{k}']:+.2f}, halo {b[f'halo_{k}']:+.2f}: the sign is the "
+                            f"same at both resolutions, the size is not converged. Dominated by |z| < 0.5 kpc "
+                            f"(SXinnerFraction).",
+                runs=["A-256 sensitivity"], data=paths[256], script=CGOLS / "cgols_sensitivity.py",
+            )  # fmt: skip
+        yield "SXinnerFraction", dict(
+            value=100.0 * a["inner"], unit="percent", status="single_snapshot", convergence=None,
+            description=f"Share of the soft X-ray luminosity of the box from |z| < 0.5 kpc; {model} (the unperturbed "
+                        f"run of the sensitivity maps). 128^3: {100 * b['inner']:.0f} %.",
+            runs=["A-256 sensitivity"], data=paths[256], script=CGOLS / "cgols_sensitivity.py",
+        )  # fmt: skip
+    else:
+        print(f"skipped SXsens*/LxSens*/SXinnerFraction: missing {[str(p) for p in paths.values() if not p.is_file()]}")
+
+    photon = {t: emission(t, SX_SUFFIX) for t in ("C512", "C1024")}
+    if all(cache is not None for cache, _ in photon.values()):
+        changes = {z0: sx_ratio(photon["C1024"][0], z0)[0] / sx_ratio(photon["C512"][0], z0)[0] - 1.0
+                   for z0 in (2.0, 5.0)}  # fmt: skip
+        largest = max(changes.values(), key=abs)
+        yield "SXratioCchange", dict(
+            value=100.0 * abs(largest), unit="percent", status="not_converged", convergence=None,
+            description="Largest relative change of SXratioCtwoKpcTenTwentyFour and SXratioCfiveKpcTenTwentyFour from "
+                        f"C-512 to C-1024: {100 * changes[2.0]:+.1f} % at 2 kpc, {100 * changes[5.0]:+.1f} % at 5 kpc "
+                        "(both rising, towards M82). Compare SXratioAchange.",
+            runs=["C-512", "C-1024"], data=[photon["C512"][1], photon["C1024"][1]],
+        )  # fmt: skip
+
+    five = shell_index(5.0)
+    early = {LABEL[t]: record_mean("shells_v2_", t, EARLY, lambda r: np.sum(r["mdot_net"][:, five]))
+             for t in ("A512", "A1024", "A2048")}  # fmt: skip
+    eta = {label: value / SFR_MSUN_YR for label, value in early.items()}
+    verdict, text = ladder(eta)
+    mid = {t: shell_midplane_share(t, EARLY) for t in ("A512", "A1024", "A2048")}
+    burst_a = record_mean("shells_v2_", "A2048", BURST, lambda r: np.sum(r["mdot_net"][:, five]))
+    yield "EtaMAfiveKpc", dict(
+        value=eta["A-2048"], unit="", status=verdict, convergence=verdict, uncertainty=value_range(eta),
+        description=f"Mass loading eta = Mdot / SFR with SFR = {SFR_MSUN_YR:g} Msun/yr: ShellMdotAfiveKpcEarly (net "
+                    f"outflow through the full sphere r = 5 kpc, 15-30 Myr) / SFR, A-2048. Over 15-40 Myr: "
+                    f"{burst_a / SFR_MSUN_YR:.2f}. Mid-plane: the net flow within 10 deg of the mid-plane (80-90 deg "
+                    f"from the pole) carries {', '.join(f'{100 * v:.1f} %' for v in mid.values())} of it at "
+                    f"512/1024/2048^3, so leaving out 5 deg on each side, as CGOLS V do, lowers eta by less than "
+                    f"{100 * mid['A2048']:.1f} % (about half of that if the flow is uniform in solid angle).{text}",
+        runs=["A-2048"], data=STUDIES / "shells_v2_A2048.npz",
+    )  # fmt: skip
+    c = {t: (record_mean("shells_v2_", t, EARLY, lambda r: np.sum(r["mdot_net"][:, five])),
+             record_mean("shells_v2_", t, BURST, lambda r: np.sum(r["mdot_net"][:, five])),
+             shell_midplane_share(t, EARLY)) for t in ("C1024", "C1024n1000")}  # fmt: skip
+    yield "EtaMCfiveKpcTenTwentyFour", dict(
+        value=c["C1024"][0] / SFR_MSUN_YR, unit="", status="provisional", convergence="unknown",
+        description=f"Mass loading eta = Mdot / SFR with SFR = {SFR_MSUN_YR:g} Msun/yr, net outflow through the full "
+                    f"sphere r = 5 kpc over 15-30 Myr (the window of EtaMAfiveKpc; checkpoints every 2.5 Myr), "
+                    f"C-1024 (N = 16), one resolution. Over 15-40 Myr: {c['C1024'][1] / SFR_MSUN_YR:.2f}. N = 1000: "
+                    f"{c['C1024n1000'][0] / SFR_MSUN_YR:.2f} (15-30 Myr), {c['C1024n1000'][1] / SFR_MSUN_YR:.2f} "
+                    f"(15-40 Myr). Within 10 deg of the mid-plane: {100 * c['C1024'][2]:.1f} % (N = 16), "
+                    f"{100 * c['C1024n1000'][2]:.1f} % (N = 1000).",
+        runs=["C-1024", "C-1024 (N = 1000)"], data=[STUDIES / "shells_v2_C1024.npz", STUDIES / "shells_v2_C1024n1000.npz"],
+    )  # fmt: skip
+
+    rings = STUDIES / "sensitivity_rings_A.npz"
+    if rings.is_file():
+        r = {k: float(v) for k, v in np.load(rings).items()}
+        yield "SensRingWavelengthCells", dict(
+            value=r["peak_cells__sx_dE__256"], unit="", status="provisional", convergence=None, digits=2,
+            description="Radial wavelength of the rings in the sensitivity maps, in cells: peak of the radial power "
+                        "spectrum of dln S_X/dln Edot along rays 20-75 deg from the minor axis, r = 1.5-5 kpc, model "
+                        f"A, 30 Myr, float64. 256^3: {1e3 * r['peak_kpc__sx_dE__256']:.0f} pc = "
+                        f"{r['peak_cells__sx_dE__256']:.1f} cells; 128^3: {1e3 * r['peak_kpc__sx_dE__128']:.0f} pc = "
+                        f"{r['peak_cells__sx_dE__128']:.1f} cells. The wavelength follows the cell size, so the rings "
+                        "are numerical, not waves of fixed physical size. The central finite-difference maps "
+                        "(eps = 1e-3, 128^3) carry the same rings "
+                        f"({r['fd_over_ad_band_power__sx_atomdb']:.2f} of the tangent's power at 5-10 cells), so they "
+                        "are in the response of the discrete solution, not an error of the tangent. A 312 pc beam "
+                        f"removes them (ring-band power share {r['beam0__band_share']:.2f} -> "
+                        f"{r['beam312__band_share']:.2f}) without changing the halo statistics.",
+            runs=["A-128 sensitivity", "A-256 sensitivity"], data=rings, script=CGOLS / "cgols_sensitivity_rings.py",
+        )  # fmt: skip
+    else:
+        print(f"skipped SensRingWavelengthCells: no {rings} (run cgols_sensitivity_rings.py)")
+
+
 def figures():
     """Yield (key, path, kwargs for export_figure)."""
     sx_a = FIGURES / "emission" / f"A2048{SX_SUFFIX}_sx_profile.png"
@@ -1311,6 +1458,18 @@ def figures():
           "dln S_X/dln Edot; pixels fainter than the median of the emitting pixels blanked. Local (linear) response: "
           "valid for changes of the loading below ~1 % (SXTangentFDCheck)"),
          ["A-256 sensitivity"]),
+        ("sensitivity_Lx_A256_beam", FIGURES / "studies" / "sensitivity_xray_atomdb_d256_t30myr_x64_xray_beam312.png",
+         "cgols_sensitivity_rings.py",
+         ("sensitivity_Lx_A256 in a Gaussian beam of FWHM 312 pc: S_X, dln S_X/dln Mdot and dln S_X/dln Edot, each "
+          "map and tangent smoothed before the ratio (the log-derivative of the smoothed map); the beam removes the "
+          "numerical rings (SensRingWavelengthCells) and keeps the cone walls; blanking as in sensitivity_Lx_A256"),
+         ["A-256 sensitivity"]),
+        ("sensitivity_rings_A", FIGURES / "studies" / "sensitivity_rings_A.png", "cgols_sensitivity_rings.py",
+         ("The rings in the sensitivity maps, model A, 30 Myr, float64: top, dln S_X/dln Edot at 128^3 and 256^3, "
+          "256^3 in a 312 pc beam, and dln S_X/dln Mdot at 128^3 from the tangent and from central differences "
+          "(eps = 1e-3); bottom, radial power spectra against wavelength in pc and in cells, and the peak wavelength "
+          "of dln Sigma/dln Edot at 8, 30 and 45 Myr (128^3)"),
+         ["A-128 sensitivity", "A-256 sensitivity"]),
         ("xray_cgols_vs_A", FIGURES / "comparisons" / "xray_cgols_vs_A.png", "cgols_cholla_compare.py",
          ("Public CGOLS I 2048^3 state against our A-2048, both at 60 Myr, same emission pipeline: minor-axis "
           "0.3-1 keV absorbed photon profile against Strickland+04, L_X-weighted n-T distributions (CGOLS recipe), "
