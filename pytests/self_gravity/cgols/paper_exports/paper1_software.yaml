@@ -1,0 +1,87 @@
+# Software versions and the astronomix commit of every run that Paper I uses (asgard-papers #19).
+# Read by paper1_numbers.py and written to the manifest as the top-level `software_versions` block;
+# short commits are expanded there and must exist in the repository.
+#
+# Sources: the environment header and "commit:" / "code copy of:" lines of the HoreKa job logs
+# (cgols_logs/horeka/), the start lines of the local run logs (cgols_logs/aprod_local.log,
+# gpu2_runs.log, c512_sweep.log, ~/.gpuq/*/gpuq.log), the launch commands in the Claude session
+# transcripts and the git reflogs of the checkouts (reconstruction of 23 Nov 2026).
+# confidence: certain = commit logged at launch or checkout state at launch read back;
+# likely = reported second-hand (JUPITER) or inferred from timestamps.
+#
+# All commits are on main of the fork. Between them the finite-difference hydro solver used by
+# models A and C is unchanged; the commits differ by opt-in additions (model C cluster options,
+# FV reconstruction and sharding, cooling, MHD, in-situ emission maps, float64 mode).
+
+jax: 0.10.1
+jaxlib: 0.10.1
+cuda: "12.9 (nvcc 12.9.86)"
+python: "3.12 (HoreKa, local GPU server); 3.13 (JUPITER)"
+orbax_checkpoint: 0.12.1
+astronomix_package_version: 0.6.6
+astronomix_repository: https://github.com/Benedict-vs/astronomix
+astronomix_release: null  # no Zenodo release contains these commits yet (latest: alpha, 10.5281/zenodo.17782162)
+
+# Labels used in the manifest that are not single runs of ours.
+not_runs:
+  - all
+  - "CGOLS I 2048^3 (public)"
+  - "FD/FV 128-2048"
+
+runs:
+  A-128: {commit: d9a2d47, machine: local, evidence: "aprod_local.log 10-21 11:55 start (d9a2d47)", confidence: certain}
+  A-256: {commit: 46d4e86, machine: local, evidence: "aprod_local.log 10-21 18:03 gpuq start (46d4e86)", confidence: certain}
+  A-512: {commit: d9a2d47, machine: local, evidence: "aprod_local.log 10-21 11:55 start (d9a2d47)", confidence: certain}
+  A-1024: {commit: 8d0c07f, machine: HoreKa, job: "93951", evidence: job log, confidence: certain}
+  A-2048: {commit: 8d0c07f, machine: HoreKa, job: "96655-96657", evidence: job log, confidence: certain}
+  FD-512: {same_as: A-512}
+  FD-1024: {same_as: A-1024}
+  FD-2048: {same_as: A-2048}
+  A-1024 seed 1: {commit: 494d1b5, commit_extra: 150f50f, machine: HoreKa, job: "127497",
+                  evidence: "job log: code copy of 494d1b5 + 150f50f (sharded seed noise only)", confidence: certain}
+  FV-256: {commit: 2bedf22, machine: local, evidence: "worktree cgols-fv-test reflog, frames 10-21 19:13-19:26", confidence: certain}
+  FV-512: {commit: 7d2ea50, machine: local, evidence: "gpu2_runs.log 10-23 12:15 start (7d2ea50)", confidence: certain}
+  FV-512 fp64: {commit: 040f46e, machine: local, evidence: "gpu2_runs.log 10-23 09:58 start (040f46e)", confidence: certain}
+  FV-512 HLLE: {commit: c2991bd, machine: local, evidence: "~/.gpuq/fvabl_gpu0/gpuq.log 10-26 14:12 and main reflog", confidence: likely}
+  FV-256 PPM: {commit: b834d0f, machine: HoreKa, job: "112240", evidence: "code copy at b834d0f (job ledger)", confidence: likely}
+  FV-512 PPM: {commit: b834d0f, machine: HoreKa, job: "112241", evidence: "code copy at b834d0f (job ledger)", confidence: likely}
+  FV-1024: {commit: b834d0f, machine: HoreKa, job: "106337, 112110 (bit-identical rerun)", evidence: "code copy at b834d0f (job ledger)", confidence: likely}
+  FV-2048: {commit: 2ce69fa, machine: HoreKa, job: "112293", evidence: "job log: code copy of 2ce69fa", confidence: certain}
+  FV-2048 seed 1: {commit: 494d1b5, commit_extra: 150f50f, machine: HoreKa, job: "127485",
+                   evidence: "job log: code copy of 494d1b5 + 150f50f", confidence: certain}
+  C-256: {commit: 36bd897, machine: local, evidence: "worktree launch 10-22 12:24, physical default preset", confidence: certain}
+  C-512: {commit: 7d2ea50, machine: local, evidence: "gpu2_runs.log 10-23 13:41 start (7d2ea50)", confidence: certain}
+  C-1024: {commit: 32a89bc, machine: HoreKa, job: "112298", evidence: job log, confidence: certain}
+  C-1024 (N = 1000): {commit: ea9309a, machine: HoreKa, job: "128952", evidence: "job log: code copy of ea9309a", confidence: certain}
+  C-256 N = 16 (3 realisations):
+    commits: {C-256: 36bd897, "seeds 2, 3": d5d3386}
+    machine: "local (C-256), JUPITER 2456153-2456156 (seeds)"
+    evidence: "seeds: JUPITER session report (repo kept at d5d3386)"
+    confidence: likely
+  C-256 N = 64 (3 realisations):
+    commits: {"N = 64": d5d3386, "seeds 2, 3": d5d3386}
+    machine: "JUPITER 2454479, 2456153-2456156"
+    evidence: "JUPITER session report (repo at d5d3386)"
+    confidence: likely
+  C-512 N = 1: {commit: 7d2ea50, machine: local, evidence: "c512_sweep.log 10-23 19:52", confidence: certain}
+  C-512 N = 4: {commit: 7d2ea50, machine: local, evidence: "c512_sweep.log 10-24 01:02", confidence: likely}
+  C-512 N = 16: {same_as: C-512}
+  C-512 N = 64: {commit: 7d2ea50, machine: local, evidence: "c512_sweep.log 10-23 18:43", confidence: certain}
+  C-512 N = 128: {commit: 12ccef5, machine: local, evidence: "c512_sweep.log 10-24 06:15 rerun (12ccef5, dirty=0)", confidence: certain}
+  C-512 N = 1-128:
+    commits: {"N = 1, 4, 16, 64": 7d2ea50, "N = 128": 12ccef5, "smooth limit": 23afc36}
+    machine: local
+    evidence: "c512_sweep.log, gpu2_runs.log (smooth limit 10-24 22:45, 23afc36, dirty=0)"
+    confidence: certain
+  A-128 sensitivity:
+    commits: {"8 Myr": 8320429, "30 and 45 Myr": 0a4cbf6, "30 Myr X-ray and FD check": 7641bfe}
+    machine: local
+    evidence: >-
+      run_issue4*.sh launch times against the worktree reflogs; the 8 and 30/45 Myr runs ran from worktree
+      commits 6499728 (with these edits uncommitted) and ae99609, whose code equals main's 8320429 and 0a4cbf6
+    confidence: certain
+  A-256 sensitivity:
+    commits: {"Sigma, float64": 943b21c, "Sigma, float32": b2a54b9, "X-ray, float64": 335c234}
+    machine: local
+    evidence: "run_issue4_{d,e,g}.sh launch times against the worktree reflogs"
+    confidence: certain

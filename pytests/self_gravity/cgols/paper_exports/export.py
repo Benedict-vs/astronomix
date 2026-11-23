@@ -32,6 +32,10 @@ older commit keeps its own record):
   caches live on scratch or JARVIS, not in git, so this is a record, not
   something the writing side can fetch.
 
+Top-level metadata (``export_metadata``), e.g. ``software_versions``: the
+library versions and the astronomix commit each simulation run was made with,
+which can differ from the ``commit`` of the export (asgard-papers #19).
+
 Several scripts may export at the same time: the read-modify-write of the
 manifest holds an exclusive file lock.
 """
@@ -158,9 +162,26 @@ def _update(paper, section, entry, commit):
         manifest["astronomix_commit"] = commit  # of the latest export; each entry has its own
         manifest.setdefault("numbers", [])
         manifest.setdefault("figures", [])
-        ordered = {key: manifest[key] for key in ("paper", "generated", "astronomix_commit", "numbers", "figures")}
-        ordered.update({key: value for key, value in manifest.items() if key not in ordered})
-        write(ordered)
+        write(_ordered(manifest))
+
+
+#: Order of the top-level fields; metadata such as software_versions goes before the entries.
+TOP_LEVEL = ("paper", "generated", "astronomix_commit", "software_versions", "numbers", "figures")
+
+
+def _ordered(manifest):
+    ordered = {key: manifest[key] for key in TOP_LEVEL if key in manifest}
+    ordered.update({key: value for key, value in manifest.items() if key not in ordered})
+    return ordered
+
+
+def export_metadata(paper, key, value):
+    """Set the top-level field ``key`` of the paper's manifest (not one of the entry sections) to ``value``."""
+    if key in ("paper", "generated", "astronomix_commit", "numbers", "figures"):
+        raise ValueError(f"{key!r} is managed by the exporter")
+    with _locked_manifest(paper) as (manifest, write):
+        manifest[key] = value
+        write(_ordered(manifest))
 
 
 def prune(paper, section, keep, script):

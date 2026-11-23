@@ -35,6 +35,7 @@ import argparse
 import glob
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -45,7 +46,7 @@ HERE = Path(__file__).resolve().parent
 CGOLS = HERE.parent
 sys.path.insert(0, str(CGOLS))
 
-from paper_exports.export import export_figure, export_number, prune
+from paper_exports.export import export_figure, export_metadata, export_number, prune
 
 PAPER = "paper1"
 STUDIES = CGOLS / "data" / "studies"
@@ -1523,6 +1524,46 @@ def figures():
         yield key, path, dict(caption_hint=caption, runs=runs, script=CGOLS / script)
 
 
+# --------------------------------------------------------------------------- software versions (asgard-papers #19)
+
+SOFTWARE_FILE = HERE / "paper1_software.yaml"
+
+
+def software_versions(used_runs):
+    """software_versions block from paper1_software.yaml: library versions and the astronomix commit per run.
+
+    Short commits are expanded to full ones (an unknown commit is an error). Runs that the manifest
+    uses but the file does not list are reported, not invented.
+    """
+    import yaml
+
+    if not SOFTWARE_FILE.is_file():
+        print(f"skipped software_versions: no {SOFTWARE_FILE.name}")
+        return None
+    block = yaml.safe_load(SOFTWARE_FILE.read_text())
+
+    def full(run, short):
+        out = subprocess.run(["git", "rev-parse", "--verify", f"{short}^{{commit}}"], check=False, cwd=CGOLS,
+                             capture_output=True, text=True)  # fmt: skip
+        if out.returncode:
+            raise SystemExit(f"software_versions: run {run}: unknown commit {short}")
+        return out.stdout.strip()
+
+    for run, record in block["runs"].items():
+        if "same_as" in record and record["same_as"] not in block["runs"]:
+            raise SystemExit(f"software_versions: run {run}: same_as {record['same_as']} is not listed")
+        for field in ("commit", "commit_extra"):
+            if record.get(field):
+                record[field] = full(run, record[field])
+        for part, short in (record.get("commits") or {}).items():
+            record["commits"][part] = full(run, short)
+    missing = sorted(set(used_runs) - set(block["runs"]) - set(block.get("not_runs", [])))
+    if missing:
+        print(f"software_versions: no run record for {missing}")
+    block.pop("not_runs", None)
+    return block
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -1534,19 +1575,27 @@ def main():
     os.chdir(CGOLS)
 
     keys = {"numbers": set(), "figures": set()}
+    used_runs = set()
     for key, entry in numbers():
         keys["numbers"].add(key)
+        used_runs.update(entry.get("runs") or [])
         print(f"{key:32s} {entry['value']:11.4g} {entry['unit']:8s} {entry['status']:15s} {entry['convergence']}")
         if not args.dry_run:
             export_number(PAPER, key, **entry)
     for key, path, entry in figures():
         keys["figures"].add(key)
+        used_runs.update(entry.get("runs") or [])
         if not path.is_file():
             print(f"{key:32s} MISSING {path}")
             continue
         print(f"{key:32s} {path.relative_to(CGOLS)}")
         if not args.dry_run:
             export_figure(PAPER, key, path, **entry)
+    software = software_versions(used_runs)
+    if software is not None:
+        print(f"software_versions: {len(software['runs'])} runs, jax {software['jax']}")
+        if not args.dry_run:
+            export_metadata(PAPER, "software_versions", software)
     if not args.dry_run:
         for section, keep in keys.items():
             for key in prune(PAPER, section, keep, script=__file__):
