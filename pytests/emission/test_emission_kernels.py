@@ -409,3 +409,42 @@ def test_float32_matches_float64(table):
         scale = np.max(np.abs(reference))
         assert scale > 0, name
         np.testing.assert_allclose(single, reference, rtol=2e-4, atol=1e-6 * scale, err_msg=name)
+
+
+# -------------------------------------------------------------
+# The gas of the cells given directly (a chemistry run)
+# -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("temperature", [1.0e4, 3.0e6])
+def test_the_gas_of_the_cells(table, temperature):
+    """``gas=`` replaces the mu = 0.6 description: the same gas gives the same maps, and H-alpha counts the H+ given."""
+    from astronomix.analysis_helpers.emission import EmissionGas, ki02_ionisation_table
+
+    conversions = emission_conversions(CODE_UNITS)
+    shape = (4, 5, 6)
+    density = jnp.full(shape, 0.2)
+    pressure = density * temperature / conversions.kelvin_per_code_specific_energy
+    maps = emission_maps(density, pressure, conversions, table, 0.05)
+
+    hydrogen = density * conversions.hydrogen_density_per_code_density
+    same_gas = EmissionGas(
+        temperature=jnp.full(shape, temperature),
+        number_density=density * conversions.total_number_density_per_code_density,
+        electron_density=density * conversions.electron_density_per_code_density,
+        hydrogen_density=hydrogen,
+        ionised_hydrogen_density=hydrogen,
+    )
+    given = emission_maps(density, pressure, conversions, table, 0.05, gas=same_gas)
+    assert set(given) == set(maps)
+    for name in maps:
+        np.testing.assert_allclose(given[name], maps[name], rtol=1e-12, atol=1e-300, err_msg=name)
+
+    # half of the hydrogen ionised: half the recombinations; the X-ray maps do not see n_HII
+    half = emission_maps(density, pressure, conversions, table, 0.05, gas=same_gas._replace(ionised_hydrogen_density=0.5 * hydrogen))
+    for name in maps:
+        factor = 0.5 if name.startswith(("halpha", "emission_measure")) else 1.0
+        np.testing.assert_allclose(half[name], factor * maps[name], rtol=1e-12, atol=1e-300, err_msg=name)
+
+    with pytest.raises(ValueError, match="not both"):
+        emission_maps(density, pressure, conversions, table, 0.05, ionisation=ki02_ionisation_table(CODE_UNITS), gas=same_gas)

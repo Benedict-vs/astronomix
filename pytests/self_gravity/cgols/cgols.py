@@ -1194,6 +1194,10 @@ if KI02 and "CGOLS_IC_TAG" not in os.environ:
 #                          end of the step (default 1): a line "[chemistry] N
 #                          cells did not reach the end of their reaction step"
 #                          for every such call; the results are the same
+#   CGOLS_CHEM_DUST_HEATING_NEUTRAL  photoelectric heating on dust only in the
+#                          neutral hydrogen, times 1 - n(H+)/n_H, as model B
+#                          (default 1; 0 = KROME's, in hot ionised gas too:
+#                          the runs _chem256_v2 / _chem256fuv_v2 of 2026-11-20)
 #   CGOLS_CHEM_COOLING_COURANT  largest fractional temperature change per
 #                          reaction; 0 (default) = no limit
 #   CGOLS_CHEM_DISK_T_OVER_MU   thermal support of the disk IC as T / mu [K].
@@ -1223,6 +1227,7 @@ if CHEM_ELEMENTS not in ("uniform", "source", "cell"):
     raise ValueError(f"CGOLS_CHEM_ELEMENTS must be 'uniform', 'source' or 'cell', not {CHEM_ELEMENTS!r}")
 CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
 CHEM_COUNT_UNFINISHED = os.environ.get("CGOLS_CHEM_COUNT_UNFINISHED", "1") == "1"
+CHEM_DUST_HEATING_NEUTRAL = os.environ.get("CGOLS_CHEM_DUST_HEATING_NEUTRAL", "1") == "1"
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
 if CHEMISTRY:
@@ -1386,10 +1391,11 @@ CALLBACK_PARTITIONED = (
 # default) the frame jit runs between TO_DISK segments, a separate program from
 # the solver, so the maps cannot touch the solver state and add no peak
 # memory; their cost is a few fused reductions once per frame.
-# A chemistry run stores none by default: the recipes take the temperature and
-# the ionisation from P / rho at mu = 0.6 (collisional equilibrium), which is
-# not the state of the gas the network evolves.
-EMISSION_FRAMES = os.environ.get("CGOLS_EMISSION_FRAMES", "0" if CHEMISTRY else "xy")
+# A chemistry run (CGOLS_CHEMISTRY=1) stores them too, with the temperature,
+# the free electrons and the H+ of the network in place of the mu = 0.6 gas
+# (cgols_chemistry.emission_gas); the X-ray emissivities of the metals stay
+# those of collisional equilibrium at that temperature.
+EMISSION_FRAMES = os.environ.get("CGOLS_EMISSION_FRAMES", "xy")
 if EMISSION_FRAMES not in ("0", "y", "xy"):
     raise SystemExit(
         f"CGOLS_EMISSION_FRAMES must be '0', 'y' or 'xy', got {EMISSION_FRAMES!r}"
@@ -1636,6 +1642,7 @@ def chemistry_setup():
             radiation_disk_source=FUV_DISK,
             elements=CHEM_ELEMENTS,
             count_unfinished_cells=CHEM_COUNT_UNFINISHED,
+            dust_heating_neutral_only=CHEM_DUST_HEATING_NEUTRAL,
         )
         if CHEM_FUV:
             # The sources of model B's FUV field, with the dust opacity per
@@ -3681,6 +3688,21 @@ def make_snapshot_callable(
                     _plane,
                     time,
                 )[:, 0, :]
+            # the whole grid: column densities of HI, H2 and HII, the face-on plane, and the outflow
+            # split by temperature phase and by the form of the hydrogen
+            # (cgols_chemistry.frame_products_3d)
+            chemistry.update(
+                cgols_chemistry.frame_products_3d(
+                    state[species_start:species_stop, g:hi, g:hi, g:hi],
+                    rho[g:hi, g:hi, g:hi],
+                    vz[g:hi, g:hi, g:hi],
+                    P_gas[g:hi, g:hi, g:hi],
+                    chemistry_setup(),
+                    mid_z=dim_z // 2,
+                    cell_size_cm=float(dx * (1 * code_length).to(u.cm).value),
+                    mass_flux_to_msun_per_yr=float(dx * dy * code_mdot_to_msun_per_yr),
+                )
+            )
 
         # Edge-on radial velocity v_r = v . r_hat in km/s (paper Figs 1/2
         # middle panels).
@@ -3714,6 +3736,16 @@ def make_snapshot_callable(
                 xray_table,
                 dx,
                 emission_settings,
+                # chemistry: the temperature, electrons and H+ of the network, not the mu = 0.6 gas
+                gas=(
+                    cgols_chemistry.emission_gas(
+                        state[species_start:species_stop, g:hi, g:hi, g:hi],
+                        P_gas[g:hi, g:hi, g:hi],
+                        chemistry_setup(),
+                    )
+                    if CHEMISTRY
+                    else None
+                ),
             )
 
         # MHD frame products (CGOLS_MHD=1; none otherwise, so the hydro frames

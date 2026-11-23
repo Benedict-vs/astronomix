@@ -131,6 +131,7 @@ def build_chemistry(
     radiation_disk_source=False,
     elements="uniform",
     count_unfinished_cells=False,
+    dust_heating_neutral_only=False,
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -189,6 +190,10 @@ def build_chemistry(
             end of its step (``ChemistryConfig.count_unfinished_cells``):
             ``update_chemistry`` then returns ``(state, unfinished)`` and a run
             prints a line for every call that left cells unfinished.
+        dust_heating_neutral_only: The photoelectric heating on dust only in
+            the neutral hydrogen, times 1 - n(H+)/n_H (``build_krome_network``,
+            ``photoelectric_neutral_only``): KROME applies it in hot ionised gas
+            too, outside the range of its fit.
 
     **The Lyman-Werner flux.** KROME's ``react_galaxy_ism`` files dissociate H2
     with ``H2_solomonLW(myflux_eV)``, where ``myflux_eV`` is a constant of the
@@ -265,6 +270,7 @@ def build_chemistry(
             krome_shield_habing_dust=not radiation_field_per_cell,
             krome_shielding=self_shielding,
             krome_free_free_cooling=free_free,
+            krome_photoelectric_neutral_only=dust_heating_neutral_only,
             **lyman_werner,
             # all particles of the gas are species of the network
             temperature_from_species=True,
@@ -340,6 +346,8 @@ def build_chemistry(
                 float(first_step_fraction),
             )
             + ((True,) if radiation_field_per_cell else ())
+            # only then, so that the keys of the runs before the option stay what they were
+            + (("dust heating in neutral gas",) if dust_heating_neutral_only else ())
         ).encode()
     ).hexdigest()  # fmt: skip
 
@@ -600,3 +608,99 @@ def frame_products(species_plane, pressure_plane, setup):
         # float32 on disk: keep the trace species above its smallest number
         products[frame_name(name)] = jnp.maximum(species_plane[index] / hydrogen, 1.0e-30)
     return temperature, products
+
+
+#: The phases of the outflow by temperature [K], as in the CGOLS papers: cool, intermediate and hot gas.
+OUTFLOW_PHASES = (("cool", 0.0, 2.0e4), ("warm", 2.0e4, 5.0e5), ("hot", 5.0e5, np.inf))
+
+
+def _hydrogen_and_temperature(species, pressure, setup):
+    """Hydrogen nuclei and temperature [K] of every cell (code number densities in, any grid shape)."""
+    particles = jnp.maximum(jnp.sum(jnp.maximum(species, 0.0), axis=0), 1.0e-300)
+    temperature = pressure / particles * setup.params.temperature_unit_kelvin
+    hydrogen_row = setup.config.species_element_names.index("H")
+    hydrogen_atoms = jnp.asarray(setup.config.species_element_matrix[hydrogen_row], dtype=species.dtype)
+    hydrogen = jnp.maximum(jnp.tensordot(hydrogen_atoms, species, axes=1), 1.0e-300)
+    return particles, hydrogen, temperature
+
+
+def emission_gas(species, pressure, setup):
+    """
+    The gas of every cell for the emission maps (``emission.EmissionGas``), from the species of the run.
+
+    The temperature from the particles of the network, the electrons and the ionised hydrogen as the
+    network has them (not an equilibrium assumption): the H-alpha and the emission measure count the
+    recombinations of the H+ that is there, and every X-ray map uses the free electrons that are there.
+    The X-ray emissivities of the metals remain those of collisional equilibrium at that temperature
+    (the network carries C, O and Si up to C+, O+ and Si++ only).
+
+    Args:
+        species: The species, code number densities, shape ``(num_species, x, y, z)``.
+        pressure: The pressure, code units, shape ``(x, y, z)``.
+        setup: The chemistry of the run.
+
+    Returns:
+        An ``emission.EmissionGas`` in cgs units.
+    """
+    from astronomix.analysis_helpers.emission import EmissionGas
+
+    unit = setup.params.number_density_unit_cgs
+    particles, hydrogen, temperature = _hydrogen_and_temperature(species, pressure, setup)
+    return EmissionGas(
+        temperature=temperature,
+        number_density=particles * unit,
+        electron_density=jnp.maximum(species[setup.species.index("E")], 0.0) * unit,
+        hydrogen_density=hydrogen * unit,
+        ionised_hydrogen_density=jnp.maximum(species[setup.species.index("H+")], 0.0) * unit,
+    )
+
+
+def frame_products_3d(species, density, velocity_z, pressure, setup, *, mid_z, cell_size_cm, mass_flux_to_msun_per_yr):
+    """
+    What a frame stores of the chemistry of the whole grid (reductions; small next to the state).
+
+    * Column densities of atomic, molecular and ionised hydrogen [cm^-2], edge-on (line of sight
+      along y; ``N_HI_xz``, ``N_H2_xz``, ``N_HII_xz``) and face-on (along z; ``N_HI_xy``, ...).
+      N(H2) counts molecules.
+    * The face-on plane z = 0: ``n_H_xy`` [cm^-3], ``T_xy`` [K], ``x_H2_xy`` and ``x_Hp_xy`` (per
+      hydrogen nucleus, as the edge-on ``x_*_xz``).
+    * The net vertical flux through every z-plane [Msun/yr], as ``mdot_z``: of the hydrogen in each
+      form (``mdot_HI_z``, ``mdot_H2_z``, ``mdot_HII_z``, hydrogen mass only) and of all gas in each
+      temperature phase of :data:`OUTFLOW_PHASES` (``mdot_cool_z``, ``mdot_warm_z``, ``mdot_hot_z``;
+      they add up to ``mdot_z``).
+
+    Args:
+        species: The species, code number densities, shape ``(num_species, x, y, z)`` (interior).
+        density: The density, code units, shape ``(x, y, z)``.
+        velocity_z: The z velocity, code units.
+        pressure: The pressure, code units.
+        setup: The chemistry of the run.
+        mid_z: The index of the plane z = 0 in the interior.
+        cell_size_cm: The (cubic) cell size [cm].
+        mass_flux_to_msun_per_yr: ``sum_xy(rho v_z) * this`` is the flux through a plane [Msun/yr]
+            (the cell area times the code mass flux in Msun/yr).
+
+    Returns:
+        A dictionary of arrays, by name.
+    """
+    _, hydrogen, temperature = _hydrogen_and_temperature(species, pressure, setup)
+    unit = setup.params.number_density_unit_cgs
+    forms = {"HI": ("H", 1.0), "H2": ("H2", 2.0), "HII": ("H+", 1.0)}
+    out = {}
+    for form, (name, _) in forms.items():
+        density_cgs = jnp.maximum(species[setup.species.index(name)], 0.0) * unit
+        out[f"N_{form}_xz"] = jnp.sum(density_cgs, axis=1) * cell_size_cm
+        out[f"N_{form}_xy"] = jnp.sum(density_cgs, axis=2) * cell_size_cm
+    out["n_H_xy"] = hydrogen[:, :, mid_z] * unit
+    out["T_xy"] = temperature[:, :, mid_z]
+    out["x_H2_xy"] = jnp.maximum(species[setup.species.index("H2"), :, :, mid_z], 0.0) / hydrogen[:, :, mid_z]
+    out["x_Hp_xy"] = jnp.maximum(species[setup.species.index("H+"), :, :, mid_z], 0.0) / hydrogen[:, :, mid_z]
+    # a species of the state is a number density in units of the code density over the proton mass, so
+    # (atoms of H) x species is the mass density of that hydrogen in code units
+    for form, (name, atoms) in forms.items():
+        hydrogen_mass = atoms * jnp.maximum(species[setup.species.index(name)], 0.0)
+        out[f"mdot_{form}_z"] = jnp.sum(hydrogen_mass * velocity_z, axis=(0, 1)) * mass_flux_to_msun_per_yr
+    for phase, low, high in OUTFLOW_PHASES:
+        in_phase = (temperature >= low) & (temperature < high)
+        out[f"mdot_{phase}_z"] = jnp.sum(jnp.where(in_phase, density * velocity_z, 0.0), axis=(0, 1)) * mass_flux_to_msun_per_yr
+    return out

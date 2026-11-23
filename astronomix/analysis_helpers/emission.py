@@ -57,7 +57,7 @@ import math
 import os
 
 # typing
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional
 
 # jax
 import jax.numpy as jnp
@@ -242,6 +242,27 @@ def ki02_ionisation_table(
         electron_fraction=np.asarray(electron_fraction, dtype=np.float32),
         ionised_hydrogen_fraction=np.asarray(model.x_HII(temperature), dtype=np.float32),
     )
+
+
+class EmissionGas(NamedTuple):
+    """The emitting gas of every cell in physical units, for :func:`emission_maps`.
+
+    For a run that carries its own composition and ionisation (a chemical
+    network): the maps then use these instead of deriving them from density
+    and pressure with a fixed mean molecular weight or an equilibrium table.
+    All fields have the shape of the density field.
+    """
+
+    #: Gas temperature [K].
+    temperature: Any
+    #: Number density of all particles (atoms, molecules, ions, electrons) [cm^-3].
+    number_density: Any
+    #: Free electrons n_e [cm^-3].
+    electron_density: Any
+    #: Hydrogen nuclei n_H [cm^-3].
+    hydrogen_density: Any
+    #: Ionised hydrogen n_HII [cm^-3] (the H-alpha recombinations).
+    ionised_hydrogen_density: Any
 
 
 class EmissionConversions(NamedTuple):
@@ -697,6 +718,7 @@ def emission_maps(
     settings: Optional[EmissionMapSettings] = None,
     vertical_coordinate=None,
     ionisation: Optional[IonisationTable] = None,
+    gas: Optional[EmissionGas] = None,
 ):
     """
     Edge-on emission maps of a 3D (x, y, z) block, in physical units.
@@ -722,6 +744,11 @@ def emission_maps(
         ionisation: For KI02 + GF12 (model-B) runs, the cooling model's
             temperature and ionisation (:func:`ki02_ionisation_table`); None
             keeps the fully ionised mu = 0.6 description.
+        gas: The temperature, particle, electron, hydrogen and ionised
+            hydrogen densities of every cell (:class:`EmissionGas`), for a run
+            that carries its own ionisation (a chemical network). Overrides
+            ``density``, ``pressure`` and ``ionisation`` for the emission
+            (``density`` still sets the shape); not with ``ionisation``.
 
     Returns:
         ``{f"{name}_{plane}": map}`` with ``name`` from :data:`MAP_UNITS` and
@@ -735,8 +762,16 @@ def emission_maps(
         # kernels are unchanged, only this projection step needs it.
         raise NotImplementedError("only edge-on (inclination 90 deg) projections exist")
 
+    if gas is not None and ionisation is not None:
+        raise ValueError("emission_maps: give the gas of the cells or an ionisation table, not both")
     number_density = density * conversions.total_number_density_per_code_density
-    if ionisation is None:
+    if gas is not None:
+        temperature = gas.temperature
+        number_density = gas.number_density
+        electron_density = gas.electron_density
+        hydrogen_density = gas.hydrogen_density
+        recombining_hydrogen_density = gas.ionised_hydrogen_density
+    elif ionisation is None:
         temperature = (pressure / density) * conversions.kelvin_per_code_specific_energy
         electron_density = density * conversions.electron_density_per_code_density
         hydrogen_density = density * conversions.hydrogen_density_per_code_density

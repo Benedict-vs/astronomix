@@ -489,6 +489,9 @@ class KromeNetwork(eqx.Module):
     metal_table_without_lookup: bool = eqx.field(static=True, default=False)
     # user variables that are radiation fluxes: they scale with ``radiation_scale`` like the photo-reactions
     radiation_user_names: Tuple[str, ...] = eqx.field(static=True, default=())
+    # the photoelectric heating on dust (and its recombination cooling) only in the neutral hydrogen: times
+    # 1 - n(H+)/n_H, see ``build_krome_network``
+    photoelectric_neutral_only: bool = eqx.field(static=True, default=False)
 
     #: The radiation of this network can be scaled per call (``radiation_scale`` of ``__call__`` and of the
     #: heating): the chemistry module passes the radiation field of a cell through it.
@@ -738,6 +741,10 @@ class KromeNetwork(eqx.Module):
         terms["heating_photoelectric"] = thermo.photoelectric_heating(
             temperature, electrons, hydrogen, nuclei, self.habing_field(n, temperature, fuv_field, radiation_scale), self.dust_to_gas
         )
+        if self.photoelectric_neutral_only:
+            # only in the neutral gas, as the photoelectric heating of the KI02 cooling: Gamma (1 - x_HII)
+            ionised = density("H+") / jnp.where(nuclei > 0.0, nuclei, 1.0)
+            terms["heating_photoelectric"] = terms["heating_photoelectric"] * jnp.clip(1.0 - ionised, 0.0, 1.0)
         # cosmic rays: every reaction of the cosmic-ray block deposits an energy per event
         cosmic_rays = 0.0
         for position, reactant, kind in self.cosmic_ray_terms:
@@ -782,6 +789,7 @@ def build_krome_network(
     floor_temperature=MINIMUM_TEMPERATURE_KELVIN,
     free_free_cooling=False,
     radiation_user_variables=(),
+    photoelectric_neutral_only=False,
 ):
     """Build the right-hand side of a KROME network file.
 
@@ -847,6 +855,14 @@ def build_krome_network(
             ``radiation_scale`` given at a call (the radiation field of a cell)
             multiplies them together with the photo-reactions and the Habing
             flux, so that every radiative process follows the same field.
+        photoelectric_neutral_only: Multiply the photoelectric heating on dust
+            (net of the recombination cooling on the grains, Bakes & Tielens
+            1994) by the neutral fraction of hydrogen, 1 - n(H+)/n_H. KROME
+            applies it at every temperature, but the fit holds below about
+            1e4 K and its efficiency grows as T^0.7 above; in hot, ionised gas
+            the grains are also eroded by sputtering. The factor is the one of
+            the photoelectric heating of the KI02 cooling (Gamma (1 - x_HII)).
+            Off by default, as in KROME.
 
     Returns:
         The network (a :class:`KromeNetwork`) and the species names.
@@ -1020,6 +1036,7 @@ def build_krome_network(
         cooling_floor_temperature=float(floor_temperature),
         metal_table_without_lookup=without_lookup,
         radiation_user_names=radiation_user_names,
+        photoelectric_neutral_only=bool(photoelectric_neutral_only),
         free_free_charges=(
             tuple(_free_free_charge_squared(name) for name in species) if free_free_cooling else ()
         ),

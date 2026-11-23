@@ -16,6 +16,8 @@
 #                          a radiation field per cell the H2 dissociation by the flux user_myfluxLW: see
 #                          cgols_chemistry.build_chemistry and the README next to the network files)
 #   CGOLS_CHEM_KROME_DATA  the data folder of a KROME installation
+# Every 4th full state is kept (CGOLS_CHECKPOINT_ARCHIVE_EVERY=4: every 5 Myr of a 60-frame run, 16 x 5.2 GB
+# at 256), on top of the rolling window of the newest four; pass CGOLS_CHECKPOINT_ARCHIVE_EVERY=1 for all.
 # Start it detached for a long run:  setsid nohup run_chemistry_local.sh ... > run.out 2>&1 < /dev/null &
 set -u
 if [ $# -lt 5 ]; then sed -n '2,15p' "$0"; exit 2; fi
@@ -47,4 +49,5 @@ exec env CUDA_VISIBLE_DEVICES="$GPU" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
     CGOLS_X64=1 CGOLS_CHEMISTRY=1 \
     CGOLS_DIM="$DIM" CGOLS_END_FRACTION="$END_FRACTION" CGOLS_NUM_SNAPSHOTS="$NUM_SNAPSHOTS" CGOLS_RUN_TAG="$RUN_TAG" \
+    CGOLS_CHECKPOINT_ARCHIVE_EVERY=4 \
     "$@" "$CHEM_PYTHON" -u cgols.py

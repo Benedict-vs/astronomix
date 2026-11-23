@@ -118,6 +118,7 @@ def build_chemistry_from_network_file(
     krome_floor_temperature: float = 2.73,
     krome_free_free_cooling: bool = False,
     krome_radiation_user_variables: Tuple[str, ...] = (),
+    krome_photoelectric_neutral_only: bool = False,
     temperature_from_species: bool = False,
     conserve_elements_in_transport: bool = True,
 ) -> Tuple[ChemistryConfig, ChemistryParams, Tuple[str, ...]]:
@@ -166,7 +167,9 @@ def build_chemistry_from_network_file(
     the photo-reactions and the Habing flux), and ``krome_free_free_cooling`` adds the
     bremsstrahlung of the atomic ions (``-cooling=FF``; off by default), which
     the other cooling terms do not contain and which dominates in ionised gas
-    above about 1e7 K.
+    above about 1e7 K. ``krome_photoelectric_neutral_only`` keeps the
+    photoelectric heating on dust to the neutral hydrogen (times
+    1 - n(H+)/n_H; off by default, as in KROME; see ``build_krome_network``).
 
     Args:
         network_csv_path: Path to the carbox reaction-network CSV.
@@ -232,6 +235,7 @@ def build_chemistry_from_network_file(
             floor_temperature=krome_floor_temperature,
             free_free_cooling=krome_free_free_cooling,
             radiation_user_variables=krome_radiation_user_variables,
+            photoelectric_neutral_only=krome_photoelectric_neutral_only,
         )
         if krome_photo_bins is not None:
             # the Habing flux in use is the one of the binned spectrum
