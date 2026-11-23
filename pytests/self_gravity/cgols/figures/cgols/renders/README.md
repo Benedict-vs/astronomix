@@ -8,6 +8,14 @@ arXiv:2002.10468, made with NVIDIA IndeX), produced with our own JAX ray marcher
 | `C1024_t{20,35,50,75}Myr_cgols4_1080x1920.png` | model C (16 co-rotating cluster complexes, adiabatic), 1024x1024x2048 |
 | `A2048_t{20,35,50,75}Myr_cgols4_1080x1920.png` | model A (central 300 pc injection, adiabatic), full 2048x2048x4096 |
 | `A2048_t35Myr_cgols4_2160x3840.png` | 4K hero of A-2048 at the end of the starburst |
+| `C1024_t{20,35,50,75}Myr_cgols4_elev28_1080x1920.png` | C-1024 from 28 deg elevation (the time-orbit camera, looking down onto the disk) |
+| `C1024_t{20,35,50,75}Myr_cgols4_edgeon_1080x1920.png` | C-1024 edge-on (2 deg above the disk plane, GECKOS-like framing), density look |
+| `timeseries_C1024_elev28_edgeon_cgols4.png` | overview of these eight (rendered on JARVIS from the archived volumes, 64 cores, ~7.5 min each) |
+| `C1024n1000_t{20,35,50,75}Myr_cgols4_{elev28,edgeon}_1080x1920.png` | model C with 1000 clusters of R = 30 pc (local cluster kernel, HoreKa job 128952), same two cameras; brightness set from its own 35 Myr wind (+0.22 dex: denser than N = 16). At 20 Myr the dense superbubble shell and at 75 Myr (28 deg) the late haze render as near-white fog |
+| `timeseries_C1024n1000_elev28_edgeon_cgols4.png` | overview of these eight (volumes extracted + rendered on JARVIS) |
+| `C1024n1000_t{20,75}Myr_cgols4_{elev28,edgeon}_1080x1920_v2.png` | retuned 20 and 75 Myr: 20 Myr with its own brightness (wind shift +0.41 dex from that frame) and half opacity (`--auto --kappa-ref 0.015`), so the dense superbubble shell shows texture; 75 Myr with a 90th-percentile shift (`--auto`, -0.83 dex instead of the median-based -1.22), which removes the late fog |
+| `timeseries_C1024n1000_elev28_edgeon_cgols4_v2.png` | overview with the v2 stills at 20 and 75 Myr |
+| `sidebyside_C1024_N16_vs_N1000_cgols4.png` | N = 16 vs N = 1000 side by side at 20/35/50/75 Myr, 28 deg (top) and edge-on (bottom), assembled from the stills above (N = 1000 uses the v2 stills at 20 and 75 Myr). Each run has its own brightness normalisation, so compare structure, not brightness |
 | `timeseries_C1024_A2048_cgols4.png` | overview of the eight stills |
 | `*_orbit360.mp4` | 360-frame camera orbits at 35 Myr (30 fps, 1080x1920) |
 | `C1024_timeorbit_1-75Myr_cgols4.mp4` | first version: one camera orbit (1 deg/frame) while time runs 1.25 -> 75 Myr: 6 frames per checkpoint, neighbouring checkpoints cross-faded (`cgols_render_timeorbit.py`); the cross-fade ghosts moving gas (~1 kpc per checkpoint) |

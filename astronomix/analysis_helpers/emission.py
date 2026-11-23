@@ -30,8 +30,19 @@ use the ionised X = 0.71, Y = 0.27, Z = 0.02 mixture of Eq. 3:
 ``n_H = X rho / m_p = 0.71 rho / m_p`` and
 ``n_e = (X + Y/2 + Z/2) rho / m_p = 0.855 rho / m_p``, rounded to 0.86 as
 written in Eq. 3. The CGOLS recipe keeps its own ``n = rho / (0.6 m_p)``
-convention (``n_e n_H = 0.22 n^2``); the temperature is always the simulation's
+convention (``n_e n_H = 0.22 n^2``); the temperature is the simulation's
 ``T = mu m_p P / (k_B rho)`` with ``mu = 0.6``.
+
+Model B (KI02 + GF12 cooling). That cooling evolves ``T / mu(T)`` with a
+temperature-dependent mu, so the mu = 0.6 temperature is up to ~2x too low in
+warm and neutral gas, and gas near 1e4 K is only partly ionised. Passing an
+:class:`IonisationTable` (:func:`ki02_ionisation_table`) to
+:func:`emission_maps` uses the cooling model's own state instead: the physical
+temperature, ``n_H = rho / (1.4271 m_H)``, ``n_e = x_e(T) n_H`` and, for
+H-alpha and the emission measure, recombination on ionised hydrogen only
+(``n_e n_HII`` with ``n_HII = x_HII(T) n_H``, the CIE fractions of the
+cooling tables). The CGOLS X-ray recipe keeps its ``n = rho / (0.6 m_p)``
+convention but gets the physical temperature for its window and Lambda(T).
 
 Float32 safety. Volume emissivities of order 1e-30 erg cm^-3 s^-1 and below
 flush to zero in single precision, so every kernel returns its emissivity in an
@@ -117,6 +128,19 @@ DEFAULT_XRAY_TABLE_PATH = os.path.join(
     "xray_emissivity_0p3_2keV_atomdb.npz",
 )
 
+#: Further band tables (built by ``data/generate_xray_emissivity_table.py`` with
+#: ``ASTRONOMIX_XRAY_BAND_KEV``), keyed by band. The 0.3-1.0 keV table is the
+#: band of the Strickland et al. (2004) M82 minor-axis fits and also carries
+#: photon emissivities after TBabs absorption (``absorbing_column_cm2``).
+XRAY_TABLE_PATHS = {
+    "0.3-2": DEFAULT_XRAY_TABLE_PATH,
+    "0.3-1": os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "data",
+        "xray_emissivity_0p3_1keV_atomdb.npz",
+    ),
+}
+
 #: Above the table (AtomDB's CIE grid ends at 1e9 K) the band emissivity is
 #: extrapolated as free-free emission far below kT, epsilon ~ T^-1/2.
 HIGH_TEMPERATURE_LOG_SLOPE = -0.5
@@ -149,6 +173,75 @@ LOPEZ2020_M82_WIND_ABUNDANCES = {
 # -------------------------------------------------------------
 # =============== ↑ Constants ↑ ===============================
 # -------------------------------------------------------------
+
+
+class IonisationTable(NamedTuple):
+    """The KI02 + GF12 thermal / ionisation state on a uniform log10(T / mu) grid.
+
+    Built by :func:`ki02_ionisation_table`; passed to :func:`emission_maps` for
+    model-B runs. The arrays are small (a few thousand entries) and are looked
+    up with :func:`_interpolate_uniform_grid`.
+    """
+
+    #: ``T / mu(T) = (P_code / rho_code) * this`` [K].
+    t1_per_code_specific_energy: float
+    #: ``n_H = rho_code * this`` [cm^-3], n_H = rho / (1.4271 m_H).
+    hydrogen_density_per_code_density: float
+    #: First grid point and spacing of log10(T / mu) [log10 K].
+    log10_t1_start: float
+    log10_t1_step: float
+    #: log10 of the physical temperature [K] on the grid.
+    log10_temperature: np.ndarray
+    #: n_e / n_H on the grid.
+    electron_fraction: np.ndarray
+    #: n_HII / n_H on the grid.
+    ionised_hydrogen_fraction: np.ndarray
+
+
+def ki02_ionisation_table(
+    code_units,
+    zprime: float = 1.0,
+    log10_t1_range: tuple = (0.0, 11.0),
+    num_points: int = 11001,
+) -> IonisationTable:
+    """
+    Tabulate the KI02 + GF12 cooling model's temperature and ionisation.
+
+    The cooling module carries ``T / mu(T)``; its inversion, the CIE electron
+    fraction ``x_e = n_e / n_H`` (H, He and ``zprime`` x metals, with the
+    model's floor) and the ionised hydrogen fraction ``x_HII`` are evaluated
+    once on a uniform log10(T / mu) grid.
+
+    Args:
+        code_units: The simulation's :class:`astronomix.CodeUnits`.
+        zprime: Metallicity in solar units, as given to the cooling.
+        log10_t1_range: Grid range of log10(T / mu) [log10 K].
+        num_points: Grid size (default: 0.001 dex spacing).
+
+    Returns:
+        An :class:`IonisationTable`.
+    """
+    from astronomix._modules._cooling._cooling_tables import (
+        TIGRESS_MU_H,
+        _KI02GF12Model,
+    )
+
+    model = _KI02GF12Model(zprime=zprime)
+    log10_t1 = np.linspace(log10_t1_range[0], log10_t1_range[1], num_points)
+    temperature = model.temperature_from_T1(10.0**log10_t1)
+    electron_fraction, _ = model.electron_fraction(temperature)
+    code_density_cgs = (1.0 * code_units.code_density).to(u.g / u.cm**3).value
+    return IonisationTable(
+        t1_per_code_specific_energy=float((const.m_p / const.k_B * code_units.code_velocity**2).to(u.K).value),
+        hydrogen_density_per_code_density=float(
+            code_density_cgs / (TIGRESS_MU_H * const.m_p.to(u.g).value)
+        ),
+        log10_t1_start=float(log10_t1[0]),
+        log10_t1_step=float(log10_t1[1] - log10_t1[0]),
+        log10_temperature=np.log10(temperature).astype(np.float32),
+        electron_fraction=np.asarray(electron_fraction, dtype=np.float32),
+        ionised_hydrogen_fraction=np.asarray(model.x_HII(temperature), dtype=np.float32),
+    )
 
 
 class EmissionConversions(NamedTuple):
@@ -253,7 +346,7 @@ def cgols_xray_emissivity(
 
 
 class XrayEmissivityTable(NamedTuple):
-    """The AtomDB 0.3-2.0 keV band-emissivity table (see the module docstring).
+    """An AtomDB band-emissivity table, 0.3-2.0 keV by default (see the module docstring).
 
     The temperature grid is uniform in log10 T, which lets the lookup be a
     gather-free index computation (see :func:`_interpolate_uniform_grid`).
@@ -273,18 +366,41 @@ class XrayEmissivityTable(NamedTuple):
     solar_abundance_ga10: np.ndarray
 
 
-def load_xray_emissivity_table(path: str = DEFAULT_XRAY_TABLE_PATH) -> XrayEmissivityTable:
+def load_xray_emissivity_table(
+    path: str = DEFAULT_XRAY_TABLE_PATH,
+    photons: bool = False,
+    absorbing_column_cm2: float = 0.0,
+) -> XrayEmissivityTable:
     """
     Load the AtomDB band-emissivity table.
 
     Args:
         path: The ``.npz`` table written by
             ``data/generate_xray_emissivity_table.py``.
+        photons: Load the photon emissivity [photons cm^3 s^-1 per n_e n_H]
+            instead of the energy emissivity. Every downstream function then
+            returns photons where it would return erg (the ``unit`` arguments
+            keep their numbers, read as photons).
+        absorbing_column_cm2: With ``photons``, the absorbing column the photons
+            have passed through; must be one of the table's columns.
 
     Returns:
         An :class:`XrayEmissivityTable` (host numpy arrays).
     """
     with np.load(path) as data:
+        if photons:
+            if "absorbing_column_cm2" not in data.files:
+                raise ValueError(f"{path} has no photon emissivities; rebuild it")
+            columns = np.asarray(data["absorbing_column_cm2"], dtype=np.float64)
+            matches = np.flatnonzero(np.isclose(columns, absorbing_column_cm2, rtol=1e-6, atol=0.0))
+            if matches.size != 1:
+                raise ValueError(f"absorbing column {absorbing_column_cm2:g} not in {path}: {columns}")
+            column = int(matches[0])
+            hydrogen_helium = data["log10_photon_emissivity_hydrogen_helium"][column]
+            metals = data["log10_photon_emissivity_metals"][:, column]
+        else:
+            hydrogen_helium = data["log10_emissivity_hydrogen_helium"]
+            metals = data["log10_emissivity_metals"]
         log10_temperature = np.asarray(data["log10_temperature"], dtype=np.float64)
         steps = np.diff(log10_temperature)
         if not np.allclose(steps, steps[0], rtol=0, atol=1e-9):
@@ -292,12 +408,8 @@ def load_xray_emissivity_table(path: str = DEFAULT_XRAY_TABLE_PATH) -> XrayEmiss
         return XrayEmissivityTable(
             log10_temperature_start=float(log10_temperature[0]),
             log10_temperature_step=float(steps[0]),
-            log10_emissivity_hydrogen_helium=np.asarray(
-                data["log10_emissivity_hydrogen_helium"], dtype=np.float64
-            ),
-            log10_emissivity_metals=np.asarray(
-                data["log10_emissivity_metals"], dtype=np.float64
-            ),
+            log10_emissivity_hydrogen_helium=np.asarray(hydrogen_helium, dtype=np.float64),
+            log10_emissivity_metals=np.asarray(metals, dtype=np.float64),
             metal_atomic_numbers=tuple(int(z) for z in data["metal_atomic_numbers"]),
             solar_abundance_ag89=np.asarray(data["solar_abundance_ag89"], dtype=np.float64),
             solar_abundance_ga10=np.asarray(data["solar_abundance_ga10"], dtype=np.float64),
@@ -584,6 +696,7 @@ def emission_maps(
     cell_size_code: float,
     settings: Optional[EmissionMapSettings] = None,
     vertical_coordinate=None,
+    ionisation: Optional[IonisationTable] = None,
 ):
     """
     Edge-on emission maps of a 3D (x, y, z) block, in physical units.
@@ -606,6 +719,9 @@ def emission_maps(
         settings: See :class:`EmissionMapSettings`; ``None`` is the default.
         vertical_coordinate: Cell-centre z [code length], broadcastable to the
             field; only needed with a disk mask.
+        ionisation: For KI02 + GF12 (model-B) runs, the cooling model's
+            temperature and ionisation (:func:`ki02_ionisation_table`); None
+            keeps the fully ionised mu = 0.6 description.
 
     Returns:
         ``{f"{name}_{plane}": map}`` with ``name`` from :data:`MAP_UNITS` and
@@ -619,10 +735,22 @@ def emission_maps(
         # kernels are unchanged, only this projection step needs it.
         raise NotImplementedError("only edge-on (inclination 90 deg) projections exist")
 
-    temperature = (pressure / density) * conversions.kelvin_per_code_specific_energy
     number_density = density * conversions.total_number_density_per_code_density
-    electron_density = density * conversions.electron_density_per_code_density
-    hydrogen_density = density * conversions.hydrogen_density_per_code_density
+    if ionisation is None:
+        temperature = (pressure / density) * conversions.kelvin_per_code_specific_energy
+        electron_density = density * conversions.electron_density_per_code_density
+        hydrogen_density = density * conversions.hydrogen_density_per_code_density
+        recombining_hydrogen_density = hydrogen_density
+    else:
+        log10_t1 = jnp.log10(jnp.maximum((pressure / density) * ionisation.t1_per_code_specific_energy, 1.0))
+
+        def on_grid(values):
+            return _interpolate_uniform_grid(log10_t1, ionisation.log10_t1_start, ionisation.log10_t1_step, values)
+
+        temperature = 10.0 ** on_grid(ionisation.log10_temperature)
+        hydrogen_density = density * ionisation.hydrogen_density_per_code_density
+        electron_density = hydrogen_density * on_grid(ionisation.electron_fraction)
+        recombining_hydrogen_density = hydrogen_density * on_grid(ionisation.ionised_hydrogen_fraction)
 
     solar_metals = combined_log10_emissivity(
         table,
@@ -659,13 +787,13 @@ def emission_maps(
         ),
         "halpha": halpha_emissivity(
             electron_density,
-            hydrogen_density,
+            recombining_hydrogen_density,
             temperature,
             settings.halpha_temperature_window,
         ),
         "emission_measure": emission_measure_integrand(
             electron_density,
-            hydrogen_density,
+            recombining_hydrogen_density,
             temperature,
             settings.halpha_temperature_window,
         ),

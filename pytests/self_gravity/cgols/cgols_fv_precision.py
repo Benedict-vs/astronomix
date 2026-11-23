@@ -80,12 +80,13 @@ def main():
 
     print(f"{'run':>10} {'H':>3} {'peak':>6} {'15-40':>6} {'40-75':>6}   late cavity (45-75 Myr)")
     for label, ((t, mdot, _), (td, rho, p)) in runs.items():
-        late = td >= 45
+        late = np.round(td, 3) > 45
         floor_rho = np.mean(rho[late] <= FLOOR_RHO * 1.0001)
         floor_p = np.mean(p[late] <= FLOOR_P * 1.0001)
         for height in (1.0, 5.0, 8.0):
             rate = net_outflow(t, mdot, height)
-            high, low = (t >= 15) & (t <= 40), (t >= 40) & (t <= 75)
+            tr = np.round(t, 3)  # (t0, t1] on times rounded to 1e-3 Myr, as every window mean
+            high, low = (tr > 15) & (tr <= 40), (tr > 40) & (tr <= 75)
             extra = (
                 f"   min rho {rho[late].min():.2e}, min P {p[late].min():.2e}; "
                 f"steps at/below the FV floor: rho {floor_rho:.0%}, P {floor_p:.0%} (of {late.sum()})"

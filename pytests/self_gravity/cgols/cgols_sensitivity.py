@@ -50,9 +50,24 @@ Env knobs:
     CGOLS_DIM          resolution (needs a matching IC file; default 256 here)
     CGOLS_SENS_TMYR    integration end time in Myr (default 18; see horizon above)
     CGOLS_SENS_FDCHECK 1 = also do a finite-difference spot check (default 0)
+    CGOLS_SENS_XRAY    1 = also the edge-on soft X-ray surface brightness S_X and
+                       its tangents, in two models (default 0): the CGOLS I recipe
+                       (n^2 Lambda_A4(T) inside the hard 0.3-2 keV temperature
+                       window) and AtomDB 0.3-1.0 keV photons after Galactic
+                       absorption (N_H = 4e20 cm^-2, Z = Z_sun A09; the band of
+                       the M82 minor-axis comparison). The AtomDB emissivity is a
+                       piecewise-linear table in log T, so its tangent is defined
+                       everywhere; the CGOLS window is a step in T, so its tangent
+                       misses cells that cross a window edge (the finite-difference
+                       check measures how much that matters).
+    CGOLS_SENS_FD_EPS  finite-difference steps, comma-separated (default 0.05)
+    CGOLS_SENS_FDONLY  1 = only the finite-difference check (writes <tag>_fdcheck.npz)
+    CGOLS_SENS_PLOT_ONLY 1 = redraw the figures from the npz of this tag, no run
+    CGOLS_FIGURE_TITLES  0 = figures without the figure-level title (paper)
 """
 
 import os
+import time
 
 # Single GPU: the forward + tangent working set fits comfortably on one device
 # at 128/256, and sharding a jvp adds needless complexity. Set before importing
@@ -108,8 +123,25 @@ from cgols import (
 # --- run configuration -----------------------------------------------------
 T_END_MYR = float(os.environ.get("CGOLS_SENS_TMYR", "18"))
 FDCHECK = os.environ.get("CGOLS_SENS_FDCHECK", "0") == "1"
+XRAY = os.environ.get("CGOLS_SENS_XRAY", "0") == "1"
+#: steps of the central finite differences (comma-separated), and whether to stop after the check
+FD_EPS = tuple(float(e) for e in os.environ.get("CGOLS_SENS_FD_EPS", "0.05").split(","))
+FD_ONLY = os.environ.get("CGOLS_SENS_FDONLY", "0") == "1"
+PLOT_ONLY = os.environ.get("CGOLS_SENS_PLOT_ONLY", "0") == "1"
+TITLES = os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0"
+#: AtomDB model of the X-ray maps: the band, absorbing column and metallicity of the
+#: minor-axis S_X profiles (cgols_emission.py --xray-band 0.3-1 --xray-photons-nh 4e20).
+XRAY_BAND = "0.3-1"
+XRAY_NH_CM2 = 4e20
+XRAY_METALLICITY = 1.0
 RES = int(os.environ["CGOLS_DIM"])
 TAG = f"_d{RES}_t{T_END_MYR:g}myr"
+# float64 runs (CGOLS_X64=1) get their own files, never overwriting the float32 maps.
+if os.environ.get("CGOLS_X64", "0") == "1":
+    TAG += "_x64"
+# X-ray runs, too: they recompute the Sigma maps, which must not replace the files the manifest points to.
+if os.environ.get("CGOLS_SENS_XRAY", "0") == "1":
+    TAG += "_xray"
 
 # --- code-density -> physical helpers (module-level equivalents of the ones
 #     built inside cgols.make_snapshot_callable) ------------------------------
@@ -165,6 +197,30 @@ def build_pipeline():
 
     base_wind = params.cgols_wind_params
 
+    if XRAY:
+        from astronomix.analysis_helpers.emission import (
+            XRAY_TABLE_PATHS,
+            EmissionMapSettings,
+            emission_conversions,
+            emission_maps,
+            load_xray_emissivity_table,
+        )
+
+        table = load_xray_emissivity_table(XRAY_TABLE_PATHS[XRAY_BAND], photons=True,
+                                           absorbing_column_cm2=XRAY_NH_CM2)
+        conversions = emission_conversions(code_units)
+        settings = EmissionMapSettings(projection_axes=(1,), solar_abundance_set="A09")
+        cell_size = float(config.box_size.y) / dim_y
+
+    def xray(fields):
+        """Edge-on S_X(x, z) of the final (density, pressure) in the two models (see the module docstring).
+
+        Applied outside the differentiated time integration (exact chain rule on the returned fields and their
+        tangents), so it adds nothing to the integration's peak memory."""
+        maps = emission_maps(fields[0], fields[1], conversions, table, cell_size, settings)
+        return {"sx_cgols": maps["xray_cgols_xz"],
+                "sx_atomdb": maps["xray_atomdb_hhe_xz"] + XRAY_METALLICITY * maps["xray_atomdb_metals_xz"]}
+
     def f(theta):
         """theta = [alpha_M, alpha_E] -> (edge-on column density Sigma(x,z) [cm^-2],
         mid-plane number-density slice n(x,z) [cm^-3]).
@@ -181,12 +237,14 @@ def build_pipeline():
         rho = final[rv.density_index]                           # (dim_x, dim_y, dim_z)
         sigma = jnp.sum(rho, axis=1) * col_factor               # (dim_x, dim_z), cm^-2
         n_mid = rho[:, my, :] * N_FACTOR                        # (dim_x, dim_z), cm^-3
+        if XRAY:
+            return sigma, n_mid, (rho, final[rv.pressure_index])
         return sigma, n_mid
 
-    return f, config, params, rv
+    return f, (xray if XRAY else None), config, params, rv
 
 
-def compute_sensitivities(f):
+def compute_sensitivities(f, xray=None):
     theta0 = jnp.array([1.0, 1.0])
     e_M = jnp.array([1.0, 0.0])
     e_E = jnp.array([0.0, 1.0])
@@ -198,20 +256,30 @@ def compute_sensitivities(f):
     def jvp_dir(theta, tangent):
         return jax.jvp(f, (theta,), (tangent,))
 
+    xray_jvp = jax.jit(lambda fields, dfields: jax.jvp(xray, (fields,), (dfields,))) if xray else None
+    sx = {}
+
+    def run(direction, label):
+        """One direction; with X-ray, map the 3D fields right away and drop them before the next integration."""
+        primal, tangent = jvp_dir(theta0, direction)
+        if xray:
+            sx0, dsx = xray_jvp(primal[2], tangent[2])
+            for name in sx0:
+                sx[f"{name}0"] = np.asarray(sx0[name])
+                sx[f"d{name}_d{label}"] = np.asarray(dsx[name])
+            primal, tangent = primal[:2], tangent[:2]
+        return jax.tree_util.tree_map(np.asarray, jax.block_until_ready((primal, tangent)))
+
     # Direction 1 (mass loading): also yields the baseline primal.
-    (sigma0, n_mid0), (dsig_dM, dn_dM) = jvp_dir(theta0, e_M)
+    (sigma0, n_mid0), tan_M = run(e_M, "M")
     # Direction 2 (energy loading): reuses the compilation.
-    _, (dsig_dE, dn_dE) = jvp_dir(theta0, e_E)
-
-    out = jax.block_until_ready(
-        (sigma0, n_mid0, dsig_dM, dn_dM, dsig_dE, dn_dE)
-    )
-    return tuple(np.asarray(a) for a in out)
+    _, tan_E = run(e_E, "E")
+    return (sigma0, n_mid0, tan_M[0], tan_M[1], tan_E[0], tan_E[1], sx)
 
 
-def finite_difference_check(f, eps=0.05, k=300):
-    """Validate the mass-loading jvp against a central finite difference, on the
-    top-k highest-|tangent| pixels.
+def finite_difference_check(f, xray=None, eps_list=(0.05,), k=300, z=None, halo_z_kpc=1.0):
+    """Validate the mass-loading jvp against central finite differences, on the
+    top-k highest-|tangent| pixels, for each step in eps_list.
 
     The high-*column* disk pixels are NOT a meaningful test: the projection
     Sigma = sum_y n is a sum of ~10^21 terms in float32, so the ~O(1%) perturbed
@@ -220,25 +288,57 @@ def finite_difference_check(f, eps=0.05, k=300):
     injection region carry the signal well above that floor (SNR ~10^3), so the
     finite difference is trustworthy there. Mass loading (not energy) is used
     because it barely perturbs the CFL timestep, so the two forward runs share
-    the adaptive step schedule and no discretisation jump contaminates the fd."""
+    the adaptive step schedule and no discretisation jump contaminates the fd.
+
+    A map that responds strongly (|dln S/dln Mdot| of several, as S_X near the
+    injection region) is nonlinear over a 5 % step, so the central difference is a
+    secant there; the error must then fall with eps if the tangent is right. With z
+    (cell-centre z [kpc]) the metrics are also given for the halo, |z| > halo_z_kpc.
+
+    Returns (metrics, arrays): metrics[name][region][eps] = dict of numbers; arrays =
+    the tangent and the +/- maps of every eps, for the npz."""
     theta0 = jnp.array([1.0, 1.0])
     f_jit = jax.jit(f)
-    _, (dsig_dM, _) = jax.jvp(f, (theta0,), (jnp.array([1.0, 0.0]),))
-    sig_p, _ = f_jit(jnp.array([1.0 + eps, 1.0]))
-    sig_m, _ = f_jit(jnp.array([1.0 - eps, 1.0]))
-    ad = np.asarray(dsig_dM, dtype=np.float64).ravel()
-    fd = ((np.asarray(sig_p, dtype=np.float64) - np.asarray(sig_m, dtype=np.float64))
-          / (2 * eps)).ravel()
-    idx = np.argsort(np.abs(ad))[-k:]          # top-k by |analytic tangent|
-    a, d = ad[idx], fd[idx]
-    rel = np.abs(a - d) / np.maximum(np.abs(a), np.abs(d))
-    corr = float(np.corrcoef(a, d)[0, 1])
-    slope = float(np.polyfit(a, d, 1)[0])      # fd ~ slope * ad, expect ~1
-    print(
-        f"[fd-check] mass-loading jvp vs central diff (eps={eps}, top-{k} "
-        f"|tangent| px): median rel.err {np.median(rel):.2%}, corr {corr:.4f}, "
-        f"slope(fd/ad) {slope:.3f}  (corr~1, slope~1 => jvp validated)"
-    )
+
+    xray_jit = jax.jit(xray) if xray else None
+    xray_jvp = jax.jit(lambda fields, dfields: jax.jvp(xray, (fields,), (dfields,))) if xray else None
+
+    def maps(out, sx=None):
+        m = {"sigma": out[0]}
+        if xray:
+            m.update(sx if sx is not None else xray_jit(out[2]))
+        return {name: np.asarray(v, dtype=np.float64) for name, v in m.items()}
+
+    primal, tangent = jax.jit(lambda th: jax.jvp(f, (th,), (jnp.array([1.0, 0.0]),)))(theta0)
+    tangent = maps(tangent, xray_jvp(primal[2], tangent[2])[1] if xray else None)
+    del primal
+    arrays = {f"fdmap__{name}__ad": v for name, v in tangent.items()}
+    regions = {"all": None}
+    if z is not None:
+        regions["halo"] = np.broadcast_to(np.abs(np.asarray(z))[None, :] > halo_z_kpc,
+                                          next(iter(tangent.values())).shape).ravel()
+    metrics = {name: {region: {} for region in regions} for name in tangent}
+    for eps in eps_list:
+        plus = maps(f_jit(jnp.array([1.0 + eps, 1.0])))
+        minus = maps(f_jit(jnp.array([1.0 - eps, 1.0])))
+        for name in tangent:
+            arrays[f"fdmap__{name}__plus_{eps:g}"] = plus[name]
+            arrays[f"fdmap__{name}__minus_{eps:g}"] = minus[name]
+            ad_all = tangent[name].ravel()
+            fd_all = ((plus[name] - minus[name]) / (2 * eps)).ravel()
+            for region, mask in regions.items():
+                ad = ad_all if mask is None else np.where(mask, ad_all, 0.0)
+                idx = np.argsort(np.abs(ad))[-k:]          # top-k by |analytic tangent| in the region
+                a, d = ad_all[idx], fd_all[idx]
+                rel = np.abs(a - d) / np.maximum(np.abs(a), np.abs(d))
+                corr = float(np.corrcoef(a, d)[0, 1])
+                slope = float(np.polyfit(a, d, 1)[0])      # fd ~ slope * ad, expect ~1
+                m = {"median_rel_err": float(np.median(rel)), "corr": corr, "slope": slope}
+                metrics[name][region][eps] = m
+                print(f"[fd-check] {name} {region}: mass-loading jvp vs central diff (eps={eps:g}, top-{k} "
+                      f"|tangent| px): median rel.err {m['median_rel_err']:.2%}, corr {corr:.4f}, "
+                      f"slope(fd/ad) {slope:.3f}")
+    return metrics, arrays
 
 
 def plot_maps(sigma0, n_mid0, dsig_dM, dsig_dE, extent_xz, out):
@@ -289,9 +389,41 @@ def plot_maps(sigma0, n_mid0, dsig_dM, dsig_dE, extent_xz, out):
           title=r"relative: $\partial\ln\Sigma/\partial\ln\dot E$",
           cblabel="dimensionless")
 
-    fig.suptitle(
-        f"CGOLS outflow: surface-density sensitivity to feedback loading "
-        f"(edge-on, {RES}$^3$-ish, t = {T_END_MYR:g} Myr)", fontsize=12)
+    if TITLES:
+        fig.suptitle(
+            f"CGOLS outflow: surface-density sensitivity to feedback loading "
+            f"(edge-on, {RES}$^3$, t = {T_END_MYR:g} Myr)", fontsize=12)
+    fig.savefig(out, dpi=180)
+    plt.close(fig)
+    print(f"Wrote {out}")
+
+
+def plot_xray_maps(sx, extent_xz, out, model="sx_atomdb", rel_lim=None):
+    """1x3: S_X and its two relative (log) sensitivities, for one X-ray model."""
+    s0, dM, dE = sx[f"{model}0"], sx[f"d{model}_dM"], sx[f"d{model}_dE"]
+    floor = np.nanpercentile(s0[s0 > 0], 50) if np.any(s0 > 0) else 1.0   # the brighter half of the emitting pixels
+    safe = np.where(s0 > floor, s0, np.nan)
+    rel_M, rel_E = dM / safe, dE / safe
+    lim = rel_lim or max(_sym_limit(rel_M), _sym_limit(rel_E))
+    label = {"sx_atomdb": r"$S_X$, absorbed 0.3-1 keV [photons s$^{-1}$ cm$^{-2}$ sr$^{-1}$]",
+             "sx_cgols": r"$S_X$, CGOLS I recipe [erg s$^{-1}$ cm$^{-2}$ sr$^{-1}$]"}[model]
+    fig, ax = plt.subplots(1, 3, figsize=(13.5, 6.4), constrained_layout=True)
+    panels = (
+        (np.clip(s0, 1e-30, None), {"cmap": "magma", "norm": LogNorm(vmin=max(floor * 1e-2, 1e-30), vmax=np.nanmax(s0))},
+         r"soft X-ray surface brightness $S_X$", label),
+        (rel_M, {"cmap": "RdBu_r", "vmin": -lim, "vmax": lim}, r"$\partial\ln S_X/\partial\ln\dot M$", "dimensionless"),
+        (rel_E, {"cmap": "RdBu_r", "vmin": -lim, "vmax": lim}, r"$\partial\ln S_X/\partial\ln\dot E$", "dimensionless"),
+    )
+    for a, (data, kw, title, cblabel) in zip(ax, panels):
+        im = a.imshow(data.T, origin="lower", extent=extent_xz, aspect="equal", **kw)
+        a.set_title(title, fontsize=10)
+        a.set_xlabel("x [kpc]", fontsize=8)
+        a.set_ylabel("z [kpc]", fontsize=8)
+        a.tick_params(labelsize=7)
+        fig.colorbar(im, ax=a, shrink=0.8, label=cblabel)
+    if TITLES:
+        fig.suptitle(f"CGOLS outflow: X-ray sensitivity to feedback loading ({model}, edge-on, {RES}$^3$, "
+                     f"t = {T_END_MYR:g} Myr)", fontsize=12)
     fig.savefig(out, dpi=180)
     plt.close(fig)
     print(f"Wrote {out}")
@@ -323,9 +455,10 @@ def plot_profiles(n_mid0, dn_dM, dn_dE, x, z, out, x_targets=(0.0, 0.5, 1.0, 2.0
     for a in (ax[1], ax[2]):
         a.axhline(0.0, color="0.4", lw=0.8)
 
-    fig.suptitle(
-        f"CGOLS outflow: vertical density profiles & feedback sensitivity "
-        f"(mid-plane y-slice, t = {T_END_MYR:g} Myr)", fontsize=12)
+    if TITLES:
+        fig.suptitle(
+            f"CGOLS outflow: vertical density profiles & feedback sensitivity "
+            f"(mid-plane y-slice, t = {T_END_MYR:g} Myr)", fontsize=12)
     fig.savefig(out, dpi=180)
     plt.close(fig)
     print(f"Wrote {out}")
@@ -334,14 +467,40 @@ def plot_profiles(n_mid0, dn_dM, dn_dE, x, z, out, x_targets=(0.0, 0.5, 1.0, 2.0
 if __name__ == "__main__":
     print(f"CGOLS sensitivity run: DIM={RES}, t_end={T_END_MYR:g} Myr, "
           f"fd_check={FDCHECK}")
-    f, config, params, rv = build_pipeline()
+    npz_path = _data_study(f"cgols_sensitivity{TAG}.npz")
+    if PLOT_ONLY:
+        d = np.load(npz_path)
+        extent_xz = tuple(d["extent_xz"])
+        plot_maps(d["sigma0"], d["n_mid0"], d["dsig_dM"], d["dsig_dE"], extent_xz,
+                  _study_fig(f"sensitivity_maps{TAG}.png"))
+        plot_profiles(d["n_mid0"], d["dn_dM"], d["dn_dE"], d["x"], d["z"],
+                      _study_fig(f"sensitivity_profiles{TAG}.png"))
+        sx = {k: d[k] for k in d.files if "sx_" in k}
+        for model in ("sx_atomdb", "sx_cgols"):
+            if f"{model}0" in sx:
+                plot_xray_maps(sx, extent_xz, _study_fig(f"sensitivity_xray_{model[3:]}{TAG}.png"), model)
+        raise SystemExit(0)
+
+    f, xray, config, params, rv = build_pipeline()
     x, y, z, extent_xz, _ = _snapshot_grid(config)
 
-    if FDCHECK:
-        finite_difference_check(f)
+    fd_result, fd_arrays = (finite_difference_check(f, xray, FD_EPS, z=np.asarray(z)) if FDCHECK
+                            else (None, {}))
+    if FD_ONLY:
+        extra = {f"fdcheck__{name}__{region}__eps{eps:g}__{key}": np.float64(v)
+                 for name, by_region in fd_result.items() for region, by_eps in by_region.items()
+                 for eps, r in by_eps.items() for key, v in r.items()}
+        fd_path = _data_study(f"cgols_sensitivity{TAG}_fdcheck.npz")
+        np.savez(fd_path, **fd_arrays, **extra, z=np.asarray(z), x=np.asarray(x))
+        print(f"Wrote {fd_path}")
+        raise SystemExit(0)
 
     print("Running forward-mode jvp through the solver (compiles on first pass)...")
-    sigma0, n_mid0, dsig_dM, dn_dM, dsig_dE, dn_dE = compute_sensitivities(f)
+    t_start = time.perf_counter()
+    sigma0, n_mid0, dsig_dM, dn_dM, dsig_dE, dn_dE, sx = compute_sensitivities(f, xray)
+    print(f"[timing] jvp in both directions incl. compile: {time.perf_counter() - t_start:.0f} s")
+    for name, v in sx.items():
+        print(f"  {name}: finite {np.isfinite(v).mean():.4f}, max |.| {np.nanmax(np.abs(v)):.3e}")
 
     # Tangent-overflow guard: if the linearisation has gone NaN everywhere the
     # cavity has out-run the safe window (see the module docstring). Fail loudly
@@ -367,9 +526,17 @@ if __name__ == "__main__":
     plot_profiles(n_mid0, dn_dM, dn_dE, np.asarray(x), np.asarray(z),
                   _study_fig(f"sensitivity_profiles{TAG}.png"))
 
-    npz_path = _data_study(f"cgols_sensitivity{TAG}.npz")
+    for model in ("sx_atomdb", "sx_cgols"):
+        if f"{model}0" in sx:
+            plot_xray_maps(sx, extent_xz, _study_fig(f"sensitivity_xray_{model[3:]}{TAG}.png"), model)
+    extra = {}
+    if fd_result:
+        extra = {f"fdcheck__{name}__{region}__eps{eps:g}__{key}": np.float64(v)
+                 for name, by_region in fd_result.items() for region, by_eps in by_region.items()
+                 for eps, r in by_eps.items() for key, v in r.items()}
     np.savez(
         npz_path,
+        **sx, **extra,
         sigma0=sigma0, n_mid0=n_mid0,
         dsig_dM=dsig_dM, dsig_dE=dsig_dE, dn_dM=dn_dM, dn_dE=dn_dE,
         x=np.asarray(x), y=np.asarray(y), z=np.asarray(z),

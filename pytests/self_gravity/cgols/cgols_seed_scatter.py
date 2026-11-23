@@ -94,13 +94,13 @@ def color(scheme, seed):
 
 
 def window(t, start, end):
-    """Frames in [start, end] Myr, with a margin for the seed runs' frame times.
+    """Frames in (start, end] Myr (the paper's window rule), with a margin for the seed runs' frame times.
 
     Without checkpoints a frame is written at the first step past each 1.25 Myr mark (up to ~0.07 Myr late
     early on, <= 0.01 Myr after 10 Myr), with them exactly on it; the margin keeps e.g. the 40.01 Myr frame
     in "15-40" so every run averages the same 21 frames.
     """
-    return (t >= start - WINDOW_MARGIN_MYR) & (t <= end + WINDOW_MARGIN_MYR)
+    return (t > start + WINDOW_MARGIN_MYR) & (t <= end + WINDOW_MARGIN_MYR)
 
 
 def asymmetry(frame):

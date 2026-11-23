@@ -75,7 +75,7 @@ def metrics(run):
         return None
     t, mdot = data
     z = (np.arange(mdot.shape[1]) + 0.5) * BOX_Z / mdot.shape[1] - BOX_Z / 2
-    high = (t >= 15) & (t <= 40)
+    high = (t > 15 + 1e-3) & (t <= 40 + 1e-3)  # (15, 40]
     out = {}
     for H in (1.0, 5.0, 8.0):
         rate = mdot[:, np.argmin(np.abs(z - H))] - mdot[:, np.argmin(np.abs(z + H))]
@@ -191,7 +191,8 @@ def main():
     axis.grid(alpha=0.3)
     axis.legend(fontsize=7.5, loc="lower right")
 
-    figure.suptitle(f"Model C, adiabatic, {DIM}$^3$: same total injected mass, energy and volume, split into N regions")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        figure.suptitle(f"Model C, adiabatic, {DIM}$^3$: same total injected mass, energy and volume, split into N regions")
     figure.tight_layout()
     os.makedirs(FIG_DIR, exist_ok=True)
     out = os.path.join(FIG_DIR, f"model_c_cluster_number_scaling_{DIM}.png")

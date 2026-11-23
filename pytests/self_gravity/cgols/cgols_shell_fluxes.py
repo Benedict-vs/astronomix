@@ -3,7 +3,7 @@ Outflow rates through spherical shells, from the full 3D CGOLS checkpoints.
 
 The plane fluxes of cgols_convergence_3d.py integrate rho v_z over a flat
 x-y plane at |z| = H. This script measures the radial fluxes the way CGOLS IV
-(Schneider et al. 2020, Sec. 5.2) does: for every radial bin [r, r + DR) it
+(Schneider et al. 2020, Sec. 4.3; 0.25 kpc bins in a 30 degree bicone there) does: for every radial bin [r, r + DR) it
 sums over the cells in the bin and divides by the bin width,
 
     Mdot(r) = sum(m v_r) / DR,   v_r = (x v_x + y v_y + z v_z) / r,
@@ -398,7 +398,7 @@ def solid_angle_bins():
 
 
 def window_mean(rec, window, fn):
-    steps = [s for s in sorted(rec) if window[0] <= rec[s]["time_myr"] <= window[1]]
+    steps = [s for s in sorted(rec) if window[0] + 1e-3 < rec[s]["time_myr"] <= window[1] + 1e-3]  # (t0, t1]
     return np.mean([fn(rec[s]) for s in steps], axis=0)
 
 
@@ -450,7 +450,8 @@ def plot(runs, prefix="a_series"):
         for ax in axes[row]:
             ax.axhline(0, color="0.6", lw=0.8)
     axes[0, 0].legend(fontsize=7)
-    fig.suptitle("Outflow rates through spherical shells (time means; faint: the shell leaves the box)")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("Outflow rates through spherical shells (time means; faint: the shell leaves the box)")
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{prefix}_shells_profiles.png"), dpi=130)
     plt.close(fig)

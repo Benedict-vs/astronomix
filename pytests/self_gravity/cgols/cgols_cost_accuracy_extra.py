@@ -187,7 +187,7 @@ def measure_frames(frame_dir):
                 out.append(float(m.std() / m.mean()) if m.mean() > 0 else np.nan)
             else:
                 out.append(np.nan)
-        if 30 - syn.WINDOW_MARGIN <= time <= 45 + syn.WINDOW_MARGIN:
+        if 30 + syn.WINDOW_MARGIN < time <= 45 + syn.WINDOW_MARGIN:  # (30, 45], as syn.window
             logn = np.log10(np.maximum(n.astype(np.float64), 1e-12))
             north = (z > SPEC_BAND[0]) & (z < SPEC_BAND[1])
             south = (z < -SPEC_BAND[0]) & (z > -SPEC_BAND[1])

@@ -12,14 +12,24 @@ separate environment, e.g.
     # pyatomdb.util.download_atomdb_emissivity_files(<dir>, "00000000", <version>)
     ATOMDB=/path/to/atomdb /path/to/venv/bin/python generate_xray_emissivity_table.py
 
-It writes ``xray_emissivity_0p3_2keV_atomdb.npz`` next to this file.
+It writes ``xray_emissivity_0p3_2keV_atomdb.npz`` next to this file. Another band:
+``ASTRONOMIX_XRAY_BAND_KEV=0.3,1.0`` writes ``xray_emissivity_0p3_1keV_atomdb.npz``
+(the band of the Strickland et al. 2004 M82 minor-axis fits).
 
 What is tabulated
 -----------------
 The APEC collisional-ionisation-equilibrium (CIE) emissivity integrated over
-the 0.3-2.0 keV band (energy, not photons), per unit ``n_e n_H``:
+the band (0.3-2.0 keV by default), per unit ``n_e n_H``, in energy:
 
     epsilon(T) = sum_bins E_bin * spectrum(T)_bin     [erg cm^3 s^-1]
+
+and in photons, ``sum_bins spectrum(T)_bin * exp(-N_H sigma(E_bin))``
+[photons cm^3 s^-1] (keys with ``photon`` in the name), for comparisons with
+observed photon fluxes. The photon tables carry a leading absorbing-column axis
+``absorbing_column_cm2`` (0 = unabsorbed); the transmission is TBabs from
+``soxs`` (Anders & Grevesse abundances). Strickland et al. (2004) quote M82's
+minor-axis fits as photon fluxes at the telescope aperture, i.e. after
+Galactic (4.0e20 cm^-2 toward M82) and any intrinsic absorption.
 
 split into a hydrogen + helium part and one part per metal at its solar
 abundance (Anders & Grevesse 1989, the AtomDB / XSPEC default). Emission is
@@ -40,11 +50,12 @@ import os
 # numerics
 import numpy as np
 
-# atomic data (build-time only)
+# atomic data and absorption (build-time only)
 import pyatomdb
+import soxs.spectra
 
 LOG10_TEMPERATURE_GRID = np.round(np.arange(5.0, 9.0 + 1e-9, 0.02), 4)
-BAND_KEV = (0.3, 2.0)
+BAND_KEV = tuple(float(v) for v in os.environ.get("ASTRONOMIX_XRAY_BAND_KEV", "0.3,2.0").split(","))
 BIN_WIDTH_KEV = 1e-3
 KEV_TO_ERG = 1.602176634e-9
 
@@ -52,15 +63,30 @@ KEV_TO_ERG = 1.602176634e-9
 # line in the band at some temperature); 10^-60 is zero for every purpose.
 LOG10_EMISSIVITY_FLOOR = -60.0
 
+#: Absorbing columns [cm^-2] of the photon tables: none, Galactic toward M82
+#: (Strickland et al. 2004, Table 2), and Galactic plus intrinsic columns.
+ABSORBING_COLUMNS_CM2 = (0.0, 4.0e20, 1.0e21, 2.0e21, 4.0e21)
+
+def _kev_tag(value):
+    """0.3 -> '0p3', 2.0 -> '2', for the file name."""
+    return f"{value:g}".replace(".", "p")
+
+
 OUTPUT_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "xray_emissivity_0p3_2keV_atomdb.npz",
+    f"xray_emissivity_{_kev_tag(BAND_KEV[0])}_{_kev_tag(BAND_KEV[1])}keV_atomdb.npz",
 )
 
 
-def band_emissivity(session, energy_centers_erg):
-    """Band-integrated energy emissivity [erg cm^3 s^-1] on the temperature grid."""
+def band_emissivity(session, energy_centers_erg, transmission):
+    """
+    Band-integrated emissivities on the temperature grid.
+
+    Returns (energy [erg cm^3 s^-1], shape (T,); photons [cm^3 s^-1] after
+    absorption, shape (columns, T)); ``transmission`` has shape (columns, bins).
+    """
     emissivity = np.empty(LOG10_TEMPERATURE_GRID.size)
+    photon_emissivity = np.empty((transmission.shape[0], LOG10_TEMPERATURE_GRID.size))
     for i, log10_temperature in enumerate(LOG10_TEMPERATURE_GRID):
         # Raw spectrum (no response): photons cm^3 s^-1 per energy bin.
         photons_per_bin = session.return_spectrum(
@@ -68,7 +94,8 @@ def band_emissivity(session, energy_centers_erg):
             teunit="K",
         )
         emissivity[i] = np.sum(photons_per_bin * energy_centers_erg)
-    return emissivity
+        photon_emissivity[:, i] = transmission @ photons_per_bin
+    return emissivity, photon_emissivity
 
 
 def main():
@@ -78,7 +105,13 @@ def main():
         BAND_KEV[1] + 0.5 * BIN_WIDTH_KEV,
         BIN_WIDTH_KEV,
     )
-    energy_centers_erg = 0.5 * (energy_edges_kev[1:] + energy_edges_kev[:-1]) * KEV_TO_ERG
+    energy_centers_kev = 0.5 * (energy_edges_kev[1:] + energy_edges_kev[:-1])
+    energy_centers_erg = energy_centers_kev * KEV_TO_ERG
+    transmission = np.array([
+        np.ones_like(energy_centers_kev) if column == 0.0
+        else np.asarray(soxs.spectra.get_tbabs_absorb(energy_centers_kev, column / 1e22))
+        for column in ABSORBING_COLUMNS_CM2
+    ])
 
     session = pyatomdb.spectrum.CIESession(abundset="AG89")
     session.set_response(energy_edges_kev, raw=True)
@@ -86,21 +119,23 @@ def main():
 
     # Hydrogen + helium only.
     session.set_abund(metals, 0.0)
-    emissivity_hydrogen_helium = band_emissivity(session, energy_centers_erg)
+    emissivity_hydrogen_helium, photons_hydrogen_helium = band_emissivity(session, energy_centers_erg, transmission)
     print(f"H+He done; eps(1e7 K) = {emissivity_hydrogen_helium[100]:.3e}", flush=True)
 
     # One metal at a time on top of H+He; the difference is that metal's part.
     emissivity_metals = np.empty((len(metals), LOG10_TEMPERATURE_GRID.size))
+    photons_metals = np.empty((len(metals), len(ABSORBING_COLUMNS_CM2), LOG10_TEMPERATURE_GRID.size))
     for row, element in enumerate(metals):
         session.set_abund(metals, 0.0)
         session.set_abund(element, 1.0)
-        with_element = band_emissivity(session, energy_centers_erg)
+        with_element, photons_with_element = band_emissivity(session, energy_centers_erg, transmission)
         emissivity_metals[row] = np.maximum(with_element - emissivity_hydrogen_helium, 0.0)
+        photons_metals[row] = np.maximum(photons_with_element - photons_hydrogen_helium, 0.0)
         print(f"Z = {element:2d} done; eps(1e7 K) = {emissivity_metals[row, 100]:.3e}", flush=True)
 
     # Cross-check: the full solar mixture must equal the sum of the parts.
     session.set_abund(metals, 1.0)
-    emissivity_full = band_emissivity(session, energy_centers_erg)
+    emissivity_full, _ = band_emissivity(session, energy_centers_erg, transmission)
     reconstructed = emissivity_hydrogen_helium + emissivity_metals.sum(axis=0)
     relative_error = np.max(np.abs(reconstructed - emissivity_full) / emissivity_full)
     print(f"max relative error of the per-element decomposition: {relative_error:.2e}")
@@ -124,12 +159,16 @@ def main():
         log10_emissivity_hydrogen_helium=to_log10(emissivity_hydrogen_helium),
         metal_atomic_numbers=np.array(metals, dtype=np.int32),
         log10_emissivity_metals=to_log10(emissivity_metals),
+        log10_photon_emissivity_hydrogen_helium=to_log10(photons_hydrogen_helium),
+        log10_photon_emissivity_metals=to_log10(photons_metals),
+        absorbing_column_cm2=np.array(ABSORBING_COLUMNS_CM2),
         solar_abundance_ag89=np.array([abundance_ag89[z] for z in metals]),
         solar_abundance_ga10=np.array([abundance_ga10[z] for z in metals]),
         band_kev=np.array(BAND_KEV),
         decomposition_relative_error=np.float64(relative_error),
         description=np.array(
-            "APEC CIE band emissivity 0.3-2.0 keV [erg cm^3 s^-1 per n_e n_H], "
+            f"APEC CIE band emissivity {BAND_KEV[0]:g}-{BAND_KEV[1]:g} keV [erg cm^3 s^-1 per n_e n_H; "
+            "photon_* keys: photons cm^3 s^-1 after TBabs absorption by absorbing_column_cm2], "
             f"AtomDB data {atomdb_data_version}, pyatomdb {pyatomdb.__version__}; "
             "metals at AG89 solar abundance"
         ),

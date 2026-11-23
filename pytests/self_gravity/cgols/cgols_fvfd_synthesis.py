@@ -274,7 +274,9 @@ WINDOW_MARGIN = 0.2  # Myr, as cgols_seed_scatter.window
 
 
 def window(t, start, end):
-    return (t >= start - WINDOW_MARGIN) & (t <= end + WINDOW_MARGIN)
+    """Frames in (start, end] Myr, the paper's window rule; the margin keeps a late-written seed-run frame
+    (up to ~0.07 Myr past its mark) at its nominal time."""
+    return (t > start + WINDOW_MARGIN) & (t <= end + WINDOW_MARGIN)
 
 
 def block_se(t, y, start, end, block=5.0):
@@ -291,7 +293,7 @@ def block_se(t, y, start, end, block=5.0):
     edges = np.arange(start, end + 1e-6, block)
     means = []
     for a, b in itertools.pairwise(edges):
-        sel = inside & (t >= a - WINDOW_MARGIN) & ((t < b - WINDOW_MARGIN) if b < end - 1e-6 else (t <= b + WINDOW_MARGIN))
+        sel = inside & (t > a + WINDOW_MARGIN) & (t <= b + WINDOW_MARGIN)
         if sel.any():
             means.append(np.mean(resid[sel]))
     return float(np.std(means, ddof=1) / np.sqrt(len(means))) if len(means) >= 2 else np.nan
@@ -972,8 +974,9 @@ def fig_significance(st):
                  fontsize=10)
     ax_k.set_title("(b) equivalent resolution k (16-84% over sigma);\nblank: no FV run or FD ladder not monotone there",
                    fontsize=10)
-    fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-2048",
-                 fontsize=12)
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS model A, FD (WENO5-Z) vs FV (VL2 + PLM + HLLC): every metric, 128-2048",
+                     fontsize=12)
     fig.tight_layout()
     path = f"{FIG_DIR}/fvfd_summary_significance.png"
     fig.savefig(path, dpi=110)
@@ -1379,8 +1382,9 @@ def fig_ppm_ladder(runs, data, st, summary):
              title="cost (labels: ms/step, steps)\nPPM on HoreKa, PLM / FD local")
     ax_c.legend(fontsize=8)
     ax_c.grid(alpha=0.3, axis="y", which="both")
-    fig.suptitle("CGOLS A256 / A512, FV VL2 + HLLC: PPM (AthenaPK ppm_simple, GPU) vs PLM corrector, against FD at N "
-                 "and 2N")
+    if os.environ.get("CGOLS_FIGURE_TITLES", "1") != "0":  # CGOLS_FIGURE_TITLES=0: no title (paper figures)
+        fig.suptitle("CGOLS A256 / A512, FV VL2 + HLLC: PPM (AthenaPK ppm_simple, GPU) vs PLM corrector, against FD "
+                     "at N and 2N")
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     path = f"{FIG_DIR}/fv_ppm_A256_A512.png"
     fig.savefig(path, dpi=100)
