@@ -373,6 +373,8 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     dcoef = float(GR._D_COEF); e32 = float(GR._E32)
     SAFETY, ERR_FLOOR, FAC_MIN, FAC_MAX, ORDER_EXP = float(GR.SAFETY), float(GR.ERR_FLOOR), float(GR.FAC_MIN), float(GR.FAC_MAX), float(GR.ORDER_EXP)
     RTOL, ATOL, MAXS, FIRST = float(rtol), float(atol), int(max_steps), float(first_step_fraction)
+    # the first trial step as t1 / (1 / fraction): bit-identical to the former fixed t1 / 100 for the default 0.01
+    INVERSE_FIRST = 1.0 / float(first_step_fraction)
     STALL = float(STALL_FRACTION)
 
     @wp.func
@@ -409,7 +411,7 @@ def build_fused_core_solver(vector_field, dim, *, rtol=1e-6, atol=1e-15, max_ste
     def rosenbrock23_cells(y0: wp.array(dtype=vecD), dt_cell: wp.array(dtype=wp.float64), parameter: wp.array(dtype=wp.float64),
                            tables: wp.array(dtype=wp.float64), y_out: wp.array(dtype=vecD), steps_out: wp.array(dtype=wp.int32)):
         jt = wp.tid()
-        t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 * wp.float64(FIRST)
+        t = wp.float64(0.0); t1 = dt_cell[jt]; dt = t1 / wp.float64(INVERSE_FIRST)
         y = y0[jt]; p = vecP(); pj = vecD()   # the field takes a length-1 parameter vector, the Jacobian a length-dim one
         # the parameter of the cell; a right-hand side built without one does not read it
         p[0] = parameter[jt]; pj[0] = parameter[jt]

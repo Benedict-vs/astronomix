@@ -223,12 +223,10 @@ def main():
     parser.add_argument("--isothermal", action="store_true", help="hold the temperature instead of integrating it with the "
                         "species (Kvaerno5 only)")
     parser.add_argument("--thermochemistry", action="store_true", help=argparse.SUPPRESS)  # the default; kept for old command lines
-    parser.add_argument("--no-metal-table", action="store_true", help="without the tabulated metal cooling above 1e4 K, "
-                        "which the Warp kernel cannot evaluate")
+    parser.add_argument("--no-metal-table", action="store_true", help="without the tabulated metal cooling above 1e4 K")
     parser.add_argument("--free-free", action="store_true", help="add the bremsstrahlung of the atomic ions (KROME's "
                         "-cooling=FF), the main coolant of ionised gas above about 1e7 K")
     parser.add_argument("--no-h2-on-dust", action="store_true", help="without the H2 formation on dust (Jura)")
-    parser.add_argument("--free-free", action="store_true", help="add the bremsstrahlung of the ions (KROME's -cooling=FF)")
     parser.add_argument("--rtol", type=float, default=1.0e-6)
     parser.add_argument("--atol", type=float, default=1.0e-12)
     parser.add_argument("--no-kernel", action="store_true", help="skip the Warp kernel (gradsolve, warp-lang)")
