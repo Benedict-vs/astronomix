@@ -409,6 +409,22 @@ def _iteration_level_updates(
                 current_time - 0.5 * dt,
             )
 
+        def _reported(result):
+            # ChemistryConfig.count_unfinished_cells: update_chemistry returns (state, unfinished); a call that
+            # left cells unfinished prints a line (per device in a sharded run), the state goes on
+            if not config.chemistry_config.count_unfinished_cells:
+                return result
+            reacted, unfinished = result
+            jax.lax.cond(
+                unfinished > 0,
+                lambda count: jax.debug.print(
+                    "[chemistry] {count} cells did not reach the end of their reaction step", count=count
+                ),
+                lambda count: None,
+                unfinished,
+            )
+            return reacted
+
         def _react(state, dt_react, accumulated=None):
             if multi_device:
                 # Only what ``update_chemistry`` reads is passed (replicated):
@@ -435,7 +451,7 @@ def _iteration_level_updates(
                             )
                     # no mesh inside the block: it is one device's local array
                     with pallas_mesh_context(None):
-                        return update_chemistry(
+                        return _reported(update_chemistry(
                             local_state,
                             registered_variables,
                             config.chemistry_config,
@@ -443,7 +459,7 @@ def _iteration_level_updates(
                             dt_local,
                             *accumulated_local,
                             radiation_scale=local_radiation,
-                        )
+                        ))
 
                 state_spec = _resolve_state_pspec(state, active_mesh)
                 replicated = PartitionSpec()
@@ -465,31 +481,31 @@ def _iteration_level_updates(
                 # closed over: explicit-mesh mode forbids capturing sharded inputs).
                 if accumulated is None:
                     return run_in_shard_map(
-                        lambda local_state, dt_local, params_local: update_chemistry(
+                        lambda local_state, dt_local, params_local: _reported(update_chemistry(
                             local_state,
                             registered_variables,
                             config.chemistry_config,
                             params_local,
                             dt_local,
-                        ),
+                        )),
                         state,
                         fv_sharding,
                         replicated_args=(dt_react, params),
                     )
                 return run_in_shard_map(
-                    lambda local_state, dt_local, params_local, acc_local: update_chemistry(
+                    lambda local_state, dt_local, params_local, acc_local: _reported(update_chemistry(
                         local_state,
                         registered_variables,
                         config.chemistry_config,
                         params_local,
                         dt_local,
                         acc_local,
-                    ),
+                    )),
                     state,
                     fv_sharding,
                     replicated_args=(dt_react, params, accumulated),
                 )
-            return update_chemistry(
+            return _reported(update_chemistry(
                 state,
                 registered_variables,
                 config.chemistry_config,
@@ -497,7 +513,7 @@ def _iteration_level_updates(
                 dt_react,
                 accumulated,
                 radiation,
-            )
+            ))
 
         if chemistry_dt is None:
             primitive_state = _react(primitive_state, dt)

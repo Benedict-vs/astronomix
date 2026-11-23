@@ -196,6 +196,13 @@ class ChemistryConfig(NamedTuple):
     # cells among fast neighbours (a disk in a column of halo cells) hold the others up; ordered, a warp holds cells
     # that need about the same number of steps. The results are the same bit for bit; the cost is one sort per call.
     order_cells_for_kernel: bool = True
+    # Count the cells whose reaction did not reach the end of its step (opt-in; off: the return value and the results
+    # are those of before). Per-cell kernel: a negative trial-step count (out of ``max_steps``, or a collapsed step) or
+    # a non-finite result in any split of the call; such a cell keeps its last accepted state. Kvaerno5: a solve that
+    # did not return success or a non-finite result; such a cell keeps its pre-step state. Cells with a zero step
+    # (density gate) are not counted. With it on, ``update_chemistry`` returns ``(state, unfinished)`` and a run prints
+    # a line for every reaction call that left cells unfinished. The results are the same bit for bit either way.
+    count_unfinished_cells: bool = False
     # --- composition of the species (``build_chemistry_from_network_file`` fills these from the species names) ---
     # The elements of the network, the atoms of every element in every species (one row per element, one column per
     # species) and the charge of every species. Static, because the finite-difference transport of the species

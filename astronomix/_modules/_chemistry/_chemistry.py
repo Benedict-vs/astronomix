@@ -167,6 +167,7 @@ def _advance_single_cell(
     co_cooling_table,
     co_cooling_bounds,
     radiation_scale=None,
+    return_success=False,
 ):
     """Advance one cell's chemistry over ``time_step_seconds`` with a stiff solve.
 
@@ -214,11 +215,14 @@ def _advance_single_cell(
         radiation_scale: The radiation field of this cell as a factor on the
             radiation the parameters describe (see :func:`make_vector_field`);
             ``None`` for none. Needs ``thermochemistry``.
+        return_success: Also return whether the solve reached the end of the
+            step with a finite state (``ChemistryConfig.count_unfinished_cells``).
 
     Returns:
         The end-of-step cell state: the updated abundances [cm^-3] alone, or the
         abundances with the updated temperature [K] appended when
-        ``thermochemistry`` is enabled.
+        ``thermochemistry`` is enabled; with ``return_success`` the pair
+        ``(state, finished)``.
     """
 
     # Diffrax is an optional dependency; keep the import local so the package
@@ -353,8 +357,12 @@ def _advance_single_cell(
     # element-wise finite check is a final backstop.
     final_state = solution.ys[-1]
     solve_succeeded = solution.result == dx.RESULTS.successful
+    finite = jnp.isfinite(final_state)
     final_state = jnp.where(solve_succeeded, final_state, initial_state)
-    final_state = jnp.where(jnp.isfinite(final_state), final_state, initial_state)
+    final_state = jnp.where(finite, final_state, initial_state)
+    if return_success:
+        # ``ChemistryConfig.count_unfinished_cells``: did this cell reach the end of its step?
+        return final_state, solve_succeeded & jnp.all(finite)
     return final_state
 
 
@@ -719,9 +727,18 @@ def update_chemistry(
     Returns:
         The primitive state with the species block advanced by one reaction step
         (and, with thermochemistry, the pressure updated by heating/cooling).
+        With ``chemistry_config.count_unfinished_cells`` the pair ``(state,
+        unfinished)``: the number of cells whose reaction did not reach the end
+        of its step in this call (int32; see the option).
     """
 
     chemistry_params = simulation_params.chemistry_params
+    count_unfinished = bool(chemistry_config.count_unfinished_cells)
+    if count_unfinished and chemistry_config.solver == EMULATOR:
+        raise NotImplementedError(
+            "count_unfinished_cells is implemented for the stiff solvers in every cell (per-cell kernel or Kvaerno5), "
+            "not for the emulator"
+        )
     if radiation_scale is not None and (
         chemistry_config.solver == EMULATOR
         or accumulated_time_step is not None
@@ -887,7 +904,11 @@ def update_chemistry(
             co_cooling_bounds=chemistry_params.co_cooling_bounds,
         )
     if chemistry_config.solver != EMULATOR:
-        react_one_cell = partial(_advance_single_cell, **bound_step, **stiff_kwargs)
+        react_one_cell = partial(
+            _advance_single_cell, **bound_step, **stiff_kwargs, return_success=count_unfinished
+        )
+    # cells that did not reach the end of their step (count_unfinished_cells)
+    unfinished_per_cell = None
     # At full grid resolution a single ``vmap`` over every cell materialises the
     # stiff solver's per-cell working set for the whole grid at once, which is
     # the memory bottleneck (the state itself is small). When a chunk size is
@@ -936,16 +957,29 @@ def update_chemistry(
         kernel_arguments = ()
         if radiation_per_cell is not None:
             kernel_arguments = (radiation_per_cell if order is None else radiation_per_cell[order],)
+        if count_unfinished:
+            unfinished_per_cell = jnp.zeros((number_of_cells,), dtype=bool)
         for _ in range(splits):
-            proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits, *kernel_arguments)
+            if count_unfinished:
+                # the same launch as without the count; it also hands back the trial steps of every cell,
+                # negative for a cell that did not reach the end of its interval
+                proposed, steps = chemistry_config.stiff_core_fn.with_steps(
+                    reacted_per_cell, step_cells / splits, *kernel_arguments
+                )
+            else:
+                proposed = chemistry_config.stiff_core_fn(reacted_per_cell, step_cells / splits, *kernel_arguments)
             # like diffrax with throw=False: a cell that returned a non-finite
             # state keeps its pre-step state
             finite = jnp.all(jnp.isfinite(proposed), axis=1)
             reacted_per_cell = jnp.where(finite[:, None], proposed, reacted_per_cell)
+            if count_unfinished:
+                unfinished_per_cell = unfinished_per_cell | (jnp.asarray(steps) < 0) | ~finite
         if order is not None:
             # back to the order of the grid
             position = jnp.zeros_like(order).at[order].set(jnp.arange(number_of_cells, dtype=order.dtype))
             reacted_per_cell = reacted_per_cell[position]
+            if count_unfinished:
+                unfinished_per_cell = unfinished_per_cell[position]
     elif gated:
         splits = max(int(chemistry_config.chemistry_call_splits), 1)
         step_per_cell = time_step_seconds_per_cell.reshape(number_of_cells) / splits
@@ -960,6 +994,9 @@ def update_chemistry(
             return jax.vmap(react_one_cell)(species_rows, temperature_rows, step_per_cell)
 
         reacted_per_cell = react_all(species_per_cell, temperature_per_cell)
+        if count_unfinished:
+            reacted_per_cell, finished = reacted_per_cell
+            unfinished_per_cell = ~finished
         for _ in range(splits - 1):
             # Further passes start from the previous pass's abundances and (with
             # thermochemistry) temperature.
@@ -968,9 +1005,14 @@ def update_chemistry(
                 if chemistry_config.thermochemistry else temperature_per_cell
             )
             reacted_per_cell = react_all(reacted_per_cell[:, :number_of_species], next_temperature)
+            if count_unfinished:
+                reacted_per_cell, finished = reacted_per_cell
+                unfinished_per_cell = unfinished_per_cell | ~finished
         # Cells whose step is zero this call keep their pre-reaction state (the
         # emulator is not defined at a zero step; the stiff solve would be a no-op).
         active_per_cell = cell_active.reshape(number_of_cells)
+        if count_unfinished:
+            unfinished_per_cell = unfinished_per_cell & active_per_cell
         unreacted = jnp.concatenate(
             [species_per_cell, temperature_per_cell[:, None]], axis=1
         )[:, : reacted_per_cell.shape[1]]
@@ -1036,6 +1078,10 @@ def update_chemistry(
             species_per_cell,
             temperature_per_cell,
         )
+    if count_unfinished and unfinished_per_cell is None:
+        # the Kvaerno5 paths without the gate returned (states, finished)
+        reacted_per_cell, finished = reacted_per_cell
+        unfinished_per_cell = ~finished
 
     # -------------------------------------------------------------
     # =============== ↑ React every cell (vmapped) ↑ ==============
@@ -1135,5 +1181,7 @@ def update_chemistry(
     # =============== ↑ Cross back and write the state ↑ ==========
     # -------------------------------------------------------------
 
+    if count_unfinished:
+        return primitive_state, jnp.sum(unfinished_per_cell, dtype=jnp.int32)
     return primitive_state
 

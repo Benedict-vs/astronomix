@@ -1190,6 +1190,10 @@ if KI02 and "CGOLS_IC_TAG" not in os.environ:
 #   CGOLS_CHEM_FIRST_STEP  first trial step of the kernel as a fraction of the
 #                          hydro step, default 1 (quiet halo cells, nine in
 #                          ten, then take one solver step instead of four)
+#   CGOLS_CHEM_COUNT_UNFINISHED  report cells whose reaction did not reach the
+#                          end of the step (default 1): a line "[chemistry] N
+#                          cells did not reach the end of their reaction step"
+#                          for every such call; the results are the same
 #   CGOLS_CHEM_COOLING_COURANT  largest fractional temperature change per
 #                          reaction; 0 (default) = no limit
 #   CGOLS_CHEM_DISK_T_OVER_MU   thermal support of the disk IC as T / mu [K].
@@ -1218,6 +1222,7 @@ CHEM_ELEMENTS = os.environ.get("CGOLS_CHEM_ELEMENTS", "uniform")
 if CHEM_ELEMENTS not in ("uniform", "source", "cell"):
     raise ValueError(f"CGOLS_CHEM_ELEMENTS must be 'uniform', 'source' or 'cell', not {CHEM_ELEMENTS!r}")
 CHEM_FIRST_STEP = float(os.environ.get("CGOLS_CHEM_FIRST_STEP", "1"))
+CHEM_COUNT_UNFINISHED = os.environ.get("CGOLS_CHEM_COUNT_UNFINISHED", "1") == "1"
 CHEM_COOLING_COURANT = float(os.environ.get("CGOLS_CHEM_COOLING_COURANT", "0"))
 CHEM_DISK_T_OVER_MU = float(os.environ.get("CGOLS_CHEM_DISK_T_OVER_MU", "6000"))
 if CHEMISTRY:
@@ -1630,6 +1635,7 @@ def chemistry_setup():
             }[FUV_ATTENUATION],
             radiation_disk_source=FUV_DISK,
             elements=CHEM_ELEMENTS,
+            count_unfinished_cells=CHEM_COUNT_UNFINISHED,
         )
         if CHEM_FUV:
             # The sources of model B's FUV field, with the dust opacity per

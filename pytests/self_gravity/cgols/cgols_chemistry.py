@@ -130,6 +130,7 @@ def build_chemistry(
     radiation_attenuation=0,
     radiation_disk_source=False,
     elements="uniform",
+    count_unfinished_cells=False,
 ):
     """The chemistry of a CGOLS run in the code units of ``cgols.py``.
 
@@ -182,6 +183,12 @@ def build_chemistry(
         radiation_attenuation: The attenuation of the point source, one of the
             ``FUV_ATTENUATION_*`` modes of the cooling module.
         radiation_disk_source: Add the field of the disk's own star formation.
+        elements: How the element content is kept: ``"uniform"`` (default),
+            ``"source"`` or ``"cell"`` (see below in the code).
+        count_unfinished_cells: Count the cells whose reaction did not reach the
+            end of its step (``ChemistryConfig.count_unfinished_cells``):
+            ``update_chemistry`` then returns ``(state, unfinished)`` and a run
+            prints a line for every call that left cells unfinished.
 
     **The Lyman-Werner flux.** KROME's ``react_galaxy_ism`` files dissociate H2
     with ``H2_solomonLW(myflux_eV)``, where ``myflux_eV`` is a constant of the
@@ -268,6 +275,9 @@ def build_chemistry(
         radiation_field_per_cell=bool(radiation_field_per_cell),
         radiation_attenuation=int(radiation_attenuation),
         radiation_disk_source=bool(radiation_disk_source),
+        # update_chemistry then returns (state, unfinished) and a run prints a line for a reaction call that left
+        # cells unfinished (ChemistryConfig.count_unfinished_cells)
+        count_unfinished_cells=bool(count_unfinished_cells),
     )
 
     missing = [

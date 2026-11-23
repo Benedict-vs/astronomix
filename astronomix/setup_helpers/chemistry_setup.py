@@ -464,6 +464,7 @@ def equilibrium_abundances(
     # weight (so that the pressure below gives exactly ``temperature_kelvin``).
     isothermal = chemistry_config._replace(
         thermochemistry=False,
+        count_unfinished_cells=False,
         solver=KVAERNO5,
         stiff_core_solver="diffrax",
         stiff_core_fn=None,
