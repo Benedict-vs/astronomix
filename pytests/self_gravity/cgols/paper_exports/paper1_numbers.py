@@ -463,6 +463,7 @@ def numbers():
     yield from numbers_v7_sensitivity()
     yield from numbers_v8()
     yield from numbers_v10()
+    yield from numbers_v12()
 
 
 # --------------------------------------------------------------------------- numbers, v5 (asgard-papers #9, #3)
@@ -1522,6 +1523,134 @@ def figures():
     ]  # fmt: skip
     for key, path, script, caption, runs in entries:
         yield key, path, dict(caption_hint=caption, runs=runs, script=CGOLS / script)
+
+
+# --------------------------------------------------------------------------- numbers, v12 (asgard-papers #9, abundances)
+HALO_Z_KPC = 1.0
+METAL_SHARE_TEMPERATURES = (6.0, 6.3, 6.5, 6.7, 7.0)
+
+
+def sx_ratio_profile(cache, z0_kpc, key):
+    """sx_ratio for any stored north profile (e.g. the Lopez+20 one), geometric mean over SX_WINDOW."""
+    logs = []
+    for index in np.flatnonzero(window(cache["per_snapshot__time_myr"], SX_WINDOW)):
+        z = np.asarray(cache["per_snapshot__profile_z_kpc"][index])
+        profile = np.asarray(cache[key][index]) / ARCMIN2_PER_STERADIAN
+        logs.append(np.log(np.interp(z0_kpc, z, profile) / strickland_north_photons_per_arcmin2(z0_kpc)))
+    return float(np.exp(np.mean(logs)))
+
+
+def scale_height_profile(cache, key, time_myr=60.0, z_range=(0.5, 5.0)):
+    index = at_time(cache, time_myr)
+    z = np.asarray(cache["per_snapshot__profile_z_kpc"][index])
+    select = (z >= z_range[0]) & (z <= z_range[1])
+    return float(-1.0 / np.polyfit(z[select], np.log(np.asarray(cache[key][index])[select]), 1)[0])
+
+
+def photon_emissivity_tables():
+    """log T grid and the 0.3-1.0 keV absorbed photon emissivity (total, metals) for A09 and Lopez+20."""
+    from astronomix.analysis_helpers.emission import (
+        LOPEZ2020_M82_WIND_ABUNDANCES,
+        XRAY_TABLE_PATHS,
+        combined_log10_emissivity,
+        load_xray_emissivity_table,
+        metal_abundance_weights,
+    )
+
+    table = load_xray_emissivity_table(XRAY_TABLE_PATHS["0.3-1"], photons=True, absorbing_column_cm2=4e20)
+    log_t = table.log10_temperature_start + table.log10_temperature_step * np.arange(
+        len(table.log10_emissivity_hydrogen_helium))
+    out = {}
+    for name, abundances in (("A09", None), ("Lopez+20", LOPEZ2020_M82_WIND_ABUNDANCES)):
+        weights = metal_abundance_weights(table, abundances, reference="A09")
+        out[name] = (10 ** combined_log10_emissivity(table, weights),
+                     10 ** combined_log10_emissivity(table, weights, include_hydrogen_helium=False))  # fmt: skip
+    return log_t, out
+
+
+def halo_metal_share(tag, log_t, total, metals):
+    """Metal share of the 0.3-1 keV photon emission of the halo gas (|z| > 1 kpc) in the mid-plane slices of the
+    frames over SX_WINDOW (every second frame), weighted by n^2 epsilon(T); and the 10/50/90 % quantiles of log T
+    under that weight."""
+    num = den = 0.0
+    parts, frames = [], 0
+    for k, path in enumerate(sorted(frames_dir(tag).glob("frame_*.npz"))):
+        if k % 2:
+            continue
+        d = np.load(path)
+        if not window(np.array([float(d["time_myr"])]), SX_WINDOW)[0]:
+            continue
+        frames += 1
+        n = d["n_xz"].astype(np.float64)
+        z = (np.arange(n.shape[1]) + 0.5) / n.shape[1] * BOX_HEIGHT_KPC - BOX_HEIGHT_KPC / 2
+        halo = np.broadcast_to(np.abs(z)[None, :] > HALO_Z_KPC, n.shape)
+        lt = np.log10(np.clip(d["T_xz"].astype(np.float64), 1.0, None))[halo]
+        weight = n[halo] ** 2 * np.interp(lt, log_t, total)
+        num += float(np.sum(weight * np.interp(lt, log_t, metals / total)))
+        den += float(np.sum(weight))
+        parts.append((lt, weight))
+    lt = np.concatenate([a for a, _ in parts])
+    weight = np.concatenate([b for _, b in parts])
+    order = np.argsort(lt)
+    cumulative = np.cumsum(weight[order]) / weight.sum()
+    quantiles = [float(lt[order][np.searchsorted(cumulative, q)]) for q in (0.1, 0.5, 0.9)]
+    return num / den, quantiles, frames
+
+
+def numbers_v12():
+    """Yield (key, kwargs for export_number) for the abundance dependence of the X-ray comparison (#9)."""
+    photon = {t: emission(t, SX_SUFFIX) for t in ("A2048", "C1024")}
+    if any(cache is None for cache, _ in photon.values()):
+        print("skipped SXratioAbundanceChange/ScaleHeightAbundanceChange/SXmetalShareHalo: no photon caches")
+        return
+    a09, lopez = "per_snapshot__profile_xray_atomdb_xz_north", "per_snapshot__profile_xray_atomdb_lopez_xz_north"
+    changes = {}
+    for tag, key_suffix in (("A2048", "A"), ("C1024", "C")):
+        for z0, word in ((2.0, "two"), (5.0, "five")):
+            cache = photon[tag][0]
+            changes[f"SXratio{key_suffix}{word}Kpc" + ("TenTwentyFour" if key_suffix == "C" else "")] = sx_ratio_profile(cache, z0, lopez) / sx_ratio_profile(
+                cache, z0, a09) - 1.0
+    largest = max(changes.values(), key=abs)
+    sources = [photon[t][1] for t in photon]
+    text = ", ".join(f"{k} {100 * v:+.1f} %" for k, v in changes.items())
+    yield "SXratioAbundanceChange", dict(
+        value=100.0 * abs(largest), unit="percent", status="provisional", convergence=None,
+        description="Largest relative change of the four SXratio keys (A-2048 and C-1024, 2 and 5 kpc) when the "
+                    "Lopez et al. (2020) M82 wind abundances replace solar A09 (Z = 1), the same 0.3-1.0 keV absorbed "
+                    f"photon profiles and 50-70 Myr geometric means: {text} (all fainter).",
+        runs=["A-2048", "C-1024"], data=sources,
+    )  # fmt: skip
+    heights = {}
+    for tag, key in (("A2048", "ScaleHeightA"), ("C1024", "ScaleHeightCTenTwentyFour")):
+        cache = photon[tag][0]
+        heights[key] = (scale_height_profile(cache, a09), scale_height_profile(cache, lopez))
+    largest_h = max((h[1] / h[0] - 1.0 for h in heights.values()), key=abs)
+    yield "ScaleHeightAbundanceChange", dict(
+        value=100.0 * abs(largest_h), unit="percent", status="provisional", convergence=None,
+        description="Largest relative change of ScaleHeightA (A-2048) and ScaleHeightCTenTwentyFour (C-1024) when the "
+                    "Lopez et al. (2020) abundances replace A09, same fit (log S_X over 0.5-5 kpc, 60 Myr): "
+                    + ", ".join(f"{k} {h[0]:.3f} -> {h[1]:.3f} kpc ({100 * (h[1] / h[0] - 1):+.1f} %)"
+                                for k, h in heights.items()) + ".",
+        runs=["A-2048", "C-1024"], data=sources,
+    )  # fmt: skip
+    log_t, tables = photon_emissivity_tables()
+    total, metals = tables["A09"]
+    shares = {t: halo_metal_share(t, log_t, total, metals) for t in ("A2048", "C1024")}
+    share_text = "; ".join(
+        f"{name}: " + ", ".join(f"log T {t:g} {np.interp(t, log_t, m / tot):.2f}" for t in METAL_SHARE_TEMPERATURES)
+        for name, (tot, m) in tables.items())
+    a, c = shares["A2048"], shares["C1024"]
+    yield "SXmetalShareHalo", dict(
+        value=100.0 * a[0], unit="percent", status="provisional", convergence=None,
+        description="Share of the 0.3-1.0 keV absorbed photon emission (AtomDB, N_H = 4e20 cm^-2, A09, Z = 1) of the "
+                    "halo gas that comes from metals: mid-plane slices of the frames, |z| > 1 kpc, weighted by "
+                    f"n^2 epsilon(T), 50-70 Myr ({a[2]} frames), A-2048. The emission-weighted log T is "
+                    f"{a[1][1]:.2f} (10-90 %: {a[1][0]:.2f}-{a[1][2]:.2f}). C-1024: {100 * c[0]:.0f} %, log T "
+                    f"{c[1][1]:.2f} ({c[1][0]:.2f}-{c[1][2]:.2f}). In this band H and He give only continuum, so the "
+                    "metal part is the line-dominated part (it also holds the metals' small continuum), and S_X "
+                    f"scales about as (1 - f) + f Z. Metal share of the emissivity by temperature: {share_text}.",
+        runs=["A-2048", "C-1024"], data=[frames_dir("A2048"), frames_dir("C1024")],
+    )  # fmt: skip
 
 
 # --------------------------------------------------------------------------- software versions (asgard-papers #19)
