@@ -376,6 +376,20 @@ def checkpoint_snapshot(step_directory, step, table, settings, threads, ionisati
     return Snapshot(step, time_code * CODE_TIME_MYR, maps, cell_size_kpc, (nx, ny, nz))
 
 
+def chemistry_frames(frames_directory):
+    """Whether the frames are those of a chemistry run (CGOLS_CHEMISTRY=1: they carry ``n_H_xz``).
+
+    Their in-situ maps were made with the network's temperature, electrons and H+
+    (cgols_chemistry.emission_gas); the full states would need the same, which this
+    script does not do, so a chemistry run is read from its frames.
+    """
+    files = sorted(glob.glob(os.path.join(frames_directory, "frame_*.npz")))
+    if not files:
+        return False
+    with np.load(files[0]) as frame:
+        return "n_H_xz" in frame.files
+
+
 def frame_files(frames_directory):
     """Frame files carrying in-situ emission maps, sorted by time."""
     files = sorted(glob.glob(os.path.join(frames_directory, "frame_*.npz")))
@@ -570,7 +584,8 @@ def plot_maps(maps, metadata, tag, figure_directory):
         ("xray_cgols_xz", "X1: CGOLS I recipe\n" + r"$n^2\Lambda_{A4}$, $2.3$-$15.5$ MK"),
         ("xray_atomdb_xz", "X2: AtomDB 0.3-2 keV\n" + r"$n_e n_H\epsilon(T)$, " + _solar_label(metadata)),
     ]
-    ki02 = str(metadata.get("temperature_model", "cgols")) == "ki02gf12"
+    # the recombining hydrogen is n_HII where the ionisation is known (model B's table, a chemistry run's network)
+    ki02 = str(metadata.get("temperature_model", "cgols")) in ("ki02gf12", "chemistry")
     panels_halpha = [
         ("halpha_xz", r"H$\alpha$ (Eq. 3), $5\times10^3$-$5\times10^4$ K" + _halpha_mask_label(metadata)),
         ("emission_measure_xz", r"EM $\int n_e n_{HII}\,dl$, same window" if ki02 else r"EM $\int n_e n_H\,dl$, same window"),
@@ -611,7 +626,10 @@ def plot_maps(maps, metadata, tag, figure_directory):
             axis.set_title(title, fontsize=9)
             axis.set_xlabel("x [kpc]")
             axis.set_ylabel("z [kpc]")
-        model_note = "\nKI02+GF12 temperature and CIE ionisation" if ki02 else ""
+        model_note = {
+            "ki02gf12": "\nKI02+GF12 temperature and CIE ionisation",
+            "chemistry": "\nthe network's temperature, electrons and H+ (chemistry run)",
+        }.get(str(metadata.get("temperature_model", "cgols")), "")
         figure.suptitle(f"{tag.lstrip('_')}: edge-on (LOS along y), t = {time_myr:.2f} Myr{model_note}")
         figure.tight_layout()
         out = os.path.join(figure_directory, f"{tag.lstrip('_')}_{suffix}.png")
@@ -762,8 +780,14 @@ def main():
         frames_directory = _resolve(ARGS.frames_dir or f"cgols_snapshots{tag}")
         steps = checkpoint_steps(checkpoint_directory)
         source = ARGS.source
+        chemistry = chemistry_frames(frames_directory)
+        if chemistry and source == "checkpoints":
+            raise SystemExit(
+                "a chemistry run: its states need the network's ionisation, which this script does not apply; "
+                "its frames carry maps made with it (--source frames)"
+            )
         if source == "auto":
-            source = "checkpoints" if steps else "frames"
+            source = "frames" if chemistry else ("checkpoints" if steps else "frames")
         if source == "checkpoints":
             available = steps
             located = {step: os.path.join(checkpoint_directory, str(step)) for step in steps}
@@ -787,8 +811,12 @@ def main():
                 "--temperature-model ki02gf12 needs the checkpoints: the in-situ frame maps "
                 "use the mu = 0.6 temperature"
             )
-        cached_model = str(metadata.get("temperature_model", "cgols")) if records else ARGS.temperature_model
-        if cached_model != ARGS.temperature_model:
+        if chemistry and ARGS.temperature_model != "cgols":
+            raise SystemExit("--temperature-model: a chemistry run carries its own temperature and ionisation")
+        # the model the maps were made with: a chemistry run's own gas, or the option
+        temperature_model = "chemistry" if chemistry else ARGS.temperature_model
+        cached_model = str(metadata.get("temperature_model", "cgols")) if records else temperature_model
+        if cached_model != temperature_model:
             raise SystemExit(
                 f"{cache_path} was made with --temperature-model {cached_model}; "
                 "use another --cache or delete it"
@@ -812,7 +840,7 @@ def main():
             xray_band=ARGS.xray_band,
             xray_photons_nh=np.nan if ARGS.xray_photons_nh is None else ARGS.xray_photons_nh,
             halpha_disk_mask_kpc=np.nan if ARGS.halpha_disk_mask_kpc is None else ARGS.halpha_disk_mask_kpc,
-            temperature_model=ARGS.temperature_model,
+            temperature_model=temperature_model,
         )
         for index in selected:
             if index in records:
