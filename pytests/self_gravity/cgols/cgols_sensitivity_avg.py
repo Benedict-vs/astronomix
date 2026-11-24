@@ -14,6 +14,9 @@ times as runtime parameters, so all segments share one compilation; the derivati
 Modes (CGOLS_SENS_MODE):
     jvp  forward-mode tangents d/dln Mdot and d/dln Edot of all maps   -> cgols_sensitivity_avg<TAG>.npz
     fd   the maps at (1 +- eps) for both directions and every eps         -> cgols_sensitivity_avg<TAG>_fd.npz
+    growth  the tangent of the state carried through 1 Myr segments from the wind onset to t_end (chained jvps),
+         logging max |d ln rho| and max |d ln P| per segment until it turns non-finite (one direction,
+         CGOLS_SENS_GROWTH_DIR = M or E)                                  -> cgols_sensitivity_growth<TAG>.npz
 
 Env knobs (besides the cgols ones, e.g. CGOLS_DIM, CGOLS_X64, CGOLS_IC_TAG):
     CGOLS_SENS_TMYR     end time [Myr] (default 30)
@@ -21,6 +24,8 @@ Env knobs (besides the cgols ones, e.g. CGOLS_DIM, CGOLS_X64, CGOLS_IC_TAG):
     CGOLS_SENS_AVG_N    number of samples K in the window (default 8)
     CGOLS_SENS_WENO_Z   1 = WENO-Z, the production scheme (default); 0 = Jiang-Shu as in cgols_sensitivity.py
     CGOLS_SENS_FD_EPS   comma-separated steps of the fd mode (default 0.01,0.002,0.001)
+    CGOLS_SENS_FROZEN   1 = weno_ad_frozen_weights: the tangent of the linear scheme each step used (default 0)
+    CGOLS_SOLVER        fd (default) or fv, as for cgols.py; the fv runs ignore the WENO knobs
 
     CGOLS_DIM=128 CGOLS_IC_TAG=_d128 CGOLS_X64=1 CGOLS_SENS_MODE=jvp python cgols_sensitivity_avg.py
 """
@@ -38,6 +43,7 @@ import jax.numpy as jnp
 import numpy as np
 from astropy import units as u
 from cgols import (
+    SOLVER,
     _data_study,
     _snapshot_grid,
     code_length,
@@ -64,8 +70,12 @@ AVG_N = int(os.environ.get("CGOLS_SENS_AVG_N", "8"))
 WENO_Z = os.environ.get("CGOLS_SENS_WENO_Z", "1") == "1"
 MODE = os.environ.get("CGOLS_SENS_MODE", "jvp")
 FD_EPS = tuple(float(e) for e in os.environ.get("CGOLS_SENS_FD_EPS", "0.01,0.002,0.001").split(","))
+FROZEN = os.environ.get("CGOLS_SENS_FROZEN", "0") == "1"
+GROWTH_DIR = os.environ.get("CGOLS_SENS_GROWTH_DIR", "E")
+WIND_ONSET_MYR = 5.0
 RES = int(os.environ["CGOLS_DIM"])
-TAG = (f"_d{RES}_t{T_END_MYR:g}myr_w{AVG_MYR:g}n{AVG_N}" + ("_wenoz" if WENO_Z else "_wenojs")
+SCHEME = ("_wenoz" if WENO_Z else "_wenojs") if SOLVER == "fd" else "_fv"
+TAG = (f"_d{RES}_t{T_END_MYR:g}myr_w{AVG_MYR:g}n{AVG_N}" + SCHEME + ("_frozen" if FROZEN else "")
        + ("_x64" if os.environ.get("CGOLS_X64", "0") == "1" else ""))  # fmt: skip
 XRAY_BAND, XRAY_NH_CM2, XRAY_METALLICITY = "0.3-1", 4e20, 1.0  # as cgols_sensitivity.py
 
@@ -78,7 +88,7 @@ def build():
     initial_state, config, params, rv = load_initial_conditions()
     config = config._replace(
         donate_state=False, progress_bar=False, monitor_diagnostics=False, activate_snapshot_callback=False,
-        memory_analysis=False, snapshot_storage_mode=ON_DEVICE, weno_z=WENO_Z,
+        memory_analysis=False, snapshot_storage_mode=ON_DEVICE, weno_z=WENO_Z, weno_ad_frozen_weights=FROZEN,
     )  # fmt: skip
     myr = (1 * u.Myr).to(code_units.code_time).value
     times = [T_END_MYR - AVG_MYR + k * AVG_MYR / AVG_N for k in range(AVG_N + 1)]  # times[0] = window start
@@ -110,14 +120,22 @@ def build():
         out.update({f"{k}_inst": v for k, v in m.items()})
         return out
 
-    return f, config, times
+    def segment(state, theta, t0_myr, t1_myr):
+        """The state at t1 from the state at t0, for the loading multipliers theta (growth mode)."""
+        wind = base._replace(schedule_mass_rates=base.schedule_mass_rates * theta[0],
+                             schedule_energy_rates=base.schedule_energy_rates * theta[1])  # fmt: skip
+        p = params._replace(cgols_wind_params=wind, t_start=t0_myr * myr, t_end=t1_myr * myr)
+        return time_integration(state, config, p, rv)
+
+    return f, config, times, segment, initial_state, rv
 
 
 def main():
-    f, config, times = build()
+    f, config, times, segment, initial_state, rv = build()
     x, _y, z, extent_xz, _ = _snapshot_grid(config)
     grid = {"x": np.asarray(x), "z": np.asarray(z), "extent_xz": np.asarray(extent_xz),
-            "sample_times_myr": np.asarray(times[1:]), "t_end_myr": T_END_MYR, "weno_z": WENO_Z}  # fmt: skip
+            "sample_times_myr": np.asarray(times[1:]), "t_end_myr": T_END_MYR, "weno_z": WENO_Z,
+            "frozen_weights": FROZEN, "solver": SOLVER}  # fmt: skip
     theta0 = jnp.array([1.0, 1.0])
     out, start = {}, time.perf_counter()
     if MODE == "jvp":
@@ -137,6 +155,29 @@ def main():
                     out.update({f"fd__{k}__{label}__{word}_{eps:g}": np.asarray(v) for k, v in maps_.items()})
                 print(f"[fd {label} eps {eps:g}] {time.perf_counter() - start:.0f} s", flush=True)
         path = _data_study(f"cgols_sensitivity_avg{TAG}_fd.npz")
+    elif MODE == "growth":
+        direction = jnp.array([1.0, 0.0]) if GROWTH_DIR == "M" else jnp.array([0.0, 1.0])
+        state = segment(jnp.asarray(initial_state), theta0, 0.0, WIND_ONSET_MYR)  # no wind yet: zero tangent
+        tangent = jnp.zeros_like(state)
+        edges = np.arange(WIND_ONSET_MYR, T_END_MYR + 1e-9, 1.0)
+        log = {key: [] for key in ("t_myr", "max_dlnrho", "rms_dlnrho", "max_dlnp", "rms_dlnp", "finite")}
+        for t0, t1 in itertools.pairwise(edges):
+            state, tangent = jax.jvp(lambda s_, th, a=t0, b=t1: segment(s_, th, a, b), (state, theta0), (tangent, direction))
+            rho, p = state[rv.density_index], state[rv.pressure_index]
+            d_rho = np.asarray(tangent[rv.density_index] / rho)
+            d_p = np.asarray(tangent[rv.pressure_index] / p)
+            finite = bool(np.isfinite(d_rho).all() and np.isfinite(d_p).all())
+            row = (t1, np.nanmax(np.abs(d_rho)), np.sqrt(np.nanmean(d_rho**2)), np.nanmax(np.abs(d_p)),
+                   np.sqrt(np.nanmean(d_p**2)), finite)  # fmt: skip
+            for key, value in zip(log, row):
+                log[key].append(value)
+            print(f"[growth {GROWTH_DIR}] t = {t1:g} Myr: max|dln rho| {row[1]:.3e}, rms {row[2]:.3e}, "
+                  f"max|dln P| {row[3]:.3e}, rms {row[4]:.3e}, finite {finite} ({time.perf_counter() - start:.0f} s)",
+                  flush=True)  # fmt: skip
+            if not finite:
+                break
+        out = {key: np.asarray(v) for key, v in log.items()}
+        path = _data_study(f"cgols_sensitivity_growth{TAG}_d{GROWTH_DIR}.npz")
     else:
         raise SystemExit(f"unknown CGOLS_SENS_MODE {MODE!r}")
     np.savez(path, **out, **grid)

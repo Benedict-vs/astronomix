@@ -180,8 +180,11 @@ def build_pipeline():
         # driver (host-side segmented loop) - not traceable under jvp, so force
         # the in-memory path here.
         snapshot_storage_mode=ON_DEVICE,
-        # WENO-Z is the cgols default but has no jvp/vjp path (the Pallas
-        # adjoints use Jiang-Shu weights).
+        # Jiang-Shu weights, although production uses WENO-Z: WENO-Z does have
+        # a tangent (native and Pallas), but its exact derivative is badly
+        # conditioned and turns non-finite in the developed wind (all-NaN by
+        # 30 Myr at 128^3 float64; asgard-papers #16). See
+        # cgols_sensitivity_avg.py for WENO-Z with frozen weights.
         weno_z=False,
     )
 
