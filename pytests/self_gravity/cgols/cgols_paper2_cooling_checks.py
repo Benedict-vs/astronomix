@@ -509,13 +509,13 @@ def main():
         for key, r in RESULTS.items():
             export_number("paper2", key, r["value"], unit=r["unit"], status="provisional",
                           description=r["description"] + " (cgols_paper2_cooling_checks.py; no simulation)",
-                          runs=[], digits=r["digits"], data=out)
-        export_figure("paper2", "cooling_curves_compared", fig_curves, runs=[],
+                          runs=["none: cooling tables only"], digits=r["digits"], data=out)
+        export_figure("paper2", "cooling_curves_compared", fig_curves, runs=["none: cooling tables only"],
                       caption_hint="CIE cooling per n_H^2: this work (KI02 + GF12, A09) against the GF12 "
                                    "element-CIE rebuild, Gnat & Sternberg 2007, Sutherland & Dopita 1993, "
                                    "the original Schure et al. 2009 curve and the CGOLS I fit; lower panel "
                                    "ratios to this work, grey band +-0.1 dex, shaded the warm-wind range")
-        export_figure("paper2", "heating_over_cooling", fig_heat, runs=[],
+        export_figure("paper2", "heating_over_cooling", fig_heat, runs=["none: cooling tables only"],
                       caption_hint="Photoelectric heating over cooling in the model-B prescription for the "
                                    "background-free solar-neighbourhood field and the unattenuated starburst "
                                    "at 1 kpc, three densities; shaded the warm-wind range")
