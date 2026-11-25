@@ -446,7 +446,7 @@ def figure_curves(model, gs07, sd93, schure, gf12):
         a.axvspan(np.log10(3e4), np.log10(5e5), color="C9", alpha=0.08, zorder=0)
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     path = FIG_DIR / "paper2_cooling_curves_compared.pdf"
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path, bbox_inches="tight", metadata={"CreationDate": None, "ModDate": None})
     plt.close(fig)
     return path
 
@@ -469,7 +469,7 @@ def figure_heating(model, j_1kpc):
     ax.set_ylabel(r"$\log\,n_\mathrm{H}\Gamma / n_\mathrm{H}^2\Lambda$")
     ax.legend(fontsize=5.5, frameon=False, ncol=2)
     path = FIG_DIR / "paper2_heating_over_cooling.pdf"
-    fig.savefig(path, bbox_inches="tight")
+    fig.savefig(path, bbox_inches="tight", metadata={"CreationDate": None, "ModDate": None})
     plt.close(fig)
     return path
 
