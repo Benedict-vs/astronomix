@@ -1,0 +1,473 @@
+paper: paper2
+generated: '2026-11-25T10:29:20+00:00'
+astronomix_commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+numbers:
+- key: CGOLSFitFreeFreeAnalyticDex
+  value: 0.025433995753239458
+  unit: dex
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: '|log difference| between the CGOLS fit and analytic free-free per n_H^2 at 1e9 K (A09,
+    g_ff = 1.2) (cgols_paper2_cooling_checks.py; no simulation)'
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: CGOLSFitFreeFreeDex
+  value: 0.019999999999999574
+  unit: dex
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest |log difference| between the CGOLS I Eq. A4 fit and SD93 lambda_net per n_H^2 at
+    10^8 and 10^8.5 K (free-free regime) (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: CGOLSFitOverOursPeak
+  value: 1.0697935011879556
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: CGOLS I Eq. A4 fit over our curve at 10^5.25 K (shapes only, both read per n_H^2) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: CoolShareCarbonPeak
+  value: 42.39426612775351
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Share of carbon in the CIE cooling at 1e5 K (GF12, A09) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: CoolShareOxygenHigh
+  value: 67.45230941893402
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Share of oxygen in the CIE cooling at 10^5.25 K (GF12, A09) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: CoolShareOxygenPeak
+  value: 26.312192961310565
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Share of oxygen in the CIE cooling at 1e5 K (GF12, A09) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: GSMatchedMaxDev
+  value: 8.460227376206397
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest deviation of Gnat & Sternberg (2007) from GF12 rebuilt with the same abundances,
+    10^4.5-10^6 K (Cloudy 06.02 against 08.00) (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: GSOverOursMaxDev
+  value: 35.76515647041405
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest deviation of Gnat & Sternberg (2007, Z = 1, per n_e n_H times x_e) from our curve,
+    10^4.2-10^6 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: HeatFactorThreeE
+  value: 0.003246321223377757
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Heating factor 1 - x_HII(CIE) at 3e4 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: HeatOverCoolWarmMax
+  value: 3.670877996884374
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest photoelectric heating over cooling in the code for 3e4-5e5 K gas at n_H = 1e-4
+    cm^-3 in the unattenuated starburst field at 1 kpc (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: HeatSafeTemperature
+  value: 43944.014395806444
+  unit: K
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Temperature above which the code's photoelectric heating stays below 1 % of cooling for
+    n_H >= 1e-3 cm^-3 in the unattenuated starburst field at 1 kpc (cgols_paper2_cooling_checks.py; no
+    simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: JointExcess
+  value: 1.3256426002564392
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Blended curve over GF12 at 10^4.2 K (geometric sigmoid, 0.05 dex) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: JointJump
+  value: 1.7573283036146405
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: KI02 over GF12 at 10^4.2 K (the step a hard switch would make) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: KernelNormDeviation
+  value: 0.03200350668879359
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest deviation of the cooling operator's de/dt from n_H^2 Lambda(T), n_H = rho/(1.4271
+    m_H), 10^4.5-10^8 K, production composition (X = 0.76, Z = 0.02) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: MuHAZeroNine
+  value: 1.3560492874475278
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: rho/(n_H m_H) for Asplund et al. (2009) photospheric abundances (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: MuIonised
+  value: 0.6197722653514308
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Mean molecular weight of fully ionised gas in the model-B tables, 1.4271/(1.1 + x_e) at
+    1e8 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: MuNeutral
+  value: 1.2949847128902758
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Mean molecular weight of neutral gas (10^3.5 K) in the model-B tables (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: NHsqOffsetAZeroNine
+  value: 9.709483495849957
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: How much lower n_H^2 Lambda is with mu_H = 1.4271 than with the A09 photospheric mu_H,
+    at fixed rho (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: OldNewRateMax
+  value: 8.41831494062684
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest old/new volumetric cooling rate at fixed rho, T, 10^4.5-10^6 K (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: OldNewRateMin
+  value: 3.582541452812698
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Smallest old/new volumetric cooling rate at fixed rho, T, 10^4.5-10^6 K (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: OldNormFactor
+  value: 5.663592792031865
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: '(n/n_H)^2 with n = rho/(0.6 m_p), n_H = rho/(1.4271 m_H): factor by which n^2 Lambda over-cools
+    a curve tabulated per n_H^2 (cgols_paper2_cooling_checks.py; no simulation)'
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: OldNormFactorNeNH
+  value: 4.709378603135611
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: The same for a curve tabulated per n_e n_H (fully ionised) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: OldNormFactorNeNt
+  value: 4.281253275577828
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: The same for a curve tabulated per n_e n_t (fully ionised) (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+- key: PerNsqOffsetDex
+  value: 0.7530920203647954
+  unit: dex
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Offset in log Lambda between per n_H^2 and per n^2 readings of a curve, n = rho/(0.6 m_p),
+    n_H = rho/(1.4271 m_H) (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: SDOverOursPeak
+  value: 2.486898930165396
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Sutherland & Dopita (1993) solar CIE lambda_net (per n_H^2) over our curve at 1e5 K (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: SDOverOursPeakMax
+  value: 2.9507990148527647
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest SD93/ours ratio, 10^4.5-10^5.5 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: SchureOverOursPeak
+  value: 3.8384698659013012
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Schure et al. (2009) Lambda_hd (per n_H^2) over our curve at 1e5 K (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: StarburstFieldOneKpc
+  value: 636.6197723675814
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: J/J_0 of the unattenuated starburst point source at 1 kpc, SFR 20 Msun/yr, Sigma_SFR,0
+    = 2.5e-3 Msun/yr/kpc^2 (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: TableOverGFTwelveMax
+  value: 8.253736558412307
+  unit: percent
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Largest deviation of the model-B table from the GF12 element-CIE rebuild, 10^4.2-10^7.5
+    K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 2
+- key: TableOverGFTwelvePeak
+  value: 1.082537365584123
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Model-B table (GS07 ion fractions x GF12 ion-by-ion rates, A09) over GF12's own element
+    CIE columns with A09 abundances, at 1e5 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+  digits: 3
+figures:
+- key: cooling_curves_compared
+  path: pytests/self_gravity/cgols/figures/cgols/cooling/paper2_cooling_curves_compared.pdf
+  caption_hint: 'CIE cooling per n_H^2: this work (KI02 + GF12, A09) against the GF12 element-CIE rebuild,
+    Gnat & Sternberg 2007, Sutherland & Dopita 1993, the original Schure et al. 2009 curve and the CGOLS
+    I fit; lower panel ratios to this work, grey band +-0.1 dex, shaded the warm-wind range'
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  status: draft
+- key: heating_over_cooling
+  path: pytests/self_gravity/cgols/figures/cgols/cooling/paper2_heating_over_cooling.pdf
+  caption_hint: Photoelectric heating over cooling in the model-B prescription for the background-free
+    solar-neighbourhood field and the unattenuated starburst at 1 kpc, three densities; shaded the warm-wind
+    range
+  runs: []
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 3e0b9e694f3e4004ebadfb6f8dcdfed80c54863c
+  status: draft
