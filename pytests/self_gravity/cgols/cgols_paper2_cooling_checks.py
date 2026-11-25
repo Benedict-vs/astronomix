@@ -92,6 +92,10 @@ A09 = dict(He=10.93, Li=1.05, Be=1.38, B=2.70, C=8.43, N=7.83, O=8.69, F=4.56, N
            Ca=6.34, Sc=3.15, Ti=4.95, V=3.93, Cr=5.64, Mn=5.43, Fe=7.50, Co=4.99, Ni=6.22,
            Cu=4.19, Zn=4.56)
 A09_PROTOSOLAR_HE = 10.98
+# Anders & Grevesse (1989), the set of Sutherland & Dopita (1993) and Schure et al. (2009).
+AG89 = dict(He=10.99, Li=1.16, Be=1.15, B=2.60, C=8.56, N=8.05, O=8.93, F=4.56, Ne=8.09, Na=6.33,
+            Mg=7.58, Al=6.47, Si=7.55, P=5.45, S=7.21, Cl=5.50, Ar=6.56, K=5.12, Ca=6.36, Sc=3.10,
+            Ti=4.99, V=4.00, Cr=5.67, Mn=5.39, Fe=7.67, Co=4.92, Ni=6.25, Cu=4.21, Zn=4.60)
 # Gnat & Sternberg (2007) Table 1: Asplund et al. (2005) with Ne from Drake & Testa (2005), He 1/12,
 # and only these ten elements.
 GS07_ABUNDANCES = dict(He=10.92, C=8.39, N=7.78, O=8.66, Ne=8.29, Mg=7.53, Si=7.51, S=7.14, Fe=7.45)
@@ -275,6 +279,25 @@ def check_references(model, gs07, sd93, schure):
     record("GSOverOursMaxDev", np.max(np.abs(gs_ratio[LOG_T_GRID <= 6.0] - 1)) * 100, "percent",
            "Largest deviation of Gnat & Sternberg (2007, Z = 1, per n_e n_H times x_e) from our curve, "
            "10^4.2-10^6 K", 2)
+    # Abundance-matched comparison with the older curves: GF12 rebuilt with AG89.
+    def rebuild(ab):
+        return xe_gs * (gf12_element(GF12, "H", LOG_T_GRID) + sum(
+            10 ** (a - 12) * gf12_element(GF12, e, LOG_T_GRID) for e, a in ab.items()))
+    gf12_ag, gf12_a09 = rebuild(AG89), rebuild(A09)
+    abund = gf12_ag / gf12_a09
+    sd_ag = curves["SD93"] / gf12_ag
+    sch_ag = curves["Schure09"] / gf12_ag
+    print("  AG89/A09 (GF12): " + "  ".join(f"{a:.2f}:{b:.2f}" for a, b in zip(LOG_T_GRID, abund)))
+    print("  SD93 / GF12(AG89): " + "  ".join(f"{a:.2f}:{b:.2f}" for a, b in zip(LOG_T_GRID, sd_ag)))
+    print("  Schure / GF12(AG89): " + "  ".join(f"{a:.2f}:{b:.2f}" for a, b in zip(LOG_T_GRID, sch_ag)))
+    record("AbundAGOverAZeroNineMin", abund[peak].min(), "", "GF12 cooling with Anders & Grevesse (1989) over "
+           "Asplund et al. (2009) abundances, smallest ratio over 10^4.5-10^5.5 K", 2)
+    record("AbundAGOverAZeroNineMax", abund[peak].max(), "", "The same, largest ratio over 10^4.5-10^5.5 K", 2)
+    record("SDOverGFMatchedMin", sd_ag[peak].min(), "", "SD93 over GF12 at the same (AG89) abundances, smallest "
+           "ratio over 10^4.5-10^5.5 K", 2)
+    record("SDOverGFMatchedMax", sd_ag[peak].max(), "", "The same, largest ratio over 10^4.5-10^5.5 K", 2)
+    record("SchureOverGFMatchedMax", sch_ag[peak].max(), "", "Original Schure et al. (2009) over GF12 at AG89 "
+           "abundances, largest ratio over 10^4.5-10^5.5 K", 2)
     record("CGOLSFitOverOursPeak", curves["CGOLS fit"][i5 + 1] / ours[i5 + 1], "",
            "CGOLS I Eq. A4 fit over our curve at 10^5.25 K (shapes only, both read per n_H^2)", 2)
     return curves
