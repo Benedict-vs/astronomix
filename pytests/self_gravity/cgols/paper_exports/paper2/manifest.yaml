@@ -1,7 +1,38 @@
 paper: paper2
-generated: '2026-11-25T10:30:14+00:00'
-astronomix_commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+generated: '2026-11-25T10:32:29+00:00'
+astronomix_commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
 numbers:
+- key: AbundAGOverAZeroNineMax
+  value: 1.6304972271482288
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: The same, largest ratio over 10^4.5-10^5.5 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs:
+  - 'none: cooling tables only'
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
+  digits: 2
+- key: AbundAGOverAZeroNineMin
+  value: 1.2542123278733053
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: GF12 cooling with Anders & Grevesse (1989) over Asplund et al. (2009) abundances, smallest
+    ratio over 10^4.5-10^5.5 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs:
+  - 'none: cooling tables only'
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
+  digits: 2
 - key: CGOLSFitFreeFreeAnalyticDex
   value: 0.025433995753239458
   unit: dex
@@ -13,10 +44,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: CGOLSFitFreeFreeDex
   value: 0.019999999999999574
@@ -29,10 +60,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: CGOLSFitOverOursPeak
   value: 1.0697935011879556
@@ -45,10 +76,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: CoolShareCarbonPeak
   value: 42.39426612775351
@@ -61,10 +92,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: CoolShareOxygenHigh
   value: 67.45230941893402
@@ -77,10 +108,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: CoolShareOxygenPeak
   value: 26.312192961310565
@@ -93,10 +124,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: GSMatchedMaxDev
   value: 8.460227376206397
@@ -109,10 +140,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: GSOverOursMaxDev
   value: 35.76515647041405
@@ -125,10 +156,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: HeatFactorThreeE
   value: 0.003246321223377757
@@ -140,10 +171,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: HeatOverCoolWarmMax
   value: 3.670877996884374
@@ -156,10 +187,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: HeatSafeTemperature
   value: 43944.014395806444
@@ -173,10 +204,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: JointExcess
   value: 1.3256426002564392
@@ -189,10 +220,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: JointJump
   value: 1.7573283036146405
@@ -205,10 +236,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: KernelNormDeviation
   value: 0.03200350668879359
@@ -222,10 +253,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: MuHAZeroNine
   value: 1.3560492874475278
@@ -238,10 +269,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: MuIonised
   value: 0.6197722653514308
@@ -254,10 +285,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: MuNeutral
   value: 1.2949847128902758
@@ -270,10 +301,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: NHsqOffsetAZeroNine
   value: 9.709483495849957
@@ -286,10 +317,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: OldNewRateMax
   value: 8.41831494062684
@@ -302,10 +333,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: OldNewRateMin
   value: 3.582541452812698
@@ -318,10 +349,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: OldNormFactor
   value: 5.663592792031865
@@ -334,10 +365,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: OldNormFactorNeNH
   value: 4.709378603135611
@@ -350,10 +381,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: OldNormFactorNeNt
   value: 4.281253275577828
@@ -366,10 +397,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 - key: PerNsqOffsetDex
   value: 0.7530920203647954
@@ -382,10 +413,41 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
+  digits: 2
+- key: SDOverGFMatchedMax
+  value: 2.3305592029509
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: The same, largest ratio over 10^4.5-10^5.5 K (cgols_paper2_cooling_checks.py; no simulation)
+  runs:
+  - 'none: cooling tables only'
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
+  digits: 2
+- key: SDOverGFMatchedMin
+  value: 1.2320287646115984
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: SD93 over GF12 at the same (AG89) abundances, smallest ratio over 10^4.5-10^5.5 K (cgols_paper2_cooling_checks.py;
+    no simulation)
+  runs:
+  - 'none: cooling tables only'
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: SDOverOursPeak
   value: 2.486898930165396
@@ -398,10 +460,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: SDOverOursPeakMax
   value: 2.9507990148527647
@@ -413,10 +475,26 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
+  digits: 2
+- key: SchureOverGFMatchedMax
+  value: 3.8820411956495544
+  unit: ''
+  uncertainty: null
+  status: provisional
+  convergence: null
+  description: Original Schure et al. (2009) over GF12 at AG89 abundances, largest ratio over 10^4.5-10^5.5
+    K (cgols_paper2_cooling_checks.py; no simulation)
+  runs:
+  - 'none: cooling tables only'
+  script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
+  data:
+    path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: SchureOverOursPeak
   value: 3.8384698659013012
@@ -429,10 +507,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: StarburstFieldOneKpc
   value: 636.6197723675814
@@ -445,10 +523,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: TableOverGFTwelveMax
   value: 8.253736558412307
@@ -461,10 +539,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 2
 - key: TableOverGFTwelvePeak
   value: 1.082537365584123
@@ -477,10 +555,10 @@ numbers:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   data:
     path: mac-buck-3.local:/Users/buck/Documents/Nexus/Projects/astronomix/astronomix-paper2-checks/pytests/self_gravity/cgols/data/studies/paper2_cooling_checks.json
-    sha256: 036be6827913c9340881a9743a7ce0aa554aafaff5584201351307796a8263d4
+    sha256: 9ec404939ccd96a8b5b89c95a5c6aa440eb9712a065d8461177342a389dba344
   digits: 3
 figures:
 - key: cooling_curves_compared
@@ -491,7 +569,7 @@ figures:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   status: draft
 - key: heating_over_cooling
   path: pytests/self_gravity/cgols/figures/cgols/cooling/paper2_heating_over_cooling.pdf
@@ -501,5 +579,5 @@ figures:
   runs:
   - 'none: cooling tables only'
   script: pytests/self_gravity/cgols/cgols_paper2_cooling_checks.py
-  commit: 42d44f407296d8c49b7ca0a4bcd53cd5c9cf0acd
+  commit: 4d3af55b4c926abc365c083caa2f3a0b34ca6fe7
   status: draft
