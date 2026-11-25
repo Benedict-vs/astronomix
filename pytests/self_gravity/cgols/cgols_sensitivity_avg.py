@@ -86,6 +86,10 @@ KPC_CM = (1 * u.kpc).to(u.cm).value
 def build():
     """Differentiation-clean config and the map function f(theta) -> dict of averaged and final maps."""
     initial_state, config, params, rv = load_initial_conditions()
+    if initial_state.shape[0] > rv.num_vars:
+        # The saved ICs carry the FD dual-energy internal energy as an extra last variable; the FV scheme
+        # (no dual energy) has none. Dropping it keeps the FV runs on exactly the FD runs' initial state.
+        initial_state = initial_state[: rv.num_vars]
     config = config._replace(
         donate_state=False, progress_bar=False, monitor_diagnostics=False, activate_snapshot_callback=False,
         memory_analysis=False, snapshot_storage_mode=ON_DEVICE, weno_z=WENO_Z, weno_ad_frozen_weights=FROZEN,
